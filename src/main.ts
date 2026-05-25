@@ -3,6 +3,19 @@ import { buildGraph } from "./graph/index.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { logger } from "./utils/logger.ts";
 
+/** 去掉推理模型输出的 <think>...</think> 思考块 */
+function stripThinking(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+function extractReply(result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>): string {
+  const last = result.messages.at(-1);
+  const raw = typeof last?.content === "string"
+    ? last.content
+    : JSON.stringify(last?.content ?? "");
+  return stripThinking(raw) || "（无回复）";
+}
+
 // ---------------------------------------------------------------
 // Integrations
 // ---------------------------------------------------------------
@@ -27,10 +40,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                 const result = await graph.invoke({
                   messages: [new HumanMessage(textClean)],
                 });
-                const last = result.messages.at(-1);
-                return typeof last?.content === "string"
-                  ? last.content
-                  : JSON.stringify(last?.content ?? "");
+                return extractReply(result);
               } catch (err) {
                 logger.error("[slack:mention] error:", err);
                 return "❌ 处理出错，请稍后重试";
@@ -48,11 +58,8 @@ if (process.env.SLACK_BOT_TOKEN) {
                   { signal: controller.signal }
                 );
                 clearTimeout(timeout);
-                logger.info("[slack:dm] graph done, result:", JSON.stringify(result));
-                const last = result.messages.at(-1);
-                return typeof last?.content === "string"
-                  ? last.content
-                  : JSON.stringify(last?.content ?? "");
+                logger.info("[slack:dm] graph done");
+                return extractReply(result);
               } catch (err) {
                 logger.error("[slack:dm] error:", err);
                 return "❌ 处理出错，请稍后重试";

@@ -1,49 +1,57 @@
 import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
-import { z } from "zod";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { logger } from "../../utils/logger.ts";
 
 // ----------------------------------------------------------------
-// 路由决策 Schema
+// 可用子 Agent
 // ----------------------------------------------------------------
 
-const routeSchema = z.object({
-  next: z
-    .enum(["slack", "__end__"])
-    .describe("下一步路由：选一个子 Agent 处理，或 __end__ 直接结束"),
-  reasoning: z.string().describe("简短的路由理由"),
-});
-
-// 可用子 Agent 描述（路由时注入 prompt）
 const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
   slack: "处理所有与 Slack 相关的操作：发消息、查频道历史、搜索消息、获取用户信息等",
 };
+
+const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
+
+// ----------------------------------------------------------------
+// 路由：纯文本解析，兼容所有 OpenAI-compatible API
+// ----------------------------------------------------------------
+
+/**
+ * 从 LLM 的文本回复中提取路由决策。
+ * LLM 只需回复一个词（slack / __end__），不依赖 function calling。
+ */
+/**
+ * 去掉推理模型（如 MiniMax M2.7）输出的 <think>...</think> 思考块，
+ * 提取真正的回复文本。
+ */
+function stripThinking(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+function parseRoute(text: string): SubAgentName {
+  const clean = stripThinking(text).toLowerCase().trim();
+  for (const route of VALID_ROUTES) {
+    if (clean.includes(route.toLowerCase())) {
+      return route as SubAgentName;
+    }
+  }
+  return "__end__";
+}
 
 // ----------------------------------------------------------------
 // Supervisor 节点
 // ----------------------------------------------------------------
 
-/**
- * Supervisor 节点 — 主对话 Agent。
- *
- * 职责：
- * 1. 接收用户消息（或子 Agent 返回的结果）
- * 2. 决定路由到哪个子 Agent，或直接回复用户（__end__）
- * 3. 如果子 Agent 已完成（subAgentResult 非空），整合结果生成最终回复
- */
 export function buildSupervisorNode(llm: ChatOpenAI) {
-  // 绑定结构化输出，用于路由决策
-  const routerLLM = llm.withStructuredOutput(routeSchema, { name: "route" });
-
   return async function supervisorNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
     const { messages, subAgentResult } = state;
 
-    // ---- 场景 A：子 Agent 已完成，生成最终回复 ----
+    // ── 场景 A：子 Agent 已完成，整合结果生成最终回复 ──
     if (subAgentResult) {
-      logger.debug("[supervisor] composing final reply from sub-agent result");
+      logger.info("[supervisor] composing final reply from sub-agent result");
 
       const finalReply = await llm.invoke([
         new SystemMessage(
@@ -56,40 +64,41 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
       return {
         messages: [finalReply],
         next: "__end__",
-        subAgentResult: "", // 清空，避免下轮误判
+        subAgentResult: "",
       };
     }
 
-    // ---- 场景 B：路由决策 ----
-    console.log("[supervisor] state.messages:", JSON.stringify(state.messages));
+    // ── 场景 B：路由决策（纯文本，不用 function calling）──
     const agentList = Object.entries(SUB_AGENTS)
       .map(([name, desc]) => `- ${name}: ${desc}`)
       .join("\n");
 
-    logger.info("[supervisor] calling router LLM...");
-    console.log("[supervisor] ABOUT TO CALL routerLLM.invoke");
-    const routeResult = await routerLLM.invoke([
+    logger.info("[supervisor] routing...");
+
+    const routeReply = await llm.invoke([
       new SystemMessage(
-        `你是一个路由助手。根据用户最新的消息，决定由哪个子 Agent 来处理，或直接结束（__end__）。
+        `你是一个路由助手。根据用户最新的消息，从下列选项中选择一个，只回复该选项的名字，不要有其他文字：
 
-可用子 Agent：
 ${agentList}
+- __end__: 与以上无关，直接回复用户
 
-如果用户的请求与任何子 Agent 都无关，选择 __end__ 直接回复。`
+可选值：${VALID_ROUTES.join(" / ")}`
       ),
-      ...state.messages,
+      ...messages,
     ]);
-    console.log("[supervisor] routerLLM.invoke DONE");
 
-    logger.info(
-      `[supervisor] route → ${routeResult.next} (${routeResult.reasoning})`
-    );
+    const routeText = typeof routeReply.content === "string"
+      ? routeReply.content
+      : JSON.stringify(routeReply.content);
 
-    // 如果路由到 __end__，让 LLM 直接生成回复
-    if (routeResult.next === "__end__") {
+    const next = parseRoute(routeText);
+    logger.info(`[supervisor] route → ${next} (raw: "${routeText.trim()}")`);
+
+    // ── 场景 C：直接回复，不需要子 Agent ──
+    if (next === "__end__") {
       const directReply = await llm.invoke([
         new SystemMessage("你是一个有帮助的个人助手。请直接回答用户的问题。"),
-        ...state.messages,
+        ...messages,
       ]);
       return {
         messages: [directReply],
@@ -97,6 +106,6 @@ ${agentList}
       };
     }
 
-    return { next: routeResult.next };
+    return { next };
   };
 }

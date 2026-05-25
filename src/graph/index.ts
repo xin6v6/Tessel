@@ -51,6 +51,9 @@ export function buildGraph(params: {
       baseURL: params.baseURL ?? process.env.LLM_BASE_URL,
     },
     temperature: 0.3,
+    // 给每次 LLM 调用设置超时（毫秒），避免无限等待
+    timeout: Number(process.env.LLM_TIMEOUT_MS ?? 60000),
+    maxRetries: 1,
   });
 
   // 构建节点函数
