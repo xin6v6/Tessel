@@ -61,10 +61,13 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
     }
 
     // ---- 场景 B：路由决策 ----
+    console.log("[supervisor] state.messages:", JSON.stringify(state.messages));
     const agentList = Object.entries(SUB_AGENTS)
       .map(([name, desc]) => `- ${name}: ${desc}`)
       .join("\n");
 
+    logger.info("[supervisor] calling router LLM...");
+    console.log("[supervisor] ABOUT TO CALL routerLLM.invoke");
     const routeResult = await routerLLM.invoke([
       new SystemMessage(
         `你是一个路由助手。根据用户最新的消息，决定由哪个子 Agent 来处理，或直接结束（__end__）。
@@ -74,8 +77,9 @@ ${agentList}
 
 如果用户的请求与任何子 Agent 都无关，选择 __end__ 直接回复。`
       ),
-      ...messages,
+      ...state.messages,
     ]);
+    console.log("[supervisor] routerLLM.invoke DONE");
 
     logger.info(
       `[supervisor] route → ${routeResult.next} (${routeResult.reasoning})`
@@ -85,7 +89,7 @@ ${agentList}
     if (routeResult.next === "__end__") {
       const directReply = await llm.invoke([
         new SystemMessage("你是一个有帮助的个人助手。请直接回答用户的问题。"),
-        ...messages,
+        ...state.messages,
       ]);
       return {
         messages: [directReply],

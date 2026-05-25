@@ -38,6 +38,12 @@ export function buildGraph(params: {
   model?: string;
   toolRegistry: ToolRegistry;
 }) {
+  console.log("[buildGraph] params:", {
+    baseURL: params.baseURL,
+    apiKey: params.apiKey ? "***" + params.apiKey.slice(-4) : "empty",
+    model: params.model,
+  });
+
   const llm = new ChatOpenAI({
     model: params.model ?? process.env.LLM_MODEL ?? "gpt-4o",
     apiKey: params.apiKey ?? process.env.OPENAI_API_KEY ?? "",

@@ -68,6 +68,8 @@ export class SlackReceiver {
   private _registerHandlers() {
     // ---- 普通消息（排除 Bot 自己和子类型如 bot_message）----
     this.app.message(async ({ message, say }) => {
+      logger.debug(`[slack] raw message event: ${JSON.stringify(message)}`);
+
       // 过滤掉 bot 消息和无文本消息
       if (
         !("user" in message) ||
