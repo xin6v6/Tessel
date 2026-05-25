@@ -1,0 +1,19 @@
+name: Deploy to Mac Agent
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 测试运行
+        run: |
+          echo "恭喜你！终于连通了！"
+          echo "代码已经成功拉取到了 Mac 上。"
