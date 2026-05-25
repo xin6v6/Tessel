@@ -1,0 +1,30 @@
+{
+  "name": "synod",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.9.1",
+    "vitest": "^4.1.7"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@slack/bolt": "^4.7.2",
+    "@slack/socket-mode": "^2.0.7",
+    "@slack/web-api": "^7.16.0",
+    "openai": "^6.39.0",
+    "zod": "^4.4.3"
+  }
+}
