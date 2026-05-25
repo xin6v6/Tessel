@@ -36,6 +36,28 @@ if (process.env.SLACK_BOT_TOKEN) {
                 return "❌ 处理出错，请稍后重试";
               }
             },
+            onMessage: async ({ text }) => {
+              if (!graph) return "系统尚未就绪，请稍后再试。";
+              logger.info(`[slack:dm] "${text}"`);
+              try {
+                logger.info("[slack:dm] invoking graph with 120s timeout...");
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 120000);
+                const result = await graph.invoke(
+                  { messages: [new HumanMessage(text)] },
+                  { signal: controller.signal }
+                );
+                clearTimeout(timeout);
+                logger.info("[slack:dm] graph done, result:", JSON.stringify(result));
+                const last = result.messages.at(-1);
+                return typeof last?.content === "string"
+                  ? last.content
+                  : JSON.stringify(last?.content ?? "");
+              } catch (err) {
+                logger.error("[slack:dm] error:", err);
+                return "❌ 处理出错，请稍后重试";
+              }
+            },
           }
         : undefined,
     })
