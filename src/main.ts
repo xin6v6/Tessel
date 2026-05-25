@@ -1,18 +1,7 @@
-import { createProvider } from "./providers/index.ts";
-import { GeneralAgent } from "./agents/index.ts";
-import { Orchestrator } from "./orchestrator/index.ts";
+import { HumanMessage } from "@langchain/core/messages";
+import { buildGraph } from "./graph/index.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { logger } from "./utils/logger.ts";
-
-// ---------------------------------------------------------------
-// Provider & Orchestrator（先声明，后面 Slack handler 会引用）
-// ---------------------------------------------------------------
-
-const provider = createProvider(
-  (process.env.LLM_PROVIDER ?? "anthropic") as "anthropic" | "openai" | "openai-compatible"
-);
-
-const orchestrator = new Orchestrator(provider);
 
 // ---------------------------------------------------------------
 // Integrations
@@ -20,62 +9,64 @@ const orchestrator = new Orchestrator(provider);
 
 const integrations = new IntegrationRegistry();
 
+// graph 在 integrations.initialize() 之后才构建，所以先声明
+let graph: ReturnType<typeof buildGraph> | null = null;
+
 if (process.env.SLACK_BOT_TOKEN) {
   const socketMode = Boolean(process.env.SLACK_APP_TOKEN);
 
   integrations.add(
     new SlackIntegration({
       socketMode,
-      // 当 @mention Bot 时，把消息转给 Orchestrator 处理并回复
       eventHandler: socketMode
         ? {
-            onMention: async ({ textClean, channel, ts }) => {
+            onMention: async ({ textClean }) => {
+              if (!graph) return "系统尚未就绪，请稍后再试。";
               logger.info(`[slack:mention] "${textClean}"`);
               try {
-                const result = await orchestrator.handle({ userMessage: textClean });
-                return result.error
-                  ? `❌ ${result.error}`
-                  : result.output;
+                const result = await graph.invoke({
+                  messages: [new HumanMessage(textClean)],
+                });
+                const last = result.messages.at(-1);
+                return typeof last?.content === "string"
+                  ? last.content
+                  : JSON.stringify(last?.content ?? "");
               } catch (err) {
-                logger.error("[slack:mention] orchestrator error:", err);
+                logger.error("[slack:mention] error:", err);
                 return "❌ 处理出错，请稍后重试";
               }
             },
-            // 普通消息默认不自动回复（避免消息风暴）
-            // 如需响应，在此添加 onMessage 处理器
           }
         : undefined,
     })
   );
 }
 
-// Future: integrations.add(new NotionIntegration());
-//         integrations.add(new GmailIntegration());
-
 // ---------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------
 
 async function main() {
-  // 初始化所有集成，将工具注册到 ToolRegistry
+  // 1. 初始化集成层，获取工具注册表
   const toolRegistry = await integrations.initialize();
 
-  // 注册 Agent（注入工具注册表）
-  orchestrator.registerAgent(new GeneralAgent(provider, toolRegistry));
-  // TODO: 注册更多专项 Agent
+  // 2. 构建 LangGraph
+  graph = buildGraph({
+    baseURL: process.env.LLM_BASE_URL,
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.LLM_MODEL,
+    toolRegistry,
+  });
 
-  logger.info("Synod multi-agent assistant started");
-  logger.info(`Provider: ${provider.name}`);
+  logger.info("Synod started");
+  logger.info(`Model: ${process.env.LLM_MODEL ?? "gpt-4o"}`);
   logger.info(
     `Integrations: ${integrations.list().map((i) => i.id).join(", ") || "none"}`
   );
-  logger.info(
-    `Socket Mode: ${process.env.SLACK_APP_TOKEN ? "enabled" : "disabled"}`
-  );
-  logger.info(`Agents: ${orchestrator.listAgents().map((a) => a.name).join(", ")}`);
+  logger.info(`Socket Mode: ${process.env.SLACK_APP_TOKEN ? "enabled" : "disabled"}`);
 
   // ---------------------------------------------------------------
-  // REPL（可替换为 HTTP server / CLI 等）
+  // REPL
   // ---------------------------------------------------------------
 
   const stdin = process.stdin;
@@ -91,6 +82,7 @@ async function main() {
     for (const line of lines) {
       const userMessage = line.trim();
       if (!userMessage) continue;
+
       if (userMessage.toLowerCase() === "exit") {
         await integrations.destroy();
         logger.info("Goodbye!");
@@ -98,14 +90,17 @@ async function main() {
       }
 
       try {
-        const result = await orchestrator.handle({ userMessage });
-        if (result.error) {
-          logger.error("Agent error:", result.error);
-        } else {
-          console.log(`\n[${result.agentName}]: ${result.output}\n`);
-        }
+        const result = await graph!.invoke({
+          messages: [new HumanMessage(userMessage)],
+        });
+        const last = result.messages.at(-1);
+        const output =
+          typeof last?.content === "string"
+            ? last.content
+            : JSON.stringify(last?.content ?? "");
+        console.log(`\n${output}\n`);
       } catch (err) {
-        logger.error("Unexpected error:", err);
+        logger.error("Error:", err);
       }
 
       process.stdout.write("> ");
