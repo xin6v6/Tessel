@@ -1,8 +1,10 @@
 import { StateGraph, END, START } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
-import { GraphState, type SubAgentName } from "./state.ts";
+import { GraphState } from "./state.ts";
 import { buildSupervisorNode } from "./nodes/supervisor.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
+import { buildWebAgentNode } from "./nodes/web.ts";
+import { buildMcpAgentNode } from "./nodes/mcp.ts";
 import type { ToolRegistry } from "../tools/index.ts";
 
 export { GraphState } from "./state.ts";
@@ -19,18 +21,19 @@ export type { GraphStateType } from "./state.ts";
  *
  *   START
  *     │
- *   supervisor ──────────────────┐
- *     │                         │
- *   (next="slack")           (next="__end__")
- *     │                         │
- *   slack-agent               END
- *     │
- *   supervisor  ←── 子 Agent 完成，回到 supervisor 整合结果
+ *   supervisor ──── next="slack" ──→ slack-agent ──┐
+ *     │        ──── next="web"   ──→ web-agent   ──┤
+ *     │        ──── next="mcp"   ──→ mcp-agent   ──┤
+ *     │        ──── next="__end__" ─→ END          │
+ *     │                                            │
+ *     └────────────────────────────────────────────┘
+ *       (子 Agent 完成后回到 supervisor 整合结果)
  *
- * @param baseURL  OpenAI-compatible API base URL
- * @param apiKey   API key
- * @param model    模型名称
- * @param toolRegistry  集成层注册的工具
+ * 新增 Agent：
+ *   1. 在 state.ts SubAgentName 添加名称
+ *   2. 在 nodes/ 新建节点文件
+ *   3. 在此处 addNode + addEdge + 路由 map 中注册
+ *   4. 在 supervisor.ts SUB_AGENTS 添加描述
  */
 export function buildGraph(params: {
   baseURL?: string;
@@ -38,12 +41,6 @@ export function buildGraph(params: {
   model?: string;
   toolRegistry: ToolRegistry;
 }) {
-  console.log("[buildGraph] params:", {
-    baseURL: params.baseURL,
-    apiKey: params.apiKey ? "***" + params.apiKey.slice(-4) : "empty",
-    model: params.model,
-  });
-
   const llm = new ChatOpenAI({
     model: params.model ?? process.env.LLM_MODEL ?? "gpt-4o",
     apiKey: params.apiKey ?? process.env.OPENAI_API_KEY ?? "",
@@ -51,42 +48,44 @@ export function buildGraph(params: {
       baseURL: params.baseURL ?? process.env.LLM_BASE_URL,
     },
     temperature: 0.3,
-    // 给每次 LLM 调用设置超时（毫秒），避免无限等待
     timeout: Number(process.env.LLM_TIMEOUT_MS ?? 60000),
     maxRetries: 1,
   });
 
-  // 构建节点函数
+  // 构建各节点
   const supervisorNode = buildSupervisorNode(llm);
   const slackAgentNode = buildSlackAgentNode(llm, params.toolRegistry);
+  const webAgentNode   = buildWebAgentNode(llm);
+  const mcpAgentNode   = buildMcpAgentNode(llm);
 
-  // 构建 StateGraph
   const graph = new StateGraph(GraphState)
     // 注册节点
     .addNode("supervisor", supervisorNode)
-    .addNode("slack", slackAgentNode)
+    .addNode("slack",      slackAgentNode)
+    .addNode("web",        webAgentNode)
+    .addNode("mcp",        mcpAgentNode)
 
-    // 入口：START → supervisor
+    // 入口
     .addEdge(START, "supervisor")
 
-    // supervisor 根据 state.next 动态路由
+    // Supervisor 动态路由
     .addConditionalEdges(
       "supervisor",
       (state) => state.next,
       {
-        slack: "slack",
+        slack:   "slack",
+        web:     "web",
+        mcp:     "mcp",
         __end__: END,
       }
     )
 
     // 子 Agent 完成 → 回到 supervisor 整合结果
-    .addEdge("slack", "supervisor");
+    .addEdge("slack", "supervisor")
+    .addEdge("web",   "supervisor")
+    .addEdge("mcp",   "supervisor");
 
   return graph.compile();
 }
-
-// ----------------------------------------------------------------
-// 便捷调用包装
-// ----------------------------------------------------------------
 
 export type CompiledGraph = ReturnType<typeof buildGraph>;
