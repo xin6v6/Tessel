@@ -181,7 +181,7 @@ jobs:
           gh pr merge "$PR_NUMBER" \
             --repo "$REPO" \
             --squash \
-            --auto \
+            --admin \
             --body "Auto-merged after DeepSeek review ✅"
 
           echo "✅ PR #$PR_NUMBER merged"
