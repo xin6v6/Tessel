@@ -38,68 +38,66 @@ inject_env_into_plist() {
     err "找不到 bun 可执行文件，无法生成 plist"
     exit 1
   fi
-  local bun_dir; bun_dir="$(dirname "$bun_path")"
 
-  # 替换模板占位符为当前机器的实际路径
-  sed \
-    -e "s|__BUN__|${bun_path}|g" \
-    -e "s|__BUN_DIR__|${bun_dir}|g" \
-    -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
-    -e "s|__HOME__|${HOME}|g" \
-    "$PLIST_SRC" > "$plist_tmp" || { err "plist 模板替换失败"; rm -f "$plist_tmp"; exit 1; }
-
-  if [[ ! -f "$env_file" ]]; then
-    warn ".env 文件不存在，跳过环境变量注入"
-    mv "$plist_tmp" "$PLIST_DST"
-    chmod 600 "$PLIST_DST"
-    return
-  fi
-
-  # Python 直接读取 .env 和 plist，不经过 Bash 变量传参
-  # 彻底避免 $(...) / 反引号等 Shell 解析风险
-  if ! python3 - "$plist_tmp" "$env_file" <<'PYEOF'
+  # 用 Python 完成模板占位符替换 + .env 注入，全程不经过 Shell 变量插值
+  # 避免 sed 分隔符冲突（路径含 | 等特殊字符）以及 Shell 命令注入风险
+  if ! python3 - "$PLIST_SRC" "$plist_tmp" "$bun_path" "$PROJECT_DIR" "$HOME" "$env_file" <<'PYEOF'
 import sys
+import os
 import re
 import plistlib
 
-plist_path, env_path = sys.argv[1], sys.argv[2]
+plist_src, plist_tmp, bun_path, project_dir, home_dir, env_path = sys.argv[1:7]
+bun_dir = os.path.dirname(bun_path)
 
-# 解析 .env：跳过注释/空行，去掉首尾引号
-env_vars = {}
-with open(env_path, 'r', encoding='utf-8') as f:
-    for line in f:
-        line = line.rstrip('\n')
-        if not line or line.lstrip().startswith('#'):
-            continue
-        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2)
-        # 去掉首尾成对的单引号或双引号
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
-            val = val[1:-1]
-        env_vars[key] = val
+# 读取模板内容，用 str.replace 替换占位符（无特殊字符问题）
+with open(plist_src, 'r', encoding='utf-8') as f:
+    content = f.read()
 
-if not env_vars:
-    print("警告：.env 中未找到有效变量", file=sys.stderr)
-    sys.exit(0)
+content = content.replace('__BUN__', bun_path)
+content = content.replace('__BUN_DIR__', bun_dir)
+content = content.replace('__PROJECT_DIR__', project_dir)
+content = content.replace('__HOME__', home_dir)
 
-with open(plist_path, 'rb') as f:
+# 写入临时文件后用 plistlib 解析，确保 XML 合法
+with open(plist_tmp, 'w', encoding='utf-8') as f:
+    f.write(content)
+
+with open(plist_tmp, 'rb') as f:
     data = plistlib.load(f)
 
-if 'EnvironmentVariables' not in data:
-    data['EnvironmentVariables'] = {}
+# 注入 .env 环境变量（文件不存在时跳过）
+if os.path.isfile(env_path):
+    env_vars = {}
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line or line.lstrip().startswith('#'):
+                continue
+            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
+            if not m:
+                continue
+            key, val = m.group(1), m.group(2)
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            env_vars[key] = val
 
-data['EnvironmentVariables'].update(env_vars)
+    if env_vars:
+        if 'EnvironmentVariables' not in data:
+            data['EnvironmentVariables'] = {}
+        data['EnvironmentVariables'].update(env_vars)
+        print(f"已注入 {len(env_vars)} 个环境变量")
+    else:
+        print("警告：.env 中未找到有效变量", file=sys.stderr)
+else:
+    print("警告：.env 文件不存在，跳过环境变量注入", file=sys.stderr)
 
-with open(plist_path, 'wb') as f:
+with open(plist_tmp, 'wb') as f:
     plistlib.dump(data, f)
-
-print(f"已注入 {len(env_vars)} 个环境变量")
 PYEOF
   then
     rm -f "$plist_tmp"
-    err ".env 注入失败，终止安装"
+    err "plist 生成失败，终止安装"
     exit 1
   fi
 
