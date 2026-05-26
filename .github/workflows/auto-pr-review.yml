@@ -55,7 +55,7 @@ jobs:
   # 2. Claude 代码审查
   # ──────────────────────────────────────────────
   claude-review:
-    name: Claude Code Review
+    name: DeepSeek Code Review
     runs-on: ubuntu-latest
     needs: create-pr
     outputs:
