@@ -54,11 +54,13 @@ SLACK_APP_TOKEN=xapp-...   # Socket Mode 必须
 
 ### 3. 启动
 
+> `scripts/start.sh` 已包含在仓库中（见 [`scripts/start.sh`](scripts/start.sh)），提供自动重试和后台守护功能。
+
 ```bash
 # 前台运行（带自动重试）
 ./scripts/start.sh
 
-# 后台运行
+# 后台运行（等同于 bun run daemon）
 ./scripts/start.sh --daemon
 
 # 查看日志
@@ -80,10 +82,10 @@ bun run dev
 |------|------|
 | `bun run dev` | 热重载启动 REPL |
 | `bun run start` | 启动 REPL |
-| `bun run daemon` | 后台启动 |
-| `bun run stop` | 停止后台进程 |
-| `bun run logs` | 查看实时日志 |
-| `bun run status` | 查看运行状态 |
+| `bun run daemon` | 后台启动（调用 `start.sh --daemon`） |
+| `bun run stop` | 停止后台进程（调用 `start.sh --stop`） |
+| `bun run logs` | 查看实时日志（调用 `start.sh --logs`） |
+| `bun run status` | 查看运行状态（调用 `start.sh --status`） |
 | `bun test` | 运行测试 |
 | `bun run typecheck` | TypeScript 类型检查 |
 | `bun run ui` | 启动架构图可视化（localhost:3456）|
