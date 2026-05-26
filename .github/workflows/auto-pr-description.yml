@@ -1,0 +1,69 @@
+name: Auto PR Description
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - main
+
+permissions:
+  pull-requests: write
+
+jobs:
+  fill-description:
+    name: Fill PR description from commits
+    runs-on: ubuntu-latest
+    # 只在 description 为空时填写，避免覆盖手动编辑的内容
+    if: github.event.pull_request.body == '' || github.event.pull_request.body == null
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Generate description from commits
+        id: gen
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          # 获取本 PR 的所有 commit（一行一条，格式：hash subject）
+          commits=$(git log --pretty=format:"- \`%h\` %s" "$BASE".."$HEAD")
+          commit_count=$(git rev-list --count "$BASE".."$HEAD")
+
+          # 取第一个 commit 的完整 body 作为补充说明
+          first_body=$(git log --pretty=format:"%b" "$BASE".."$HEAD" | head -20)
+
+          body="## Changes
+
+$commits"
+
+          # 如果第一条 commit 有 body，附上作为详细说明
+          if [[ -n "$first_body" ]]; then
+            body="$body
+
+## Details
+
+$first_body"
+          fi
+
+          body="$body
+
+---
+*🤖 Description auto-generated from $commit_count commit(s) on \`$BRANCH\`*"
+
+          # 写入多行输出
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$body" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update PR description
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BODY: ${{ steps.gen.outputs.body }}
+        run: |
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --body "$BODY"
+          echo "✅ PR #$PR_NUMBER description updated"
