@@ -13,7 +13,7 @@ const nodes = [
     sub: 'Slack @mention / DM',
     x: 120, y: 360,
     size: 100,
-    icon: <User size={24} className="mb-1 opacity-90" />,
+    icon: () => <User size={24} className="mb-1 opacity-90" />,
     prompt: `触发方式
   · Slack 频道 @mention Bot
   · 直接向 Bot 发送私信（DM）
@@ -37,7 +37,7 @@ const nodes = [
     sub: 'Orchestrator Agent',
     x: 480, y: 360,
     size: 160,
-    icon: <BrainCircuit size={36} className="mb-1 opacity-95 text-indigo-200" />,
+    icon: () => <BrainCircuit size={36} className="mb-1 opacity-95 text-indigo-200" />,
     prompt: `核心调度 Agent（主节点）
 
 职责
@@ -67,7 +67,7 @@ const nodes = [
     sub: 'chat.postMessage',
     x: 860, y: 360,
     size: 100,
-    icon: <Bot size={24} className="mb-1 opacity-90" />,
+    icon: () => <Bot size={24} className="mb-1 opacity-90" />,
     prompt: `回复出站
 
 流程
@@ -94,7 +94,7 @@ SDK
     sub: 'ReAct Agent',
     x: 280, y: 600,
     size: 120,
-    icon: <MessageSquare size={26} className="mb-1 opacity-90" />,
+    icon: () => <MessageSquare size={26} className="mb-1 opacity-90" />,
     prompt: `Slack 工具 Agent
 
 类型
@@ -122,7 +122,7 @@ SDK
     sub: 'ReAct Agent · 待接入',
     x: 480, y: 600,
     size: 120,
-    icon: <Search size={26} className="mb-1 opacity-90" />,
+    icon: () => <Search size={26} className="mb-1 opacity-90" />,
     prompt: `Web Search Agent（待接入）
 
 类型
@@ -150,7 +150,7 @@ SDK
     sub: 'ReAct Agent · 待接入',
     x: 680, y: 600,
     size: 120,
-    icon: <Wrench size={26} className="mb-1 opacity-90" />,
+    icon: () => <Wrench size={26} className="mb-1 opacity-90" />,
     prompt: `MCP Tools Agent（待接入）
 
 类型
@@ -180,7 +180,7 @@ SDK
     sub: 'API Wrappers',
     x: 280, y: 800,
     size: 90,
-    icon: <Zap size={20} className="mb-1 opacity-80" />,
+    icon: () => <Zap size={20} className="mb-1 opacity-80" />,
     prompt: `Slack 工具集（挂载在 Slack Agent）
 
 可用工具
@@ -206,7 +206,7 @@ SDK
     sub: '待接入',
     x: 480, y: 800,
     size: 90,
-    icon: <Search size={20} className="mb-1 opacity-80" />,
+    icon: () => <Search size={20} className="mb-1 opacity-80" />,
     prompt: `Web Search 工具集（待接入）
 
 候选工具
@@ -223,7 +223,7 @@ SDK
     sub: '待接入',
     x: 680, y: 800,
     size: 90,
-    icon: <Wrench size={20} className="mb-1 opacity-80" />,
+    icon: () => <Wrench size={20} className="mb-1 opacity-80" />,
     prompt: `MCP Server 工具集（待接入）
 
 候选 Server
@@ -241,7 +241,7 @@ SDK
     sub: 'Annotation + Checkpointer',
     x: 480, y: 140,
     size: 120,
-    icon: <Database size={28} className="mb-1 opacity-90 text-cyan-200" />,
+    icon: () => <Database size={28} className="mb-1 opacity-90 text-cyan-200" />,
     prompt: `LangGraph 全局状态（单次对话生命周期）
 
 State 字段
@@ -515,7 +515,7 @@ export default function AgentGraph() {
                   ${isSelected ? 'ring-4 ring-white/20 scale-110' : 'ring-1 ring-white/8'}
                 `}
               >
-                {node.icon}
+                {node.icon()}
                 <span className="font-bold text-white text-xs leading-tight drop-shadow px-2">
                   {node.label}
                 </span>
