@@ -62,7 +62,7 @@ SLACK_APP_TOKEN=xapp-...   # Socket Mode 必须
 - ✅ **合盖 / 息屏后进程继续运行**
 
 ```bash
-# 安装服务（会自动读取 .env 注入环境变量）
+# 首次安装（自动读取 .env 注入环境变量，适配当前机器路径）
 ./scripts/launchd-install.sh install
 
 # 查看状态
@@ -136,11 +136,33 @@ bun run dev
 
 ## CI / CD
 
-推送到任意分支并开 PR → DeepSeek 自动审查代码 → 通过后自动 merge 到 main。
+```
+推送到分支 → 开 PR
+    │
+    ├── Auto PR Description   自动从 commit 生成 PR 描述
+    │
+    ├── DeepSeek Code Review  自动审查代码
+    │       │
+    │    APPROVE → Auto Merge 到 main
+    │       │
+    │    REQUEST_CHANGES → 修复后重新推送
+    │
+    └── Deploy to Mac Agent   merge 到 main 后自动部署
+            │
+            ├── bun install
+            ├── typecheck + test
+            └── launchd restart（首次自动 install）
+```
 
 需要在 GitHub Secrets 配置：
 - `DEEPSEEK_API_KEY`：DeepSeek API Key
-- `GH_PAT`：GitHub Personal Access Token（repo 权限）
+- `GH_PAT`：GitHub Personal Access Token（`repo` + `read:org` 权限）
+
+Self-hosted runner 需在 Mac 上安装并以 launchd 托管：
+```bash
+cd ~/actions-runner
+./svc.sh install && ./svc.sh start
+```
 
 ## 技术栈
 
