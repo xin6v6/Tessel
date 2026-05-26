@@ -5,6 +5,14 @@ on:
     branches:
       - 'feature/**'
       - 'fix/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+      - 'refactor/**'
+      - 'chore/**'
+      - 'docs/**'
+      - 'test/**'
+      - 'perf/**'
+      - 'ci/**'
 
 permissions:
   contents: write
@@ -89,11 +97,11 @@ jobs:
             "messages": [
               {
                 "role": "system",
-                "content": "你是一个专业的代码审查助手，擅长 TypeScript、Node.js、LangGraph 等技术栈。审查要简洁，重点突出。"
+                "content": "你是一位资深全栈工程师，专注于 TypeScript、Node.js、Bun、LangGraph、LangChain 技术栈，熟悉多 Agent 系统架构设计。你的代码审查风格严谨、直接，能精准识别潜在问题并给出可落地的改进建议。"
               },
               {
                 "role": "user",
-                "content": "请审查以下 PR 的代码变更。\n\n仓库：$REPO\n分支：$BRANCH\n\n代码变更（git diff）：\n\`\`\`diff\n$DIFF\n\`\`\`\n\n请评估：\n1. 代码正确性和潜在 bug\n2. 安全问题（重点：是否有密钥、token 等敏感信息泄漏）\n3. 架构合理性\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n原则：小问题或风格问题倾向 APPROVE，发现严重 bug 或安全问题才 REQUEST_CHANGES。"
+                "content": "请对以下 PR 进行专业代码审查。\n\n仓库：$REPO\n分支：$BRANCH\n\n## 变更内容\n\`\`\`diff\n$DIFF\n\`\`\`\n\n## 审查维度\n\n请按以下维度逐一评估，每个维度给出 **评级**（✅ 良好 / ⚠️ 需关注 / ❌ 必须修复）和具体说明：\n\n1. **正确性** — 逻辑是否正确，是否有明显 bug，边界情况是否处理\n2. **安全性** — 是否有密钥/token 硬编码，输入是否做了校验，是否有注入风险\n3. **架构合理性** — 是否符合项目现有架构（LangGraph 多 Agent 模式），模块职责是否清晰\n4. **类型安全** — TypeScript 类型是否严谨，是否有滥用 any 或不必要的类型断言\n5. **错误处理** — 异常是否被正确捕获和处理，是否有合理的 fallback\n6. **性能** — 是否有明显的性能问题，如不必要的重复调用、阻塞操作\n\n## 输出格式\n\n用 Markdown 格式输出审查报告，包含：\n- 各维度评级和说明\n- 如有问题，给出具体的代码位置和修改建议\n- 整体总结（1-2句话）\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n判断标准：存在 ❌ 必须修复的问题时输出 REQUEST_CHANGES，否则输出 APPROVE。"
               }
             ]
           }
