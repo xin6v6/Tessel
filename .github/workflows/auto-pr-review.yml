@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pr_number: ${{ steps.create.outputs.pr_number }}
-      pr_exists: ${{ steps.create.outputs.pr_exists }}
     steps:
       - name: Create or find PR
         id: create
@@ -28,17 +27,13 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          # 查找已有 PR（不用 --json，用 --state open 过滤）
           existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open | awk '{print $1}' | head -1)
 
           if [[ -n "$existing" ]]; then
             echo "PR already exists: #$existing"
             echo "pr_number=$existing" >> $GITHUB_OUTPUT
-            echo "pr_exists=true" >> $GITHUB_OUTPUT
           else
-            # 从分支名生成 PR 标题
             title=$(echo "$BRANCH" | sed 's|feature/||;s|fix/||;s|-| |g')
-            # 创建 PR 并解析返回的 URL 中的编号
             pr_url=$(gh pr create \
               --repo "$REPO" \
               --base main \
@@ -48,13 +43,12 @@ jobs:
             pr_number=$(echo "$pr_url" | grep -oE '[0-9]+$')
             echo "Created PR #$pr_number"
             echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
-            echo "pr_exists=false" >> $GITHUB_OUTPUT
           fi
 
   # ──────────────────────────────────────────────
-  # 2. Claude 代码审查
+  # 2. DeepSeek 代码审查
   # ──────────────────────────────────────────────
-  claude-review:
+  deepseek-review:
     name: DeepSeek Code Review
     runs-on: ubuntu-latest
     needs: create-pr
@@ -72,7 +66,7 @@ jobs:
           git fetch origin main
           diff=$(git diff origin/main...HEAD -- \
             '*.ts' '*.tsx' '*.js' '*.json' '*.sh' '*.md' \
-            | head -c 30000)  # Claude API 限制
+            | head -c 30000)
           echo "diff<<EOF" >> $GITHUB_OUTPUT
           echo "$diff" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -106,23 +100,25 @@ jobs:
           EOF
           )
 
-          echo "Claude response: $response"
+          echo "DeepSeek response: $response"
 
-          # 提取审查内容
+          # OpenAI-compatible 格式：choices[0].message.content
           summary=$(echo "$response" | python3 -c "
           import sys, json
           data = json.load(sys.stdin)
-          print(data.get('content', [{}])[0].get('text', 'No response'))
+          choices = data.get('choices', [])
+          if choices:
+              print(choices[0].get('message', {}).get('content', 'No content'))
+          else:
+              print('No choices in response. Raw: ' + str(data))
           " 2>/dev/null || echo "Failed to parse response")
 
-          # 判断结论
           if echo "$summary" | grep -q "VERDICT: APPROVE"; then
             echo "approved=true" >> $GITHUB_OUTPUT
           else
             echo "approved=false" >> $GITHUB_OUTPUT
           fi
 
-          # 写入 summary（截断防止过长）
           short_summary=$(echo "$summary" | head -c 3000)
           echo "summary<<EOF" >> $GITHUB_OUTPUT
           echo "$short_summary" >> $GITHUB_OUTPUT
@@ -146,7 +142,7 @@ jobs:
 
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO" \
-            --body "## $icon Claude 代码审查
+            --body "## $icon DeepSeek 代码审查
 
           $status
 
@@ -155,7 +151,7 @@ jobs:
           $SUMMARY
 
           ---
-          *🤖 由 DeepSeek-R1 自动审查*"
+          *🤖 由 deepseek-v4-pro 自动审查*"
 
   # ──────────────────────────────────────────────
   # 3. 自动 Merge（仅审查通过时）
@@ -163,10 +159,10 @@ jobs:
   auto-merge:
     name: Auto Merge
     runs-on: ubuntu-latest
-    needs: [create-pr, claude-review]
-    if: needs.claude-review.outputs.approved == 'true'
+    needs: [create-pr, deepseek-review]
+    if: needs.deepseek-review.outputs.approved == 'true'
     steps:
-      - name: Enable auto-merge
+      - name: Merge PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -176,7 +172,6 @@ jobs:
             --repo "$REPO" \
             --squash \
             --auto \
-            --subject "$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq '.title')" \
-            --body "Auto-merged after Claude review ✅"
+            --body "Auto-merged after DeepSeek review ✅"
 
           echo "✅ PR #$PR_NUMBER merged"
