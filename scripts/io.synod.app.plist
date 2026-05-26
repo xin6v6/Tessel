@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 服务标识符，全局唯一 -->
+    <key>Label</key>
+    <string>io.synod.app</string>
+
+    <!-- 启动命令：直接用 bun 运行入口文件 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/aa01017/.bun/bin/bun</string>
+        <string>run</string>
+        <string>/Users/aa01017/Synod/src/main.ts</string>
+    </array>
+
+    <!-- 工作目录 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/aa01017/Synod</string>
+
+    <!-- 环境变量：从 .env 加载 PATH，并设置 NODE_ENV -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/aa01017/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/aa01017</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+
+    <!-- 崩溃/退出后自动重启 -->
+    <key>KeepAlive</key>
+    <dict>
+        <!-- 只有非正常退出（exit code != 0）才重启 -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- 重启间隔：10 秒，防止崩溃风暴 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- 日志 -->
+    <key>StandardOutPath</key>
+    <string>/Users/aa01017/Synod/logs/synod.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aa01017/Synod/logs/synod.error.log</string>
+
+    <!-- 开机后自动启动（登录时加载） -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 关闭会话时不终止进程（合盖/息屏后继续运行） -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

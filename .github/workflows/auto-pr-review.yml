@@ -44,26 +44,30 @@ jobs:
           REPO: ${{ github.repository }}
           DIFF: ${{ steps.diff.outputs.diff }}
         run: |
+          # 用 jq 构造 JSON，$DIFF 等变量通过 --arg 传入，自动处理所有特殊字符转义
+          payload=$(jq -n \
+            --arg branch "$BRANCH" \
+            --arg repo "$REPO" \
+            --arg diff "$DIFF" \
+            '{
+              model: "deepseek-v4-pro",
+              max_tokens: 4096,
+              messages: [
+                {
+                  role: "system",
+                  content: "你是一位资深全栈工程师，专注于 TypeScript、Node.js、Bun、LangGraph、LangChain 技术栈，熟悉多 Agent 系统架构设计。你的代码审查风格严谨、直接，能精准识别潜在问题并给出可落地的改进建议。"
+                },
+                {
+                  role: "user",
+                  content: ("请对以下 PR 进行专业代码审查。\n\n仓库：" + $repo + "\n分支：" + $branch + "\n\n## 变更内容\n```diff\n" + $diff + "\n```\n\n## 审查维度\n\n请按以下维度逐一评估，每个维度给出评级（✅ 良好 / ⚠️ 需关注 / ❌ 必须修复）和具体说明：\n\n1. 正确性 — 逻辑是否正确，是否有明显 bug，边界情况是否处理\n2. 安全性 — 是否有密钥/token 硬编码，输入是否做了校验，是否有注入风险\n3. 架构合理性 — 是否符合项目现有架构（LangGraph 多 Agent 模式），模块职责是否清晰\n4. 类型安全 — TypeScript 类型是否严谨，是否有滥用 any 或不必要的类型断言\n5. 错误处理 — 异常是否被正确捕获和处理，是否有合理的 fallback\n6. 性能 — 是否有明显的性能问题，如不必要的重复调用、阻塞操作\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n判断标准：存在 ❌ 必须修复的问题时输出 REQUEST_CHANGES，否则输出 APPROVE。")
+                }
+              ]
+            }')
+
           response=$(curl -s https://api.deepseek.com/chat/completions \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             -H "Content-Type: application/json" \
-            -d @- <<EOF
-          {
-            "model": "deepseek-v4-pro",
-            "max_tokens": 4096,
-            "messages": [
-              {
-                "role": "system",
-                "content": "你是一位资深全栈工程师，专注于 TypeScript、Node.js、Bun、LangGraph、LangChain 技术栈，熟悉多 Agent 系统架构设计。你的代码审查风格严谨、直接，能精准识别潜在问题并给出可落地的改进建议。"
-              },
-              {
-                "role": "user",
-                "content": "请对以下 PR 进行专业代码审查。\n\n仓库：$REPO\n分支：$BRANCH\n\n## 变更内容\n\`\`\`diff\n$DIFF\n\`\`\`\n\n## 审查维度\n\n请按以下维度逐一评估，每个维度给出 **评级**（✅ 良好 / ⚠️ 需关注 / ❌ 必须修复）和具体说明：\n\n1. **正确性** — 逻辑是否正确，是否有明显 bug，边界情况是否处理\n2. **安全性** — 是否有密钥/token 硬编码，输入是否做了校验，是否有注入风险\n3. **架构合理性** — 是否符合项目现有架构（LangGraph 多 Agent 模式），模块职责是否清晰\n4. **类型安全** — TypeScript 类型是否严谨，是否有滥用 any 或不必要的类型断言\n5. **错误处理** — 异常是否被正确捕获和处理，是否有合理的 fallback\n6. **性能** — 是否有明显的性能问题，如不必要的重复调用、阻塞操作\n\n## 输出格式\n\n用 Markdown 格式输出审查报告，包含：\n- 各维度评级和说明\n- 如有问题，给出具体的代码位置和修改建议\n- 整体总结（1-2句话）\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n判断标准：存在 ❌ 必须修复的问题时输出 REQUEST_CHANGES，否则输出 APPROVE。"
-              }
-            ]
-          }
-          EOF
-          )
+            -d "$payload")
 
           echo "DeepSeek response: $response"
 
