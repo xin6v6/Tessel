@@ -111,13 +111,36 @@ cmd_logs() {
 run_with_retry() {
   local retries=0
   local delay=$RETRY_DELAY
+  local child_pid=""
+  local stopping=0
+
+  # Ctrl+C 或 SIGTERM：标记停止，杀掉当前子进程
+  _shutdown() {
+    stopping=1
+    echo ""
+    log "收到退出信号，正在停止..."
+    [[ -n "$child_pid" ]] && kill -TERM "$child_pid" 2>/dev/null || true
+  }
+  trap _shutdown INT TERM
 
   while true; do
     local start_time; start_time=$(date +%s)
 
     log "启动 $APP_NAME... (尝试 $((retries + 1)))"
-    bun run "$PROJECT_DIR/src/main.ts" 2>&1
+    bun run "$PROJECT_DIR/src/main.ts" &
+    child_pid=$!
+
+    # 等待子进程结束
+    wait "$child_pid" 2>/dev/null || true
     local exit_code=$?
+    child_pid=""
+
+    # 用户主动停止
+    if [[ $stopping -eq 1 ]]; then
+      ok "已停止"
+      exit 0
+    fi
+
     local end_time; end_time=$(date +%s)
     local uptime=$(( end_time - start_time ))
 
@@ -129,7 +152,7 @@ run_with_retry() {
 
     err "进程异常退出（code: $exit_code，运行了 ${uptime}s）"
 
-    # 如果运行时间够长，说明之前是健康的，重置重试计数
+    # 运行时间够长说明之前健康，重置重试计数
     if [[ $uptime -ge $MIN_UPTIME ]]; then
       log "进程存活时间足够，重置重试计数"
       retries=0
@@ -145,8 +168,10 @@ run_with_retry() {
       exit 1
     fi
 
-    warn "等待 ${delay}s 后重试（第 $retries/$MAX_RETRIES 次）..."
-    sleep "$delay"
+    warn "等待 ${delay}s 后重试（第 $retries/$MAX_RETRIES 次，按 Ctrl+C 取消）..."
+    # 可中断的 sleep
+    sleep "$delay" & wait $! 2>/dev/null || true
+    [[ $stopping -eq 1 ]] && { ok "已停止"; exit 0; }
 
     # 指数退避
     delay=$(( delay * 2 ))
@@ -218,8 +243,8 @@ cmd_start() {
   log "Socket Mode：${SLACK_APP_TOKEN:+enabled}${SLACK_APP_TOKEN:-disabled}"
   echo ""
 
-  # 前台运行，日志同时输出到终端和文件
-  run_with_retry 2>&1 | tee -a "$LOG_FILE"
+  # 前台运行，Ctrl+C 可正常退出
+  run_with_retry
 }
 
 # ── 入口 ────────────────────────────────────────────────────────
