@@ -76,26 +76,31 @@ jobs:
           echo "$diff" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Claude review
+      - name: DeepSeek review
         id: review
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           BRANCH: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           DIFF: ${{ steps.diff.outputs.diff }}
         run: |
-          response=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
+          response=$(curl -s https://api.deepseek.com/chat/completions \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -H "Content-Type: application/json" \
             -d @- <<EOF
           {
-            "model": "claude-opus-4-7",
-            "max_tokens": 1024,
-            "messages": [{
-              "role": "user",
-              "content": "你是一个代码审查助手，审查以下 PR 的代码变更。\n\n仓库：$REPO\n分支：$BRANCH\n\n代码变更（git diff）：\n\`\`\`\n$DIFF\n\`\`\`\n\n请评估：\n1. 代码质量和正确性\n2. 安全问题（重点：是否有密钥、token 等敏感信息泄漏）\n3. 是否有明显 bug\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n如果只是小问题或风格问题，倾向于 APPROVE。只有发现严重 bug 或安全问题时才 REQUEST_CHANGES。"
-            }]
+            "model": "deepseek-v4-pro",
+            "max_tokens": 4096,
+            "messages": [
+              {
+                "role": "system",
+                "content": "你是一个专业的代码审查助手，擅长 TypeScript、Node.js、LangGraph 等技术栈。审查要简洁，重点突出。"
+              },
+              {
+                "role": "user",
+                "content": "请审查以下 PR 的代码变更。\n\n仓库：$REPO\n分支：$BRANCH\n\n代码变更（git diff）：\n\`\`\`diff\n$DIFF\n\`\`\`\n\n请评估：\n1. 代码正确性和潜在 bug\n2. 安全问题（重点：是否有密钥、token 等敏感信息泄漏）\n3. 架构合理性\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n原则：小问题或风格问题倾向 APPROVE，发现严重 bug 或安全问题才 REQUEST_CHANGES。"
+              }
+            ]
           }
           EOF
           )
@@ -149,7 +154,7 @@ jobs:
           $SUMMARY
 
           ---
-          *🤖 由 Claude claude-opus-4-7 自动审查*"
+          *🤖 由 DeepSeek-R1 自动审查*"
 
   # ──────────────────────────────────────────────
   # 3. 自动 Merge（仅审查通过时）
