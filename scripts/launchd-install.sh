@@ -40,30 +40,34 @@ inject_env_into_plist() {
 
   cp "$PLIST_SRC" "$plist_tmp"
 
-  local inject_failed=0
-
-  # 读取 .env，将每个变量追加到 plist 的 EnvironmentVariables 段
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    # 跳过注释和空行
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "${line// }" ]] && continue
-
-    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      local key="${BASH_REMATCH[1]}"
-      local val="${BASH_REMATCH[2]}"
-      # 去掉首尾引号
-      val="${val%\"}"
-      val="${val#\"}"
-      val="${val%\'}"
-      val="${val#\'}"
-
-      # 用 python3 通过 plistlib 注入，正确处理值中的空格、引号等特殊字符
-      # 比直接拼 PlistBuddy 命令字符串更安全可靠
-      if ! python3 - "$plist_tmp" "$key" "$val" <<'PYEOF'
+  # Python 直接读取 .env 和 plist，不经过 Bash 变量传参
+  # 彻底避免 $(...) / 反引号等 Shell 解析风险
+  if ! python3 - "$plist_tmp" "$env_file" <<'PYEOF'
 import sys
+import re
 import plistlib
 
-plist_path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+plist_path, env_path = sys.argv[1], sys.argv[2]
+
+# 解析 .env：跳过注释/空行，去掉首尾引号
+env_vars = {}
+with open(env_path, 'r', encoding='utf-8') as f:
+    for line in f:
+        line = line.rstrip('\n')
+        if not line or line.lstrip().startswith('#'):
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2)
+        # 去掉首尾成对的单引号或双引号
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+            val = val[1:-1]
+        env_vars[key] = val
+
+if not env_vars:
+    print("警告：.env 中未找到有效变量", file=sys.stderr)
+    sys.exit(0)
 
 with open(plist_path, 'rb') as f:
     data = plistlib.load(f)
@@ -71,21 +75,16 @@ with open(plist_path, 'rb') as f:
 if 'EnvironmentVariables' not in data:
     data['EnvironmentVariables'] = {}
 
-data['EnvironmentVariables'][key] = val
+data['EnvironmentVariables'].update(env_vars)
 
 with open(plist_path, 'wb') as f:
     plistlib.dump(data, f)
-PYEOF
-      then
-        err "注入环境变量失败：$key"
-        inject_failed=1
-      fi
-    fi
-  done < "$env_file"
 
-  if [[ $inject_failed -eq 1 ]]; then
+print(f"已注入 {len(env_vars)} 个环境变量")
+PYEOF
+  then
     rm -f "$plist_tmp"
-    err "部分环境变量注入失败，终止安装"
+    err ".env 注入失败，终止安装"
     exit 1
   fi
 
