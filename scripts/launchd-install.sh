@@ -40,6 +40,8 @@ inject_env_into_plist() {
 
   cp "$PLIST_SRC" "$plist_tmp"
 
+  local inject_failed=0
+
   # 读取 .env，将每个变量追加到 plist 的 EnvironmentVariables 段
   while IFS= read -r line || [[ -n "$line" ]]; do
     # 跳过注释和空行
@@ -55,15 +57,44 @@ inject_env_into_plist() {
       val="${val%\'}"
       val="${val#\'}"
 
-      # 用 PlistBuddy 注入（macOS 自带）
-      /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:${key} ${val}" "$plist_tmp" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:${key} string ${val}" "$plist_tmp" 2>/dev/null \
-        || true
+      # 用 python3 通过 plistlib 注入，正确处理值中的空格、引号等特殊字符
+      # 比直接拼 PlistBuddy 命令字符串更安全可靠
+      if ! python3 - "$plist_tmp" "$key" "$val" <<'PYEOF'
+import sys
+import plistlib
+
+plist_path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(plist_path, 'rb') as f:
+    data = plistlib.load(f)
+
+if 'EnvironmentVariables' not in data:
+    data['EnvironmentVariables'] = {}
+
+data['EnvironmentVariables'][key] = val
+
+with open(plist_path, 'wb') as f:
+    plistlib.dump(data, f)
+PYEOF
+      then
+        err "注入环境变量失败：$key"
+        inject_failed=1
+      fi
     fi
   done < "$env_file"
 
+  if [[ $inject_failed -eq 1 ]]; then
+    rm -f "$plist_tmp"
+    err "部分环境变量注入失败，终止安装"
+    exit 1
+  fi
+
   mv "$plist_tmp" "$PLIST_DST"
-  log "已将 .env 变量注入 plist"
+
+  # 权限设为 600：只有当前用户可读，防止明文 token 泄露
+  chmod 600 "$PLIST_DST"
+
+  log "已将 .env 变量注入 plist（权限 600）"
 }
 
 # ── install ───────────────────────────────────────────────────────
@@ -80,9 +111,13 @@ cmd_install() {
     err "bun 未安装，请先安装：curl -fsSL https://bun.sh/install | bash"
     exit 1
   fi
+  if ! command -v python3 &>/dev/null; then
+    err "python3 未安装，无法注入环境变量"
+    exit 1
+  fi
 
   # 创建日志目录
-  mkdir -p "$LOG_DIR"
+  mkdir -p "$LOG_DIR" || { err "无法创建日志目录：$LOG_DIR"; exit 1; }
 
   # 如果已加载，先卸载
   if launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
@@ -94,18 +129,28 @@ cmd_install() {
   # 将 plist 复制并注入 .env
   inject_env_into_plist
 
-  # 修正权限
-  chmod 644 "$PLIST_DST"
-
   # 加载服务（macOS 13+ 用 bootstrap，兼容旧版用 load）
+  local loaded=0
   if launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null; then
     ok "服务已通过 bootstrap 加载"
-  else
-    launchctl load -w "$PLIST_DST"
+    loaded=1
+  elif launchctl load -w "$PLIST_DST" 2>/dev/null; then
     ok "服务已通过 load 加载"
+    loaded=1
   fi
 
+  if [[ $loaded -eq 0 ]]; then
+    err "服务加载失败，请检查 plist 配置"
+    exit 1
+  fi
+
+  # 等待并验证服务真正启动
   sleep 2
+  if ! _service_running; then
+    warn "服务已加载但进程未启动，请检查日志："
+    warn "  tail -20 $LOG_DIR/synod.error.log"
+  fi
+
   cmd_status
   echo ""
   echo -e "  查看日志：${BOLD}tail -f $LOG_DIR/synod.log${RESET}"
@@ -133,21 +178,44 @@ cmd_uninstall() {
 
 # ── status ────────────────────────────────────────────────────────
 
+# 检查服务是否有正在运行的 PID（兼容各 macOS 版本）
+_service_running() {
+  launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
+import sys, re
+output = sys.stdin.read()
+# macOS launchctl list 输出格式：'\"PID\" = 12345;' 或 JSON '\"pid\": 12345'
+m = re.search(r'[\"\'Pp][Ii][Dd][\"\']\s*[=:]\s*(\d+)', output)
+sys.exit(0 if m else 1)
+" 2>/dev/null
+}
+
+_get_pid() {
+  launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
+import sys, re
+output = sys.stdin.read()
+m = re.search(r'[\"\'Pp][Ii][Dd][\"\']\s*[=:]\s*(\d+)', output)
+print(m.group(1) if m else '')
+" 2>/dev/null
+}
+
 cmd_status() {
   echo ""
   echo -e "${BOLD}── Synod 服务状态 ──${RESET}"
-  if launchctl list "$PLIST_NAME" 2>/dev/null | grep -q PID; then
+
+  if ! launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
+    warn "服务未加载（未安装）"
+  elif _service_running; then
     local pid
-    pid=$(launchctl list "$PLIST_NAME" 2>/dev/null | grep '"PID"' | awk -F'[= ;]' '{print $3}' || echo "")
+    pid=$(_get_pid)
     ok "服务正在运行 (PID: ${pid:-未知})"
   else
     local last_exit
-    last_exit=$(launchctl list "$PLIST_NAME" 2>/dev/null | grep '"LastExitStatus"' | awk -F'[= ;]' '{print $3}' || echo "未知")
-    if launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
-      warn "服务已加载但未运行 (上次退出码: $last_exit)"
-    else
-      warn "服务未加载（未安装）"
-    fi
+    last_exit=$(launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
+import sys, re
+m = re.search(r'LastExitStatus[\"\']*\s*[=:]\s*(\d+)', sys.stdin.read())
+print(m.group(1) if m else '未知')
+" 2>/dev/null || echo "未知")
+    warn "服务已加载但未运行 (上次退出码: $last_exit)"
   fi
 
   if [[ -f "$LOG_DIR/synod.log" ]]; then
@@ -162,9 +230,14 @@ cmd_status() {
 
 cmd_restart() {
   log "重启 Synod 服务..."
-  launchctl kickstart -k "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null \
-    || { cmd_uninstall; cmd_install; }
-  ok "重启完成"
+  if launchctl kickstart -k "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null; then
+    ok "重启完成"
+  else
+    warn "kickstart 失败，执行完整重装..."
+    cmd_uninstall
+    cmd_install
+    return
+  fi
   sleep 2
   cmd_status
 }
