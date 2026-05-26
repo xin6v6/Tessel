@@ -6,6 +6,10 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "dev": "bun --watch src/main.ts",
+    "daemon": "bash scripts/start.sh --daemon",
+    "stop": "bash scripts/start.sh --stop",
+    "status": "bash scripts/start.sh --status",
+    "logs": "bash scripts/start.sh --logs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
