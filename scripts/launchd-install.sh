@@ -31,16 +31,22 @@ err()  { echo -e "${RED}✗${RESET} $*" >&2; }
 inject_env_into_plist() {
   local env_file="$PROJECT_DIR/.env"
   local plist_tmp="$PLIST_DST.tmp"
-  local bun_path; bun_path="$(command -v bun)"
+
+  # 确认 bun 路径（cmd_install 已检查过存在性，这里再次确认路径）
+  local bun_path; bun_path="$(command -v bun 2>/dev/null)"
+  if [[ -z "$bun_path" ]]; then
+    err "找不到 bun 可执行文件，无法生成 plist"
+    exit 1
+  fi
   local bun_dir; bun_dir="$(dirname "$bun_path")"
 
-  # 复制模板并替换占位符为当前机器的实际路径
+  # 替换模板占位符为当前机器的实际路径
   sed \
     -e "s|__BUN__|${bun_path}|g" \
     -e "s|__BUN_DIR__|${bun_dir}|g" \
     -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
     -e "s|__HOME__|${HOME}|g" \
-    "$PLIST_SRC" > "$plist_tmp"
+    "$PLIST_SRC" > "$plist_tmp" || { err "plist 模板替换失败"; rm -f "$plist_tmp"; exit 1; }
 
   if [[ ! -f "$env_file" ]]; then
     warn ".env 文件不存在，跳过环境变量注入"
