@@ -462,8 +462,9 @@ export default function AgentGraph() {
             {edges.map(edge => {
               const src = nodeMap[edge.from];
               const tgt = nodeMap[edge.to];
+              if (!src || !tgt) return null;
               const { path, midX, midY } = getCurvedPath(src, tgt, edge.type);
-              const style = EDGE_STYLES[edge.type] ?? EDGE_STYLES.main;
+              const style = EDGE_STYLES[edge.type] ?? EDGE_STYLES['main']!;
 
               return (
                 <g key={edge.id}>
