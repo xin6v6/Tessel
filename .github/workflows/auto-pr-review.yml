@@ -1,0 +1,176 @@
+name: Auto PR Review & Merge
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'fix/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. 创建 PR（如果还没有）
+  # ──────────────────────────────────────────────
+  create-pr:
+    name: Create PR
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.create.outputs.pr_number }}
+      pr_exists: ${{ steps.create.outputs.pr_exists }}
+    steps:
+      - name: Create or find PR
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 查找已有 PR
+          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number --jq '.[0].number // empty')
+
+          if [[ -n "$existing" ]]; then
+            echo "PR already exists: #$existing"
+            echo "pr_number=$existing" >> $GITHUB_OUTPUT
+            echo "pr_exists=true" >> $GITHUB_OUTPUT
+          else
+            # 从分支名生成 PR 标题
+            title=$(echo "$BRANCH" | sed 's|feature/||;s|fix/||;s|-| |g;s/\b\w/\u&/g')
+            pr_number=$(gh pr create \
+              --repo "$REPO" \
+              --base main \
+              --head "$BRANCH" \
+              --title "$title" \
+              --body "🤖 Auto-created by GitHub Actions. Pending Claude review." \
+              --json number --jq '.number')
+            echo "Created PR #$pr_number"
+            echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
+            echo "pr_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ──────────────────────────────────────────────
+  # 2. Claude 代码审查
+  # ──────────────────────────────────────────────
+  claude-review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    needs: create-pr
+    outputs:
+      approved: ${{ steps.review.outputs.approved }}
+      summary: ${{ steps.review.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get diff
+        id: diff
+        run: |
+          git fetch origin main
+          diff=$(git diff origin/main...HEAD -- \
+            '*.ts' '*.tsx' '*.js' '*.json' '*.sh' '*.md' \
+            | head -c 30000)  # Claude API 限制
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          echo "$diff" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Claude review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BRANCH: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          DIFF: ${{ steps.diff.outputs.diff }}
+        run: |
+          response=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @- <<EOF
+          {
+            "model": "claude-opus-4-7",
+            "max_tokens": 1024,
+            "messages": [{
+              "role": "user",
+              "content": "你是一个代码审查助手，审查以下 PR 的代码变更。\n\n仓库：$REPO\n分支：$BRANCH\n\n代码变更（git diff）：\n\`\`\`\n$DIFF\n\`\`\`\n\n请评估：\n1. 代码质量和正确性\n2. 安全问题（重点：是否有密钥、token 等敏感信息泄漏）\n3. 是否有明显 bug\n\n最后一行必须是以下之一（不含其他文字）：\nVERDICT: APPROVE\nVERDICT: REQUEST_CHANGES\n\n如果只是小问题或风格问题，倾向于 APPROVE。只有发现严重 bug 或安全问题时才 REQUEST_CHANGES。"
+            }]
+          }
+          EOF
+          )
+
+          echo "Claude response: $response"
+
+          # 提取审查内容
+          summary=$(echo "$response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('content', [{}])[0].get('text', 'No response'))
+          " 2>/dev/null || echo "Failed to parse response")
+
+          # 判断结论
+          if echo "$summary" | grep -q "VERDICT: APPROVE"; then
+            echo "approved=true" >> $GITHUB_OUTPUT
+          else
+            echo "approved=false" >> $GITHUB_OUTPUT
+          fi
+
+          # 写入 summary（截断防止过长）
+          short_summary=$(echo "$summary" | head -c 3000)
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$short_summary" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.create-pr.outputs.pr_number }}
+          SUMMARY: ${{ steps.review.outputs.summary }}
+          APPROVED: ${{ steps.review.outputs.approved }}
+        run: |
+          if [[ "$APPROVED" == "true" ]]; then
+            icon="✅"
+            status="**APPROVED** — 代码通过审查，准备合并"
+          else
+            icon="❌"
+            status="**REQUEST CHANGES** — 发现问题，请修复后重新推送"
+          fi
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "## $icon Claude 代码审查
+
+          $status
+
+          ---
+
+          $SUMMARY
+
+          ---
+          *🤖 由 Claude claude-opus-4-7 自动审查*"
+
+  # ──────────────────────────────────────────────
+  # 3. 自动 Merge（仅审查通过时）
+  # ──────────────────────────────────────────────
+  auto-merge:
+    name: Auto Merge
+    runs-on: ubuntu-latest
+    needs: [create-pr, claude-review]
+    if: needs.claude-review.outputs.approved == 'true'
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.create-pr.outputs.pr_number }}
+        run: |
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --squash \
+            --auto \
+            --subject "$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title --jq '.title')" \
+            --body "Auto-merged after Claude review ✅"
+
+          echo "✅ PR #$PR_NUMBER merged"
