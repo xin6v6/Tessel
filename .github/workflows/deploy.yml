@@ -12,8 +12,38 @@ jobs:
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
 
-      - name: 测试运行
+      - name: 安装依赖
+        run: bun install --frozen-lockfile
+
+      - name: 类型检查
+        run: bun run typecheck
+
+      - name: 运行测试
+        run: bun test
+
+      - name: 重启 launchd 服务
         run: |
-          echo "恭喜你！终于连通了！"
-          echo "代码已经成功拉取到了 Mac 上。"
+          # 如果服务已安装，直接 kickstart 重启；否则走完整安装流程
+          if launchctl list io.synod.app &>/dev/null 2>&1; then
+            echo "服务已安装，执行热重启..."
+            launchctl kickstart -k "gui/$(id -u)/io.synod.app"
+          else
+            echo "服务未安装，执行首次安装..."
+            ./scripts/launchd-install.sh install
+          fi
+
+      - name: 确认服务运行
+        run: |
+          sleep 5
+          if launchctl list io.synod.app 2>/dev/null | grep -q '"PID"'; then
+            echo "✅ Synod 服务运行中"
+            launchctl list io.synod.app
+          else
+            echo "❌ 服务未能正常启动"
+            echo "--- 最近错误日志 ---"
+            tail -30 logs/synod.error.log 2>/dev/null || echo "（无错误日志）"
+            exit 1
+          fi
