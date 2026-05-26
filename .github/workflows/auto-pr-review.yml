@@ -56,7 +56,7 @@ jobs:
       approved: ${{ steps.review.outputs.approved }}
       summary: ${{ steps.review.outputs.summary }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
