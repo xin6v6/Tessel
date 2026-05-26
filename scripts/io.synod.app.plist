@@ -6,33 +6,32 @@
     <key>Label</key>
     <string>io.synod.app</string>
 
-    <!-- 启动命令：直接用 bun 运行入口文件 -->
+    <!-- 启动命令：由 launchd-install.sh 替换 __BUN__ 和 __PROJECT_DIR__ -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/aa01017/.bun/bin/bun</string>
+        <string>__BUN__</string>
         <string>run</string>
-        <string>/Users/aa01017/Synod/src/main.ts</string>
+        <string>__PROJECT_DIR__/src/main.ts</string>
     </array>
 
     <!-- 工作目录 -->
     <key>WorkingDirectory</key>
-    <string>/Users/aa01017/Synod</string>
+    <string>__PROJECT_DIR__</string>
 
-    <!-- 环境变量：从 .env 加载 PATH，并设置 NODE_ENV -->
+    <!-- 环境变量基础值，其余由 .env 注入 -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/aa01017/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>__BUN_DIR__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
-        <string>/Users/aa01017</string>
+        <string>__HOME__</string>
         <key>NODE_ENV</key>
         <string>production</string>
     </dict>
 
-    <!-- 崩溃/退出后自动重启 -->
+    <!-- 崩溃/退出后自动重启（只有非正常退出才重启） -->
     <key>KeepAlive</key>
     <dict>
-        <!-- 只有非正常退出（exit code != 0）才重启 -->
         <key>SuccessfulExit</key>
         <false/>
     </dict>
@@ -43,15 +42,15 @@
 
     <!-- 日志 -->
     <key>StandardOutPath</key>
-    <string>/Users/aa01017/Synod/logs/synod.log</string>
+    <string>__PROJECT_DIR__/logs/synod.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/aa01017/Synod/logs/synod.error.log</string>
+    <string>__PROJECT_DIR__/logs/synod.error.log</string>
 
     <!-- 开机后自动启动（登录时加载） -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 关闭会话时不终止进程（合盖/息屏后继续运行） -->
+    <!-- 合盖/息屏后继续运行 -->
     <key>ProcessType</key>
     <string>Background</string>
 </dict>

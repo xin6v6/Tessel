@@ -31,14 +31,23 @@ err()  { echo -e "${RED}✗${RESET} $*" >&2; }
 inject_env_into_plist() {
   local env_file="$PROJECT_DIR/.env"
   local plist_tmp="$PLIST_DST.tmp"
+  local bun_path; bun_path="$(command -v bun)"
+  local bun_dir; bun_dir="$(dirname "$bun_path")"
+
+  # 复制模板并替换占位符为当前机器的实际路径
+  sed \
+    -e "s|__BUN__|${bun_path}|g" \
+    -e "s|__BUN_DIR__|${bun_dir}|g" \
+    -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
+    -e "s|__HOME__|${HOME}|g" \
+    "$PLIST_SRC" > "$plist_tmp"
 
   if [[ ! -f "$env_file" ]]; then
     warn ".env 文件不存在，跳过环境变量注入"
-    cp "$PLIST_SRC" "$PLIST_DST"
+    mv "$plist_tmp" "$PLIST_DST"
+    chmod 600 "$PLIST_DST"
     return
   fi
-
-  cp "$PLIST_SRC" "$plist_tmp"
 
   # Python 直接读取 .env 和 plist，不经过 Bash 变量传参
   # 彻底避免 $(...) / 反引号等 Shell 解析风险
