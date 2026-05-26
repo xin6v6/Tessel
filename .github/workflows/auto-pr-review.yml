@@ -135,14 +135,14 @@ jobs:
           if [[ "$APPROVED" == "true" ]]; then
             icon="✅"
             status="**APPROVED** — 代码通过审查，准备合并"
+            event="APPROVE"
           else
             icon="❌"
             status="**REQUEST CHANGES** — 发现问题，请修复后重新推送"
+            event="REQUEST_CHANGES"
           fi
 
-          gh pr comment "$PR_NUMBER" \
-            --repo "$REPO" \
-            --body "## $icon DeepSeek 代码审查
+          body="## $icon DeepSeek 代码审查
 
           $status
 
@@ -152,6 +152,16 @@ jobs:
 
           ---
           *🤖 由 deepseek-v4-pro 自动审查*"
+
+          # 提交正式 GitHub Review（满足 branch protection 的 require approvals）
+          # 如果是 PR 作者自己触发，GitHub 不允许自我审批，会自动降级为评论
+          if [[ "$APPROVED" == "true" ]]; then
+            gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "$body" 2>/dev/null || \
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"
+          else
+            gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "$body" 2>/dev/null || \
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"
+          fi
 
   # ──────────────────────────────────────────────
   # 3. 自动 Merge（仅审查通过时）
