@@ -54,7 +54,33 @@ SLACK_APP_TOKEN=xapp-...   # Socket Mode 必须
 
 ### 3. 启动
 
-> `scripts/start.sh` 已包含在仓库中（见 [`scripts/start.sh`](scripts/start.sh)），提供自动重试和后台守护功能。
+#### 生产环境（推荐）：macOS launchd
+
+适用于将 MacBook 作为生产服务器的场景，launchd 原生支持：
+- ✅ 崩溃自动重启
+- ✅ 开机自动启动（登录后）
+- ✅ **合盖 / 息屏后进程继续运行**
+
+```bash
+# 安装服务（会自动读取 .env 注入环境变量）
+./scripts/launchd-install.sh install
+
+# 查看状态
+./scripts/launchd-install.sh status
+
+# 重启
+./scripts/launchd-install.sh restart
+
+# 卸载服务
+./scripts/launchd-install.sh uninstall
+```
+
+> **注意**：合盖不会中断服务，但若 macOS 进入深度休眠（Standby），网络连接会断开。
+> 如需防止系统休眠，可执行 `sudo pmset -a sleep 0 disksleep 0`（AC 电源下生效）。
+
+#### 开发/调试：start.sh
+
+> `scripts/start.sh` 提供前台自动重试和后台守护功能，适合开发调试。
 
 ```bash
 # 前台运行（带自动重试）
