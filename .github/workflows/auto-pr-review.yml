@@ -174,7 +174,7 @@ jobs:
     steps:
       - name: Merge PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.create-pr.outputs.pr_number }}
         run: |
