@@ -28,6 +28,6 @@ ENV NODE_ENV=production
 ENV UI_PORT=3456
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:3456/logs > /dev/null || exit 1
+  CMD bun --eval "const r = await fetch('http://localhost:' + (process.env.UI_PORT ?? 3456) + '/logs'); process.exit(r.ok ? 0 : 1)" || exit 1
 
 ENTRYPOINT ["bun", "run", "src/ui/server.ts"]
