@@ -1,0 +1,56 @@
+# ================================================================
+# Synod — docker-compose 服务定义
+# ================================================================
+# 常用命令：
+#   docker compose up -d           # 后台启动
+#   docker compose down            # 停止并移除容器
+#   docker compose logs -f synod   # 跟踪日志
+#   docker compose build           # 重新构建镜像
+#   docker compose restart synod   # 重启容器
+# ================================================================
+
+services:
+  synod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: synod:latest
+    container_name: synod
+
+    # Docker 重启策略：崩溃或守护进程重启后自动恢复
+    # unless-stopped = 自动重启，但 'docker stop' 明确停止后不重启
+    restart: unless-stopped
+
+    # 密钥通过 env_file 注入，永远不写入镜像
+    env_file:
+      - .env
+
+    environment:
+      NODE_ENV: production
+      # 如需调试，可在此覆盖（不影响 .env）：
+      # LOG_LEVEL: debug
+
+    volumes:
+      # 将主机 logs/ 目录绑定挂载到容器内，日志文件在宿主机直接可读
+      - ./logs:/app/logs
+
+    # Slack Socket Mode 是纯出站 WebSocket，无需暴露端口
+    # 若启用 src/ui/server.ts，取消下面注释：
+    # ports:
+    #   - "127.0.0.1:3000:3000"
+
+    # 限制容器资源，防止 LLM 调用失控耗尽宿主机
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+
+    # 日志驱动：json-file + 轮转，保留最近 5 个文件 × 20MB
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
