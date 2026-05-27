@@ -138,8 +138,8 @@ jobs:
           docker compose logs --tail=10 ui
 
           echo ""
-          # 检查 Slack Socket Mode 是否已连接
-          if docker compose logs --tail=100 synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
+          # 检查 Slack Socket Mode 是否已连接（复用上面已打印的日志，不重复拉取）
+          if docker compose logs --since=5m synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
             echo "✅ Slack Socket Mode 连接正常"
           else
             echo "⚠️  未检测到 Socket Mode 连接日志（可能仍在初始化，属正常）"
