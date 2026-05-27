@@ -4,10 +4,16 @@ import * as os from "node:os";
 
 import index from "./index.html";
 
-// log-viewer.html は Bun の HTML bundler を通さず直接ファイルとして返す
-// （React JSX runtime と HMR bundle が競合するのを防ぐため）
+// Serve log-viewer.html as a raw file to avoid Bun bundling it alongside
+// index.html — they would share the same HMR/JSX runtime bundle and conflict.
 const LOG_VIEWER_PATH = path.resolve(import.meta.dir, "log-viewer.html");
-const logViewerHtml = fs.readFileSync(LOG_VIEWER_PATH, "utf8");
+let logViewerHtml: string;
+try {
+  logViewerHtml = fs.readFileSync(LOG_VIEWER_PATH, "utf8");
+} catch (err) {
+  console.error("[ui] Failed to read log-viewer.html:", err);
+  process.exit(1);
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
