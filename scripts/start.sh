@@ -18,8 +18,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 APP_NAME="synod"
 PID_FILE="$PROJECT_DIR/.synod.pid"
-LOG_FILE="$PROJECT_DIR/logs/synod.log"
-LOG_DIR="$PROJECT_DIR/logs"
+LOG_FILE="$PROJECT_DIR/data/logs/$(date +%Y-%m-%d).log"
+LOG_DIR="$PROJECT_DIR/data/logs"
 
 MAX_RETRIES=5          # 连续失败超过此次数后停止重试
 RETRY_DELAY=5          # 初始重试等待（秒）
@@ -100,10 +100,15 @@ cmd_stop() {
 cmd_logs() {
   if [[ ! -f "$LOG_FILE" ]]; then
     warn "日志文件不存在：$LOG_FILE"
+    warn "请先启动服务，或用 bun run logs:follow 查看实时日志"
     return 0
   fi
   log "实时查看日志（Ctrl+C 退出）..."
-  tail -f "$LOG_FILE"
+  if command -v jq &>/dev/null; then
+    tail -f "$LOG_FILE" | jq -r '[.timestamp, (.level | ascii_upcase | .[0:5]), .logger, (.sessionId // ""), .message] | @tsv'
+  else
+    tail -f "$LOG_FILE"
+  fi
 }
 
 # ── 核心：带重试的运行循环 ──────────────────────────────────────
