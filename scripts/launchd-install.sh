@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # ================================================================
-# Synod launchd 安装/卸载脚本
+# Synod launchd 安装/卸载脚本（Docker Compose 版本）
 #
 # 用法：
-#   ./scripts/launchd-install.sh install    # 安装并启动服务
-#   ./scripts/launchd-install.sh uninstall  # 停止并卸载服务
-#   ./scripts/launchd-install.sh status     # 查看服务状态
-#   ./scripts/launchd-install.sh restart    # 重启服务
+#   ./scripts/launchd-install.sh install    # 构建镜像、启动容器、注册开机自启
+#   ./scripts/launchd-install.sh uninstall  # 停止容器、卸载 launchd 服务
+#   ./scripts/launchd-install.sh status     # 查看 launchd 和容器状态
+#   ./scripts/launchd-install.sh restart    # 重启容器
+#
+# 说明：
+#   launchd 负责开机时执行 docker compose up -d（通过包装脚本）。
+#   容器生命周期（崩溃重启、Slack 重连）由 Docker 的
+#   restart: unless-stopped 策略管理，不再依赖 launchd KeepAlive。
 # ================================================================
 
 set -euo pipefail
@@ -15,8 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PLIST_NAME="io.synod.app"
-PLIST_SRC="$SCRIPT_DIR/${PLIST_NAME}.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
+WRAPPER="$SCRIPT_DIR/launchd-docker-start.sh"
 LOG_DIR="$PROJECT_DIR/logs"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
@@ -26,231 +31,213 @@ ok()   { echo -e "${GREEN}✓${RESET} $*"; }
 warn() { echo -e "${YELLOW}⚠${RESET} $*"; }
 err()  { echo -e "${RED}✗${RESET} $*" >&2; }
 
-# ── 检查 .env 并将变量注入 plist ──────────────────────────────────
+# ── 前置检查 ──────────────────────────────────────────────────────
 
-inject_env_into_plist() {
-  local env_file="$PROJECT_DIR/.env"
-  local plist_tmp="$PLIST_DST.tmp"
-
-  # 确认 bun 路径（cmd_install 已检查过存在性，这里再次确认路径）
-  local bun_path; bun_path="$(command -v bun 2>/dev/null)"
-  if [[ -z "$bun_path" ]]; then
-    err "找不到 bun 可执行文件，无法生成 plist"
+check_deps() {
+  if ! command -v docker &>/dev/null; then
+    err "docker 未安装或不在 PATH 中"
+    err "请安装 Docker Desktop: https://docs.docker.com/desktop/mac/"
     exit 1
   fi
 
-  # 用 Python 完成模板占位符替换 + .env 注入，全程不经过 Shell 变量插值
-  # 避免 sed 分隔符冲突（路径含 | 等特殊字符）以及 Shell 命令注入风险
-  if ! python3 - "$PLIST_SRC" "$plist_tmp" "$bun_path" "$PROJECT_DIR" "$HOME" "$env_file" <<'PYEOF'
-import sys
-import os
-import re
-import plistlib
-
-plist_src, plist_tmp, bun_path, project_dir, home_dir, env_path = sys.argv[1:7]
-bun_dir = os.path.dirname(bun_path)
-
-# 读取模板内容，用 str.replace 替换占位符（无特殊字符问题）
-with open(plist_src, 'r', encoding='utf-8') as f:
-    content = f.read()
-
-content = content.replace('__BUN__', bun_path)
-content = content.replace('__BUN_DIR__', bun_dir)
-content = content.replace('__PROJECT_DIR__', project_dir)
-content = content.replace('__HOME__', home_dir)
-
-# 写入临时文件后用 plistlib 解析，确保 XML 合法
-with open(plist_tmp, 'w', encoding='utf-8') as f:
-    f.write(content)
-
-with open(plist_tmp, 'rb') as f:
-    data = plistlib.load(f)
-
-# 注入 .env 环境变量（文件不存在时跳过）
-if os.path.isfile(env_path):
-    env_vars = {}
-    with open(env_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.rstrip('\n')
-            if not line or line.lstrip().startswith('#'):
-                continue
-            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)', line)
-            if not m:
-                continue
-            key, val = m.group(1), m.group(2)
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
-                val = val[1:-1]
-            env_vars[key] = val
-
-    if env_vars:
-        if 'EnvironmentVariables' not in data:
-            data['EnvironmentVariables'] = {}
-        data['EnvironmentVariables'].update(env_vars)
-        print(f"已注入 {len(env_vars)} 个环境变量")
-    else:
-        print("警告：.env 中未找到有效变量", file=sys.stderr)
-else:
-    print("警告：.env 文件不存在，跳过环境变量注入", file=sys.stderr)
-
-with open(plist_tmp, 'wb') as f:
-    plistlib.dump(data, f)
-PYEOF
-  then
-    rm -f "$plist_tmp"
-    err "plist 生成失败，终止安装"
+  if ! docker compose version &>/dev/null 2>&1; then
+    err "docker compose (v2) 插件未找到"
+    err "请升级 Docker Desktop 至 3.4.0+（内置 Compose V2）"
     exit 1
   fi
 
-  mv "$plist_tmp" "$PLIST_DST"
+  if [[ ! -f "$PROJECT_DIR/.env" ]]; then
+    err ".env 文件不存在：$PROJECT_DIR/.env"
+    err "请复制 .env.example 并填入真实密钥"
+    exit 1
+  fi
 
-  # 权限设为 600：只有当前用户可读，防止明文 token 泄露
+  if [[ ! -f "$PROJECT_DIR/docker-compose.yml" ]]; then
+    err "docker-compose.yml 不存在：$PROJECT_DIR/docker-compose.yml"
+    exit 1
+  fi
+}
+
+# ── 生成 launchd plist ────────────────────────────────────────────
+# launchd 只负责登录时触发一次 wrapper 脚本（docker compose up -d）。
+# KeepAlive=false，因为 compose up -d 立即返回（detached）。
+
+write_plist() {
+  local docker_path
+  docker_path="$(command -v docker)"
+
+  mkdir -p "$(dirname "$PLIST_DST")"
+
+  cat > "$PLIST_DST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_NAME}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${WRAPPER}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$docker_path")</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+
+    <!-- 登录时自动执行一次 docker compose up -d -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 脚本执行后立即退出属正常，不需要 KeepAlive -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/launchd-synod.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/launchd-synod.error.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+PLIST
+
+  # plist 仅当前用户可读（路径中无明文密钥，但保持与旧版一致的安全习惯）
   chmod 600 "$PLIST_DST"
-
-  log "已将 .env 变量注入 plist（权限 600）"
+  log "已写入 plist: $PLIST_DST"
 }
 
 # ── install ───────────────────────────────────────────────────────
 
 cmd_install() {
-  log "安装 Synod 为 macOS launchd 服务..."
+  log "安装 Synod（Docker Compose + launchd 开机自启）..."
 
-  # 前提检查
-  if [[ ! -f "$PLIST_SRC" ]]; then
-    err "找不到 plist 模板：$PLIST_SRC"
+  check_deps
+  mkdir -p "$LOG_DIR"
+
+  # 若包装脚本不存在（首次安装），报错提示
+  if [[ ! -f "$WRAPPER" ]]; then
+    err "包装脚本不存在：$WRAPPER"
+    err "请确保已将 scripts/launchd-docker-start.sh 纳入版本控制"
     exit 1
   fi
-  if ! command -v bun &>/dev/null; then
-    err "bun 未安装，请先安装：curl -fsSL https://bun.sh/install | bash"
-    exit 1
-  fi
-  if ! command -v python3 &>/dev/null; then
-    err "python3 未安装，无法注入环境变量"
-    exit 1
-  fi
+  chmod +x "$WRAPPER"
 
-  # 创建日志目录
-  mkdir -p "$LOG_DIR" || { err "无法创建日志目录：$LOG_DIR"; exit 1; }
-
-  # 如果已加载，先卸载
+  # 如果 launchd 服务已注册，先卸载
   if launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
-    warn "服务已存在，先卸载旧版本..."
+    warn "检测到旧 launchd 服务，先卸载..."
     launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || \
     launchctl unload "$PLIST_DST" 2>/dev/null || true
   fi
 
-  # 将 plist 复制并注入 .env
-  inject_env_into_plist
+  # 写入 plist
+  write_plist
 
-  # 加载服务（macOS 13+ 用 bootstrap，兼容旧版用 load）
-  local loaded=0
+  # 首次构建镜像
+  log "构建 Docker 镜像（首次较慢，后续利用缓存）..."
+  cd "$PROJECT_DIR"
+  docker compose build
+
+  # 启动容器（不通过 launchd，直接启动）
+  log "启动 Synod 容器..."
+  docker compose up -d
+
+  # 注册 launchd 服务（仅用于开机自启，不立即执行）
   if launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null; then
-    ok "服务已通过 bootstrap 加载"
-    loaded=1
+    ok "launchd 开机自启已注册（bootstrap）"
   elif launchctl load -w "$PLIST_DST" 2>/dev/null; then
-    ok "服务已通过 load 加载"
-    loaded=1
+    ok "launchd 开机自启已注册（load，兼容模式）"
+  else
+    warn "launchd 注册失败，容器已启动但不会开机自启"
+    warn "可手动执行：launchctl bootstrap gui/$(id -u) $PLIST_DST"
   fi
 
-  if [[ $loaded -eq 0 ]]; then
-    err "服务加载失败，请检查 plist 配置"
-    exit 1
-  fi
-
-  # 等待并验证服务真正启动
-  sleep 2
-  if ! _service_running; then
-    warn "服务已加载但进程未启动，请检查日志："
-    warn "  tail -20 $LOG_DIR/synod.error.log"
-  fi
-
+  echo ""
   cmd_status
   echo ""
-  echo -e "  查看日志：${BOLD}tail -f $LOG_DIR/synod.log${RESET}"
+  echo -e "  跟踪日志：${BOLD}docker compose logs -f synod${RESET}"
   echo -e "  停止服务：${BOLD}$0 uninstall${RESET}"
+  echo -e "  重启容器：${BOLD}$0 restart${RESET}"
 }
 
 # ── uninstall ─────────────────────────────────────────────────────
 
 cmd_uninstall() {
-  log "卸载 Synod launchd 服务..."
+  log "卸载 Synod Docker Compose 服务..."
 
-  if launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null; then
-    ok "服务已通过 bootout 卸载"
-  elif launchctl unload -w "$PLIST_DST" 2>/dev/null; then
-    ok "服务已通过 unload 卸载"
-  else
-    warn "服务未在运行或已卸载"
-  fi
-
+  # 卸载 launchd 开机自启
   if [[ -f "$PLIST_DST" ]]; then
+    if launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null; then
+      ok "launchd 服务已卸载（bootout）"
+    elif launchctl unload -w "$PLIST_DST" 2>/dev/null; then
+      ok "launchd 服务已卸载（unload）"
+    else
+      warn "launchd 服务未在运行或已卸载"
+    fi
     rm "$PLIST_DST"
     ok "已删除 plist 文件"
+  else
+    warn "plist 文件不存在，跳过 launchd 卸载"
   fi
+
+  # 停止并移除容器（保留镜像和绑定挂载的日志）
+  if [[ -f "$PROJECT_DIR/docker-compose.yml" ]]; then
+    cd "$PROJECT_DIR"
+    if docker compose ps -q synod 2>/dev/null | grep -q .; then
+      docker compose down
+      ok "Synod 容器已停止并移除"
+    else
+      warn "Synod 容器未在运行，跳过 docker compose down"
+    fi
+  fi
+
+  log "卸载完成。日志文件保留于 $LOG_DIR/"
 }
 
 # ── status ────────────────────────────────────────────────────────
-
-# 检查服务是否有正在运行的 PID（兼容各 macOS 版本）
-_service_running() {
-  launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
-import sys, re
-output = sys.stdin.read()
-# macOS launchctl list 输出格式：'\"PID\" = 12345;' 或 JSON '\"pid\": 12345'
-m = re.search(r'[\"\'Pp][Ii][Dd][\"\']\s*[=:]\s*(\d+)', output)
-sys.exit(0 if m else 1)
-" 2>/dev/null
-}
-
-_get_pid() {
-  launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
-import sys, re
-output = sys.stdin.read()
-m = re.search(r'[\"\'Pp][Ii][Dd][\"\']\s*[=:]\s*(\d+)', output)
-print(m.group(1) if m else '')
-" 2>/dev/null
-}
 
 cmd_status() {
   echo ""
   echo -e "${BOLD}── Synod 服务状态 ──${RESET}"
 
-  if ! launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
-    warn "服务未加载（未安装）"
-  elif _service_running; then
-    local pid
-    pid=$(_get_pid)
-    ok "服务正在运行 (PID: ${pid:-未知})"
+  # launchd 开机自启状态
+  if launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
+    ok "launchd 开机自启：已注册"
   else
-    local last_exit
-    last_exit=$(launchctl list "$PLIST_NAME" 2>/dev/null | python3 -c "
-import sys, re
-m = re.search(r'LastExitStatus[\"\']*\s*[=:]\s*(\d+)', sys.stdin.read())
-print(m.group(1) if m else '未知')
-" 2>/dev/null || echo "未知")
-    warn "服务已加载但未运行 (上次退出码: $last_exit)"
+    warn "launchd 开机自启：未注册（重启后不会自动启动）"
   fi
 
-  if [[ -f "$LOG_DIR/synod.log" ]]; then
-    echo ""
-    echo -e "${BOLD}最近日志（最后 5 行）：${RESET}"
-    tail -5 "$LOG_DIR/synod.log"
+  echo ""
+  echo -e "${BOLD}Docker 容器：${RESET}"
+  if [[ -f "$PROJECT_DIR/docker-compose.yml" ]]; then
+    cd "$PROJECT_DIR"
+    docker compose ps 2>/dev/null || warn "无法获取 docker compose 状态（Docker 未运行？）"
   fi
+
+  echo ""
+  echo -e "${BOLD}最近日志（最后 10 行）：${RESET}"
+  docker compose logs --tail=10 synod 2>/dev/null || true
+
   echo ""
 }
 
 # ── restart ───────────────────────────────────────────────────────
 
 cmd_restart() {
-  log "重启 Synod 服务..."
-  if launchctl kickstart -k "gui/$(id -u)/${PLIST_NAME}" 2>/dev/null; then
-    ok "重启完成"
-  else
-    warn "kickstart 失败，执行完整重装..."
-    cmd_uninstall
-    cmd_install
-    return
-  fi
-  sleep 2
+  log "重启 Synod 容器..."
+  cd "$PROJECT_DIR"
+  docker compose restart synod
+  sleep 3
   cmd_status
 }
 
@@ -263,9 +250,9 @@ case "${1:-help}" in
   restart)   cmd_restart ;;
   *)
     echo "用法："
-    echo "  $0 install    安装并启动（开机自启，崩溃自动重启）"
-    echo "  $0 uninstall  停止并卸载"
-    echo "  $0 status     查看状态"
-    echo "  $0 restart    重启服务"
+    echo "  $0 install    构建镜像、启动容器、注册开机自启"
+    echo "  $0 uninstall  停止容器、卸载 launchd 开机自启"
+    echo "  $0 status     查看 launchd 和容器状态"
+    echo "  $0 restart    重启容器"
     ;;
 esac
