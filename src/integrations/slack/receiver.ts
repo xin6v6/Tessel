@@ -1,6 +1,7 @@
 import { App, type AppOptions } from "@slack/bolt";
 import type { SlackClient } from "./client.ts";
-import { logger } from "../../utils/logger.ts";
+import { createLogger } from "../../observability/logger.ts";
+const logger = createLogger("slack-receiver");
 
 export interface SlackEventHandler {
   /** 收到普通消息（非 Bot 自己发的）时触发 */

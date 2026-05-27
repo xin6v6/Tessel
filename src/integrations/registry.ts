@@ -1,6 +1,7 @@
 import type { Integration } from "./base.ts";
 import { ToolRegistry } from "../tools/index.ts";
-import { logger } from "../utils/logger.ts";
+import { createLogger } from "../observability/logger.ts";
+const logger = createLogger("integrations");
 
 /**
  * IntegrationRegistry manages the lifecycle of all integrations
@@ -38,7 +39,7 @@ export class IntegrationRegistry {
         }
         logger.info(`[integrations] ✓ ${integration.id}: ${integration.description}`);
       } catch (err) {
-        logger.error(`[integrations] ✗ ${integration.id} failed to initialize:`, err);
+        logger.error({ err: String(err) }, `[integrations] ✗ ${integration.id} failed to initialize`);
         // Non-fatal — skip the integration, keep others running
       }
     }
@@ -51,7 +52,7 @@ export class IntegrationRegistry {
       try {
         await integration.destroy?.();
       } catch (err) {
-        logger.warn(`[integrations] ${integration.id} destroy error:`, err);
+        logger.warn({ err: String(err) }, `[integrations] ${integration.id} destroy error`);
       }
     }
   }
