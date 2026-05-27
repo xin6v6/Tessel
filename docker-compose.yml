@@ -4,12 +4,14 @@
 # 常用命令：
 #   docker compose up -d           # 后台启动
 #   docker compose down            # 停止并移除容器
-#   docker compose logs -f synod   # 跟踪日志
+#   docker compose logs -f synod   # 跟踪 agent 日志
+#   docker compose logs -f ui      # 跟踪 UI 日志
 #   docker compose build           # 重新构建镜像
-#   docker compose restart synod   # 重启容器
+#   docker compose restart synod   # 重启 agent
 # ================================================================
 
 services:
+  # ── 主 Agent 服务 ──────────────────────────────────────────────
   synod:
     build:
       context: .
@@ -18,7 +20,6 @@ services:
     container_name: synod
 
     # Docker 重启策略：崩溃或守护进程重启后自动恢复
-    # unless-stopped = 自动重启，但 'docker stop' 明确停止后不重启
     restart: unless-stopped
 
     # 密钥通过 env_file 注入，永远不写入镜像
@@ -31,13 +32,12 @@ services:
       # LOG_LEVEL: debug
 
     volumes:
-      # 将主机 logs/ 目录绑定挂载到容器内，日志文件在宿主机直接可读
-      - ./logs:/app/logs
+      # 日志持久化：容器内写 /app/data/logs，宿主机可直接读
+      - ./data/logs:/app/data/logs
 
     # Slack Socket Mode 是纯出站 WebSocket，无需暴露端口
-    # 若启用 src/ui/server.ts，取消下面注释：
     # ports:
-    #   - "127.0.0.1:3000:3000"
+    #   - "127.0.0.1:3456:3456"
 
     # 限制容器资源，防止 LLM 调用失控耗尽宿主机
     deploy:
@@ -48,9 +48,48 @@ services:
         reservations:
           memory: 256m
 
-    # 日志驱动：json-file + 轮转，保留最近 5 个文件 × 20MB
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
+  # ── Log Viewer UI 服务 ─────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: synod-ui:latest
+    container_name: synod-ui
+
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      NODE_ENV: production
+      UI_PORT: "3456"
+
+    ports:
+      # 局域网可访问：绑定 0.0.0.0 让局域网直接访问
+      - "3456:3456"
+
+    volumes:
+      # 共享同一份日志目录（只读）
+      - ./data/logs:/app/data/logs:ro
+
+    depends_on:
+      - synod
+
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
