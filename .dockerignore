@@ -1,0 +1,50 @@
+# ================================================================
+# .dockerignore — 精简 Docker build context，防止敏感文件入镜
+# ================================================================
+
+# Git 内部文件
+.git
+.gitignore
+
+# Node/Bun 依赖（Dockerfile Stage 1 会重新安装）
+node_modules
+
+# 密钥文件（绝不能进入镜像）
+.env
+.env.*
+!.env.example
+
+# 运行时生成文件
+logs/
+*.log
+.synod.pid
+
+# macOS 噪声
+.DS_Store
+**/.DS_Store
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.tsbuildinfo
+
+# 测试产物
+coverage/
+*.lcov
+
+# 构建产物
+dist/
+out/
+tmp/
+*.tgz
+
+# CI 配置（运行时不需要）
+.github/
+
+# Claude Code 工作区文件
+.claude/
+
+# Docker 自身文件（不需要嵌套）
+Dockerfile
+docker-compose.yml
+.dockerignore
