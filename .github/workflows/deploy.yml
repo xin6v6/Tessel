@@ -15,6 +15,7 @@ jobs:
         with:
           token: ${{ secrets.GH_PAT }}
 
+      # ── 质量关卡（在宿主机 Bun 上直接运行，无需 Docker）───────────
       - name: 安装依赖
         run: bun install --frozen-lockfile
 
@@ -24,26 +25,72 @@ jobs:
       - name: 运行测试
         run: bun test
 
-      - name: 重启 launchd 服务
+      # ── Docker 构建与滚动部署 ─────────────────────────────────────
+      - name: 构建 Docker 镜像
         run: |
-          # 如果服务已安装，直接 kickstart 重启；否则走完整安装流程
-          if launchctl list io.synod.app &>/dev/null 2>&1; then
-            echo "服务已安装，执行热重启..."
-            launchctl kickstart -k "gui/$(id -u)/io.synod.app"
-          else
-            echo "服务未安装，执行首次安装..."
-            ./scripts/launchd-install.sh install
-          fi
+          # --no-cache 确保每次 CI 都拉取最新基础层（避免缓存旧 bun 基础镜像）
+          # 如构建速度优先于镜像新鲜度，可改为 docker compose build（使用缓存）
+          docker compose build --no-cache
+
+      - name: 滚动重启容器
+        run: |
+          # up -d 是幂等的：
+          #   - 容器已运行 → 以新镜像原地替换（~1-2s 停机，Slack 会在重连后补发事件）
+          #   - 容器不存在 → 直接创建并启动
+          docker compose up -d
+
+      - name: 健康检查
+        run: |
+          echo "等待容器健康检查..."
+          MAX=12
+          for i in $(seq 1 $MAX); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' synod 2>/dev/null || echo "no-healthcheck")
+            RUNNING=$(docker inspect --format='{{.State.Running}}' synod 2>/dev/null || echo "false")
+
+            echo "  [$i/$MAX] running=$RUNNING health=$STATUS"
+
+            # 如果容器有 HEALTHCHECK 且已通过
+            if [[ "$STATUS" == "healthy" ]]; then
+              echo "✅ 容器健康检查通过"
+              break
+            fi
+
+            # 如果健康检查明确失败
+            if [[ "$STATUS" == "unhealthy" ]]; then
+              echo "❌ 容器健康检查失败"
+              docker compose logs --tail=50 synod
+              exit 1
+            fi
+
+            # 容器无 HEALTHCHECK（no-healthcheck）：退回到运行状态检查
+            if [[ "$STATUS" == "no-healthcheck" && "$RUNNING" == "true" ]]; then
+              echo "✅ 容器正在运行（无 HEALTHCHECK 配置）"
+              break
+            fi
+
+            # 容器未运行
+            if [[ "$RUNNING" != "true" && $i -eq $MAX ]]; then
+              echo "❌ 容器未能正常启动"
+              docker compose logs --tail=50 synod
+              exit 1
+            fi
+
+            sleep 5
+          done
 
       - name: 确认服务运行
         run: |
-          sleep 5
-          if launchctl list io.synod.app 2>/dev/null | grep -q '"PID"'; then
-            echo "✅ Synod 服务运行中"
-            launchctl list io.synod.app
+          echo "── 容器状态 ──"
+          docker compose ps
+
+          echo ""
+          echo "── 最近日志（20 行）──"
+          docker compose logs --tail=20 synod
+
+          echo ""
+          # 检查 Slack Socket Mode 是否已连接
+          if docker compose logs --tail=100 synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
+            echo "✅ Slack Socket Mode 连接正常"
           else
-            echo "❌ 服务未能正常启动"
-            echo "--- 最近错误日志 ---"
-            tail -30 logs/synod.error.log 2>/dev/null || echo "（无错误日志）"
-            exit 1
+            echo "⚠️  未检测到 Socket Mode 连接日志（可能仍在初始化，属正常）"
           fi
