@@ -50,6 +50,19 @@ function parseRoute(text: string): SubAgentName {
 // Supervisor 节点
 // ----------------------------------------------------------------
 
+/** 从 AIMessage 提取 token 用量，兼容不同 provider 的字段名 */
+function extractTokenUsage(msg: unknown): { prompt: number; completion: number } {
+  const m = msg as Record<string, unknown>;
+  const usage =
+    (m["usage_metadata"] as Record<string, number> | undefined) ??
+    ((m["response_metadata"] as Record<string, unknown> | undefined)?.["tokenUsage"] as Record<string, number> | undefined);
+  if (!usage) return { prompt: 0, completion: 0 };
+  return {
+    prompt:     (usage["input_tokens"]   ?? usage["promptTokens"]     ?? 0) as number,
+    completion: (usage["output_tokens"]  ?? usage["completionTokens"] ?? 0) as number,
+  };
+}
+
 export function buildSupervisorNode(llm: ChatOpenAI) {
   return async function supervisorNode(
     state: GraphStateType
@@ -57,10 +70,17 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
     const nodeStart = Date.now();
     const { messages, subAgentResult } = state;
 
+    // 取最后一条用户消息用于日志（截断避免刷屏）
+    const lastHuman = [...messages].reverse().find((m) => m instanceof HumanMessage);
+    const inputSnippet = typeof lastHuman?.content === "string"
+      ? lastHuman.content.slice(0, 120)
+      : "";
+
     // ── 阶段 A：子 Agent 已完成 → 整合结果生成最终回复 ──
     if (subAgentResult) {
-      logger.info("[supervisor] composing final reply from sub-agent result");
+      logger.debug({ subAgentResultSnippet: subAgentResult.slice(0, 120) }, "composing final reply");
 
+      const t0 = Date.now();
       const finalReply = await llm.invoke([
         new SystemMessage(
           "你是一个个人助手。请根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。"
@@ -68,6 +88,18 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
         ...messages,
         new HumanMessage(`子 Agent 执行结果：\n${subAgentResult}`),
       ]);
+      const tokens = extractTokenUsage(finalReply);
+      const replySnippet = typeof finalReply.content === "string"
+        ? finalReply.content.slice(0, 120)
+        : "";
+
+      logger.info({
+        phase: "compose",
+        durationMs: Date.now() - t0,
+        promptTokens: tokens.prompt,
+        completionTokens: tokens.completion,
+        replySnippet,
+      }, "final reply composed");
 
       return {
         messages: [finalReply],
@@ -81,8 +113,9 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
       .map(([name, desc]) => `- ${name}: ${desc}`)
       .join("\n");
 
-    logger.info("[supervisor] routing...");
+    logger.info({ inputSnippet }, "routing");
 
+    const t0 = Date.now();
     const routeReply = await llm.invoke([
       new SystemMessage(
         `你是一个路由助手。根据用户最新的消息，从下列选项中选择一个，只回复该选项的名字，不要有其他文字：
@@ -101,15 +134,34 @@ ${agentList}
         : JSON.stringify(routeReply.content);
 
     const next = parseRoute(routeText);
-    logger.info({ durationMs: Date.now() - nodeStart }, `[supervisor] route → ${next} (raw: "${routeText.trim()}")`);
+    logger.info({
+      phase: "route",
+      next,
+      durationMs: Date.now() - t0,
+      ...extractTokenUsage(routeReply),
+    }, `route → ${next}`);
 
     // ── 阶段 C：无需子 Agent，直接回复 ──
     if (next === "__end__") {
+      const t1 = Date.now();
       const directReply = await llm.invoke([
         new SystemMessage("你是一个有帮助的个人助手。请直接回答用户的问题。"),
         ...messages,
       ]);
-      logger.info({ durationMs: Date.now() - nodeStart }, "[supervisor] direct reply composed");
+      const tokens = extractTokenUsage(directReply);
+      const replySnippet = typeof directReply.content === "string"
+        ? directReply.content.slice(0, 120)
+        : "";
+
+      logger.info({
+        phase: "direct",
+        durationMs: Date.now() - t1,
+        totalMs: Date.now() - nodeStart,
+        promptTokens: tokens.prompt,
+        completionTokens: tokens.completion,
+        replySnippet,
+      }, "direct reply composed");
+
       return {
         messages: [directReply],
         next: "__end__",

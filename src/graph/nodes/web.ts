@@ -1,5 +1,6 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { GraphStateType } from "../state.ts";
@@ -45,15 +46,22 @@ export function buildWebAgentNode(llm: ChatOpenAI) {
   return async function webAgentNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
-    logger.info("[web-agent] started");
+    const nodeStart = Date.now();
 
     const lastUserMsg = [...state.messages]
       .reverse()
-      .find((m) => m.getType() === "human");
+      .find((m) => m instanceof HumanMessage);
 
     if (!lastUserMsg) {
+      logger.warn("no human message found, skipping");
       return { subAgentResult: "未找到用户消息，无法执行搜索。" };
     }
+
+    const inputSnippet = typeof lastUserMsg.content === "string"
+      ? lastUserMsg.content.slice(0, 120)
+      : "";
+
+    logger.info({ inputSnippet }, "started");
 
     try {
       const result = await webAgent.invoke({ messages: [lastUserMsg] });
@@ -63,11 +71,20 @@ export function buildWebAgentNode(llm: ChatOpenAI) {
           ? lastMsg.content
           : JSON.stringify(lastMsg?.content ?? "");
 
-      logger.info("[web-agent] completed");
+      const toolCallCount = result.messages.filter(
+        (m) => m instanceof ToolMessage
+      ).length;
+
+      logger.info({
+        durationMs: Date.now() - nodeStart,
+        toolCallCount,
+        outputSnippet: output.slice(0, 120),
+      }, "completed");
+
       return { subAgentResult: output };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error("[web-agent] error:", msg);
+      logger.error({ durationMs: Date.now() - nodeStart, err: msg }, "failed");
       return { subAgentResult: `Web 搜索失败：${msg}` };
     }
   };
