@@ -25,7 +25,7 @@ jobs:
           bun run typecheck & TPID=$!
           # 测试输出写到文件，避免 stub/fixture 日志污染 CI 输出
           # 失败时再打印内容，方便排查
-          bun test > /tmp/bun-test.log 2>&1 & TSPID=$!
+          LOG_FILE_LEVEL=silent bun test > /tmp/bun-test.log 2>&1 & TSPID=$!
           wait $TPID || exit $?
           wait $TSPID || { echo "❌ 测试失败："; cat /tmp/bun-test.log; exit 1; }
 
