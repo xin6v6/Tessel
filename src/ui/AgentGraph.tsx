@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Zap, X, Settings2, Code2, Database, User, BrainCircuit, Bot, Wrench, MessageSquare, Search, ChevronRight } from 'lucide-react';
+import { Zap, X, Settings2, Code2, Database, User, BrainCircuit, Bot, Wrench, MessageSquare, Search, ChevronRight, ScrollText } from 'lucide-react';
 
 // ─── 节点数据────────────────────────────────────────────────────────
 // 布局：水平主流程 + 垂直子 Agent 层
@@ -415,6 +415,16 @@ export default function AgentGraph() {
               {label}
             </div>
           ))}
+          <div className="w-px h-4 bg-slate-700/60 mx-1" />
+          <a
+            href="/logs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium
+              text-emerald-400 border border-emerald-500/30 bg-emerald-500/10
+              hover:bg-emerald-500/20 hover:border-emerald-500/50 transition-all duration-150"
+          >
+            <ScrollText size={12} />
+            Log Viewer
+          </a>
         </div>
       </header>
 
