@@ -11,21 +11,23 @@ jobs:
 
     steps:
       - name: 拉取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           token: ${{ secrets.GH_PAT }}
 
-      # ── 质量关卡（在宿主机 Bun 上直接运行，无需 Docker）───────────
+      # ── 质量关卡 ──────────────────────────────────────────────────
+      # bun install：lockfile 未变时本地缓存命中，几乎瞬间完成
       - name: 安装依赖
         run: bun install --frozen-lockfile
 
-      - name: 类型检查
-        run: bun run typecheck
+      - name: 类型检查 & 测试
+        run: |
+          bun run typecheck & TPID=$!
+          bun test & TSPID=$!
+          wait $TPID || exit $?
+          wait $TSPID || exit $?
 
-      - name: 运行测试
-        run: bun test
-
-      # ── 写入 .env（内容来自 GitHub Secret，不进代码库）────────────
+      # ── 写入 .env ─────────────────────────────────────────────────
       - name: 生成 .env 文件
         env:
           ENV_FILE: ${{ secrets.ENV_FILE }}
@@ -34,118 +36,73 @@ jobs:
           chmod 600 .env
           echo "✅ .env 已生成（$(wc -l < .env) 行）"
 
-      # ── 确保日志目录存在（volume 挂载点必须先建好）──────────────
+      # ── 准备目录 ──────────────────────────────────────────────────
       - name: 准备数据目录
         run: mkdir -p data/logs
 
-      # ── 预拉基础镜像（带重试，与构建步骤解耦）────────────────────
+      # ── 拉基础镜像（本地已有则跳过，避免每次请求 registry）────────
       - name: 拉取基础镜像
         run: |
           BUN_IMAGE="oven/bun:1.3.11-alpine"
-          MAX=3
-          for i in $(seq 1 $MAX); do
-            echo "拉取 $BUN_IMAGE（第 $i/$MAX 次）..."
-            if docker pull "$BUN_IMAGE"; then
-              echo "✅ 拉取成功"
-              break
-            fi
-            if [ $i -eq $MAX ]; then
-              echo "⚠️  拉取失败，使用本地缓存继续构建..."
-            else
-              echo "等待 10s 后重试..."
-              sleep 10
-            fi
-          done
+          if docker image inspect "$BUN_IMAGE" &>/dev/null; then
+            echo "✅ 本地镜像已存在，跳过拉取"
+          else
+            echo "本地无缓存，拉取 $BUN_IMAGE..."
+            for i in 1 2 3; do
+              docker pull "$BUN_IMAGE" && break
+              [ $i -lt 3 ] && echo "第 $i 次失败，10s 后重试..." && sleep 10
+            done
+          fi
+          # 预拉取失败不阻断流程，docker compose build 会自行处理
+          true
 
-      # ── Docker 构建与滚动部署 ─────────────────────────────────────
+      # ── 构建 & 滚动部署 ───────────────────────────────────────────
       - name: 构建 Docker 镜像
-        run: |
-          # 不加 --no-cache：复用本地镜像层，只重建变更的层
-          # 基础镜像已在上一步预拉，不会因网络超时中断构建
-          docker compose build
+        run: docker compose build
 
       - name: 滚动重启容器
+        run: docker compose up -d
+
+      # ── 健康检查（synod + ui 并行轮询）───────────────────────────
+      - name: 健康检查
         run: |
-          # up -d 是幂等的：已运行 → 原地替换，不存在 → 创建启动
-          docker compose up -d
+          check_container() {
+            local name=$1
+            local max=$2
+            for i in $(seq 1 $max); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$name" 2>/dev/null || echo "no-healthcheck")
+              RUNNING=$(docker inspect --format='{{.State.Running}}' "$name" 2>/dev/null || echo "false")
+              echo "  [$name $i/$max] running=$RUNNING health=$STATUS"
+              [[ "$STATUS" == "healthy" ]]  && echo "✅ $name healthy" && return 0
+              [[ "$STATUS" == "unhealthy" ]] && echo "❌ $name unhealthy" && docker compose logs --tail=30 "$name" && return 1
+              [[ "$STATUS" == "no-healthcheck" && "$RUNNING" == "true" ]] && echo "✅ $name running" && return 0
+              [[ "$RUNNING" != "true" && $i -eq $max ]] && echo "❌ $name failed to start" && docker compose logs --tail=30 "$name" && return 1
+              sleep 3
+            done
+          }
 
-      # ── 健康检查：agent ───────────────────────────────────────────
-      - name: 健康检查 (synod)
-        run: |
-          echo "等待 synod 容器就绪..."
-          MAX=12
-          for i in $(seq 1 $MAX); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' synod 2>/dev/null || echo "no-healthcheck")
-            RUNNING=$(docker inspect --format='{{.State.Running}}' synod 2>/dev/null || echo "false")
-            echo "  [$i/$MAX] running=$RUNNING health=$STATUS"
-
-            if [[ "$STATUS" == "healthy" ]]; then
-              echo "✅ synod 健康检查通过"; break
-            fi
-            if [[ "$STATUS" == "unhealthy" ]]; then
-              echo "❌ synod 健康检查失败"
-              docker compose logs --tail=50 synod; exit 1
-            fi
-            if [[ "$STATUS" == "no-healthcheck" && "$RUNNING" == "true" ]]; then
-              echo "✅ synod 正在运行（无 HEALTHCHECK）"; break
-            fi
-            if [[ "$RUNNING" != "true" && $i -eq $MAX ]]; then
-              echo "❌ synod 未能正常启动"
-              docker compose logs --tail=50 synod; exit 1
-            fi
-            sleep 5
-          done
-
-      # ── 健康检查：UI ──────────────────────────────────────────────
-      - name: 健康检查 (synod-ui)
-        run: |
-          echo "等待 synod-ui 容器就绪..."
-          MAX=8
-          for i in $(seq 1 $MAX); do
-            STATUS=$(docker inspect --format='{{.State.Health.Status}}' synod-ui 2>/dev/null || echo "no-healthcheck")
-            RUNNING=$(docker inspect --format='{{.State.Running}}' synod-ui 2>/dev/null || echo "false")
-            echo "  [$i/$MAX] running=$RUNNING health=$STATUS"
-
-            if [[ "$STATUS" == "healthy" ]]; then
-              echo "✅ synod-ui 健康检查通过"; break
-            fi
-            if [[ "$STATUS" == "unhealthy" ]]; then
-              echo "❌ synod-ui 健康检查失败"
-              docker compose logs --tail=30 ui; exit 1
-            fi
-            if [[ "$STATUS" == "no-healthcheck" && "$RUNNING" == "true" ]]; then
-              echo "✅ synod-ui 正在运行"; break
-            fi
-            if [[ "$RUNNING" != "true" && $i -eq $MAX ]]; then
-              echo "❌ synod-ui 未能正常启动"
-              docker compose logs --tail=30 ui; exit 1
-            fi
-            sleep 5
-          done
+          check_container synod    10 & PID1=$!
+          check_container synod-ui  8 & PID2=$!
+          wait $PID1 || exit $?
+          wait $PID2 || exit $?
 
       # ── 确认服务运行 ──────────────────────────────────────────────
       - name: 确认服务运行
         run: |
-          echo "── 容器状态 ──"
           docker compose ps
 
           echo ""
-          echo "── synod 最近日志（20 行）──"
-          docker compose logs --tail=20 synod
+          docker compose logs --tail=15 synod
 
           echo ""
-          echo "── ui 最近日志（10 行）──"
-          docker compose logs --tail=10 ui
+          docker compose logs --tail=8 ui
 
           echo ""
-          # 检查 Slack Socket Mode 是否已连接（复用上面已打印的日志，不重复拉取）
-          if docker compose logs --since=5m synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
+          if docker compose logs --since=2m synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
             echo "✅ Slack Socket Mode 连接正常"
           else
-            echo "⚠️  未检测到 Socket Mode 连接日志（可能仍在初始化，属正常）"
+            echo "⚠️  未检测到 Socket Mode 连接日志（可能仍在初始化）"
           fi
 
-          # 获取宿主机 IP，打印访问地址
           HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-server-ip")
-          echo ""
           echo "🌐 Log Viewer: http://${HOST_IP}:3456/logs"
