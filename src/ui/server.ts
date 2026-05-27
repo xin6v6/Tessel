@@ -3,7 +3,17 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import index from "./index.html";
-import logViewer from "./log-viewer.html";
+
+// Serve log-viewer.html as a raw file to avoid Bun bundling it alongside
+// index.html — they would share the same HMR/JSX runtime bundle and conflict.
+const LOG_VIEWER_PATH = path.resolve(import.meta.dir, "log-viewer.html");
+let logViewerHtml: string;
+try {
+  logViewerHtml = fs.readFileSync(LOG_VIEWER_PATH, "utf8");
+} catch (err) {
+  console.error("[ui] Failed to read log-viewer.html:", err);
+  process.exit(1);
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -152,7 +162,13 @@ const server = Bun.serve({
   routes: {
     // ── HTML pages ─────────────────────────────────────────
     "/": index,
-    "/logs": logViewer,
+    "/logs": {
+      GET(_req: Request): Response {
+        return new Response(logViewerHtml, {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      },
+    },
 
     // ── REST: recent history ───────────────────────────────
     "/api/logs": {
