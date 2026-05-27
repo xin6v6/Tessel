@@ -246,7 +246,7 @@
       eventSource.addEventListener('history', (e) => {
         try {
           const entries = JSON.parse(e.data);
-          entries.forEach(entry => allLogs.push(entry));
+          allLogs = entries;
           renderAll();
         } catch {}
       });
