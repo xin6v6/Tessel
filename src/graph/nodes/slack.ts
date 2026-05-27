@@ -1,5 +1,6 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import { HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { GraphStateType } from "../state.ts";
@@ -56,16 +57,22 @@ export function buildSlackAgentNode(llm: ChatOpenAI, toolRegistry: ToolRegistry)
   return async function slackAgentNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
-    logger.info("[slack-agent] started");
+    const nodeStart = Date.now();
 
-    // 取最后一条用户消息作为任务输入
     const lastUserMsg = [...state.messages]
       .reverse()
-      .find((m) => m.getType() === "human");
+      .find((m) => m instanceof HumanMessage);
 
     if (!lastUserMsg) {
+      logger.warn("no human message found, skipping");
       return { subAgentResult: "未找到用户消息，无法执行 Slack 操作。" };
     }
+
+    const inputSnippet = typeof lastUserMsg.content === "string"
+      ? lastUserMsg.content.slice(0, 120)
+      : "";
+
+    logger.info({ inputSnippet }, "started");
 
     try {
       const result = await slackAgent.invoke({
@@ -78,11 +85,21 @@ export function buildSlackAgentNode(llm: ChatOpenAI, toolRegistry: ToolRegistry)
           ? lastMsg.content
           : JSON.stringify(lastMsg?.content ?? "");
 
-      logger.info("[slack-agent] completed");
+      // 统计本次 ReAct 循环中工具调用次数
+      const toolCallCount = result.messages.filter(
+        (m) => m instanceof ToolMessage
+      ).length;
+
+      logger.info({
+        durationMs: Date.now() - nodeStart,
+        toolCallCount,
+        outputSnippet: output.slice(0, 120),
+      }, "completed");
+
       return { subAgentResult: output };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error("[slack-agent] error:", msg);
+      logger.error({ durationMs: Date.now() - nodeStart, err: msg }, "failed");
       return { subAgentResult: `Slack 操作失败：${msg}` };
     }
   };
