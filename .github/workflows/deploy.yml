@@ -23,9 +23,11 @@ jobs:
       - name: 类型检查 & 测试
         run: |
           bun run typecheck & TPID=$!
-          bun test & TSPID=$!
+          # 测试输出写到文件，避免 stub/fixture 日志污染 CI 输出
+          # 失败时再打印内容，方便排查
+          bun test > /tmp/bun-test.log 2>&1 & TSPID=$!
           wait $TPID || exit $?
-          wait $TSPID || exit $?
+          wait $TSPID || { echo "❌ 测试失败："; cat /tmp/bun-test.log; exit 1; }
 
       # ── 写入 .env ─────────────────────────────────────────────────
       - name: 生成 .env 文件
