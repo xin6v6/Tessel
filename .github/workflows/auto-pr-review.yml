@@ -32,11 +32,23 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          set -euo pipefail
+
           # 用 GitHub API 拉 diff，绕开本地 git 对象问题
           diff=$(gh api \
             -H "Accept: application/vnd.github.v3.diff" \
             "/repos/$REPO/pulls/$PR_NUMBER" \
-            | head -c 30000)
+            | head -c 30000) || {
+            echo "❌ gh api 调用失败（网络、权限或速率限制）"
+            exit 1
+          }
+
+          if [[ -z "$diff" ]]; then
+            echo "⚠️  diff 为空，PR 可能不包含受审查的文件类型（*.ts/js/json/sh/md）"
+            echo "diff=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           echo "diff 大小: ${#diff} 字节"
           echo "diff<<EOF" >> $GITHUB_OUTPUT
           echo "$diff" >> $GITHUB_OUTPUT
@@ -150,8 +162,7 @@ jobs:
         run: |
           gh pr merge "$PR_NUMBER" \
             --repo "$REPO" \
-            --squash \
-            --admin \
-            --body "Auto-merged after DeepSeek review ✅"
+            --merge \
+            --admin
 
           echo "✅ PR #$PR_NUMBER merged"
