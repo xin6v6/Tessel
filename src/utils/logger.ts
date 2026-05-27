@@ -1,31 +1,3 @@
-export type LogLevel = "debug" | "info" | "warn" | "error";
-
-const LEVELS: Record<LogLevel, number> = {
-  debug: 0,
-  info: 1,
-  warn: 2,
-  error: 3,
-};
-
-const currentLevel: LogLevel =
-  (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info";
-
-function log(level: LogLevel, ...args: unknown[]): void {
-  if (LEVELS[level] >= LEVELS[currentLevel]) {
-    const prefix = `[${new Date().toISOString()}] [${level.toUpperCase()}]`;
-    if (level === "error") {
-      console.error(prefix, ...args);
-    } else if (level === "warn") {
-      console.warn(prefix, ...args);
-    } else {
-      console.log(prefix, ...args);
-    }
-  }
-}
-
-export const logger = {
-  debug: (...args: unknown[]) => log("debug", ...args),
-  info: (...args: unknown[]) => log("info", ...args),
-  warn: (...args: unknown[]) => log("warn", ...args),
-  error: (...args: unknown[]) => log("error", ...args),
-};
+// Legacy shim — new code should import from src/observability/logger.ts
+export { logger, createLogger } from "../observability/logger.ts";
+export type { LogLevel } from "../observability/logger.ts";

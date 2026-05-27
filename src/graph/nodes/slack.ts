@@ -4,7 +4,8 @@ import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
-import { logger } from "../../utils/logger.ts";
+import { createLogger } from "../../observability/logger.ts";
+const logger = createLogger("slack-agent");
 
 // ----------------------------------------------------------------
 // Slack 子 Agent 节点

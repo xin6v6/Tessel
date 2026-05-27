@@ -73,7 +73,7 @@ jobs:
             --arg diff "$DIFF" \
             '{
               model: "deepseek-v4-pro",
-              max_tokens: 4096,
+              max_tokens: 8192,
               messages: [
                 {
                   role: "system",

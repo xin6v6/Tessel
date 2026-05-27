@@ -2,6 +2,8 @@ import { HumanMessage } from "@langchain/core/messages";
 import { buildGraph } from "./graph/index.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { logger } from "./utils/logger.ts";
+import { runWithContext, newSessionId } from "./observability/context.ts";
+import { traceWriter } from "./observability/trace.ts";
 
 // ----------------------------------------------------------------
 // 工具函数
@@ -23,6 +25,34 @@ function extractReply(
   return stripThinking(raw) || "（无回复）";
 }
 
+/** Extract token counts from the last AIMessage in a graph result */
+function extractTokens(
+  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
+): { prompt: number; completion: number; total: number } {
+  const last = result.messages.at(-1);
+  if (!last) return { prompt: 0, completion: 0, total: 0 };
+
+  // LangChain AIMessage exposes usage_metadata
+  const meta = (last as unknown as Record<string, unknown>);
+  const usage = meta["usage_metadata"] as Record<string, number> | undefined
+    ?? (meta["response_metadata"] as Record<string, unknown> | undefined)?.["tokenUsage"] as Record<string, number> | undefined;
+
+  if (!usage) return { prompt: 0, completion: 0, total: 0 };
+
+  const prompt     = (usage["input_tokens"]        ?? usage["promptTokens"]     ?? 0) as number;
+  const completion = (usage["output_tokens"]       ?? usage["completionTokens"] ?? 0) as number;
+  const total      = (usage["total_tokens"]        ?? usage["totalTokens"]      ?? prompt + completion) as number;
+  return { prompt, completion, total };
+}
+
+/** Extract the route selected from graph state */
+function extractRoute(
+  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
+): string {
+  const state = result as unknown as Record<string, unknown>;
+  return typeof state["next"] === "string" ? state["next"] : "__end__";
+}
+
 // ----------------------------------------------------------------
 // 集成层初始化
 // ----------------------------------------------------------------
@@ -40,35 +70,97 @@ if (process.env.SLACK_BOT_TOKEN) {
       socketMode,
       eventHandler: socketMode
         ? {
-            onMention: async ({ textClean }) => {
+            onMention: async ({ textClean, user }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
+              const sessionId = newSessionId();
+              const startTime = Date.now();
               logger.info(`[slack:mention] "${textClean}"`);
-              try {
-                const result = await graph.invoke({
-                  messages: [new HumanMessage(textClean)],
-                });
-                return extractReply(result);
-              } catch (err) {
-                logger.error("[slack:mention] error:", err);
-                return "❌ 处理出错，请稍后重试";
-              }
+              return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
+                try {
+                  const result = await graph!.invoke({
+                    messages: [new HumanMessage(textClean)],
+                  });
+                  const reply = extractReply(result);
+                  await traceWriter.write({
+                    ts: new Date().toISOString(),
+                    sessionId,
+                    userId: user,
+                    source: "slack",
+                    input: textClean.slice(0, 2000),
+                    reply: reply.slice(0, 2000),
+                    model: process.env.LLM_MODEL ?? "gpt-4o",
+                    tokens: extractTokens(result),
+                    timing: { totalMs: Date.now() - startTime },
+                    route: extractRoute(result),
+                  });
+                  return reply;
+                } catch (err) {
+                  const error = err instanceof Error ? err.message : String(err);
+                  logger.error({ err: String(err) }, "[slack:mention] error");
+                  await traceWriter.write({
+                    ts: new Date().toISOString(),
+                    sessionId,
+                    userId: user,
+                    source: "slack",
+                    input: textClean.slice(0, 2000),
+                    reply: "",
+                    model: process.env.LLM_MODEL ?? "gpt-4o",
+                    tokens: { prompt: 0, completion: 0, total: 0 },
+                    timing: { totalMs: Date.now() - startTime },
+                    route: "__end__",
+                    error,
+                  });
+                  return "❌ 处理出错，请稍后重试";
+                }
+              });
             },
-            onMessage: async ({ text }) => {
+            onMessage: async ({ text, user }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
+              const sessionId = newSessionId();
+              const startTime = Date.now();
               logger.info(`[slack:dm] "${text}"`);
-              try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 120_000);
-                const result = await graph.invoke(
-                  { messages: [new HumanMessage(text)] },
-                  { signal: controller.signal }
-                );
-                clearTimeout(timeout);
-                return extractReply(result);
-              } catch (err) {
-                logger.error("[slack:dm] error:", err);
-                return "❌ 处理出错，请稍后重试";
-              }
+              return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
+                try {
+                  const controller = new AbortController();
+                  const timeout = setTimeout(() => controller.abort(), 120_000);
+                  const result = await graph!.invoke(
+                    { messages: [new HumanMessage(text)] },
+                    { signal: controller.signal }
+                  );
+                  clearTimeout(timeout);
+                  const reply = extractReply(result);
+                  await traceWriter.write({
+                    ts: new Date().toISOString(),
+                    sessionId,
+                    userId: user,
+                    source: "slack",
+                    input: text.slice(0, 2000),
+                    reply: reply.slice(0, 2000),
+                    model: process.env.LLM_MODEL ?? "gpt-4o",
+                    tokens: extractTokens(result),
+                    timing: { totalMs: Date.now() - startTime },
+                    route: extractRoute(result),
+                  });
+                  return reply;
+                } catch (err) {
+                  const error = err instanceof Error ? err.message : String(err);
+                  logger.error({ err: String(err) }, "[slack:dm] error");
+                  await traceWriter.write({
+                    ts: new Date().toISOString(),
+                    sessionId,
+                    userId: user,
+                    source: "slack",
+                    input: text.slice(0, 2000),
+                    reply: "",
+                    model: process.env.LLM_MODEL ?? "gpt-4o",
+                    tokens: { prompt: 0, completion: 0, total: 0 },
+                    timing: { totalMs: Date.now() - startTime },
+                    route: "__end__",
+                    error,
+                  });
+                  return "❌ 处理出错，请稍后重试";
+                }
+              });
             },
           }
         : undefined,
@@ -123,14 +215,46 @@ async function main() {
         process.exit(0);
       }
 
-      try {
-        const result = await graph!.invoke({
-          messages: [new HumanMessage(userMessage)],
-        });
-        console.log(`\n${extractReply(result)}\n`);
-      } catch (err) {
-        logger.error("Error:", err);
-      }
+      const sessionId = newSessionId();
+      const startTime = Date.now();
+
+      await runWithContext({ sessionId, userId: "cli", source: "cli" }, async () => {
+        try {
+          const result = await graph!.invoke({
+            messages: [new HumanMessage(userMessage)],
+          });
+          const reply = extractReply(result);
+          console.log(`\n${reply}\n`);
+          await traceWriter.write({
+            ts: new Date().toISOString(),
+            sessionId,
+            userId: "cli",
+            source: "cli",
+            input: userMessage.slice(0, 2000),
+            reply: reply.slice(0, 2000),
+            model: process.env.LLM_MODEL ?? "gpt-4o",
+            tokens: extractTokens(result),
+            timing: { totalMs: Date.now() - startTime },
+            route: extractRoute(result),
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          logger.error({ err: String(err) }, "Error");
+          await traceWriter.write({
+            ts: new Date().toISOString(),
+            sessionId,
+            userId: "cli",
+            source: "cli",
+            input: userMessage.slice(0, 2000),
+            reply: "",
+            model: process.env.LLM_MODEL ?? "gpt-4o",
+            tokens: { prompt: 0, completion: 0, total: 0 },
+            timing: { totalMs: Date.now() - startTime },
+            route: "__end__",
+            error,
+          });
+        }
+      });
 
       process.stdout.write("> ");
     }
