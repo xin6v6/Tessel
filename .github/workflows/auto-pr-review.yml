@@ -34,18 +34,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 用 GitHub API 拉 diff，绕开本地 git 对象问题
-          # 用 if ! 而非 ||，避免 set -e 导致 || 分支永远不执行
-          if ! diff=$(gh api \
+          # 先完整获取 diff，再截断
+          # 不在管道中直接 head，避免 SIGPIPE 使 gh api 以非 0 退出
+          # 在 pipefail 模式下这会被误判为 API 调用失败
+          if ! raw=$(gh api \
             -H "Accept: application/vnd.github.v3.diff" \
-            "/repos/$REPO/pulls/$PR_NUMBER" \
-            | head -c 30000); then
+            "/repos/$REPO/pulls/$PR_NUMBER"); then
             echo "❌ gh api 调用失败（网络、权限或速率限制）"
             exit 1
           fi
 
+          # 获取成功后再截断
+          diff="${raw:0:30000}"
+
           if [[ -z "$diff" ]]; then
-            echo "⚠️  diff 为空，PR 可能不包含受审查的文件类型"
+            echo "⚠️  diff 为空，PR 不包含受审查的文件类型（*.ts/tsx/js/json/sh/md）"
             echo "diff=" >> $GITHUB_OUTPUT
             exit 0
           fi
