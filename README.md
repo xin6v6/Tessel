@@ -111,9 +111,10 @@ bun run dev
 | `bun run daemon` | 后台启动（调用 `start.sh --daemon`） |
 | `bun run stop` | 停止后台进程（调用 `start.sh --stop`） |
 | `bun run status` | 查看运行状态（调用 `start.sh --status`） |
-| `bun run logs` | 查看 daemon 进程 stdout 日志 |
-| `bun run logs:follow` | 实时跟踪结构化日志（需要 `jq`） |
-| `bun run logs:debug` | 以 `debug` 级别启动，输出工具调用细节 |
+| `bun run logs` | 实时跟踪今日结构化日志（需要 `jq`，格式化输出） |
+| `bun run logs:raw` | 实时跟踪今日日志原始 JSON |
+| `bun run logs:errors` | 实时跟踪今日 warn/error/fatal |
+| `bun run logs:debug` | 以 `debug` 级别启动，输出路由决策、工具调用细节 |
 | `bun run traces` | 查看最近 20 条 trace（tokens / 耗时 / 路由） |
 | `bun test` | 运行测试 |
 | `bun run typecheck` | TypeScript 类型检查 |
@@ -125,19 +126,34 @@ bun run dev
 
 | 文件 | 内容 |
 |------|------|
-| `data/logs/YYYY-MM-DD.log` | 全量结构化 JSON 日志 |
-| `data/logs/YYYY-MM-DD.error.log` | 仅 warn / error / fatal |
+| `data/logs/YYYY-MM-DD.log` | 全量结构化 JSON，所有级别 |
+| `data/logs/YYYY-MM-DD.error.log` | 仅 warn / error / fatal，快速排错 |
 | `data/traces.jsonl` | 每次对话的完整 trace（tokens、耗时、路由） |
 
-日志级别通过环境变量控制（默认终端 `info`，文件 `debug`）：
+**查看日志：**
 
-```env
-LOG_LEVEL=debug        # 终端：silent | fatal | error | warn | info | debug | trace
-LOG_FILE_LEVEL=debug   # 文件：同上
-LOG_FORMAT=json        # 终端也输出 JSON（生产环境推荐）
+```bash
+bun run logs           # 实时跟踪，jq 格式化（时间 级别 组件 sessionId 消息）
+bun run logs:errors    # 只看 warn 及以上
+bun run logs:raw       # 原始 JSON，适合 grep / 管道处理
+bun run traces         # 最近 20 条对话 trace
 ```
 
-每条日志包含 `timestamp`、`level`、`logger`（组件名）、`sessionId` 以及本次操作的结构化字段（`inputSnippet`、`durationMs`、`tokens` 等）。
+**开发调试：**
+
+```bash
+bun run logs:debug     # 启动时附带 LOG_LEVEL=debug，能看到路由决策和工具调用入参
+```
+
+**日志级别**（`.env` 或环境变量控制）：
+
+```env
+LOG_LEVEL=info         # 终端：silent | fatal | error | warn | info | debug | trace
+LOG_FILE_LEVEL=debug   # 文件：默认比终端更详细
+LOG_FORMAT=json        # 终端也输出 JSON（生产环境 / 日志采集推荐）
+```
+
+每条日志包含 `timestamp`、`level`、`logger`（组件名）、`sessionId`，以及本次操作的结构化字段（`inputSnippet`、`durationMs`、`promptTokens` 等）。
 
 ## Slack 配置
 
