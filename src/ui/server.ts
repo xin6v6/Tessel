@@ -214,7 +214,10 @@ const server = Bun.serve({
     },
   },
 
-  development: {
+  // In production (NODE_ENV=production), disable HMR so Bun uses the
+  // production JSX transform (React.createElement) instead of jsxDEV,
+  // which is not exported by react/jsx-dev-runtime in production mode.
+  development: process.env.NODE_ENV !== "production" && {
     hmr: true,
     console: true,
   },
