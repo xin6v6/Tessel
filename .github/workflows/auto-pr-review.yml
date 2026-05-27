@@ -27,11 +27,16 @@ jobs:
 
       - name: Get diff
         id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch origin main
-          diff=$(git diff origin/main...HEAD -- \
+          # 用 PR 的精确 base/head SHA，避免 HEAD 指向 merge commit 导致 diff 为空
+          git fetch origin "$BASE_SHA" "$HEAD_SHA"
+          diff=$(git diff "$BASE_SHA".."$HEAD_SHA" -- \
             '*.ts' '*.tsx' '*.js' '*.json' '*.sh' '*.md' \
             | head -c 30000)
+          echo "diff 大小: ${#diff} 字节"
           echo "diff<<EOF" >> $GITHUB_OUTPUT
           echo "$diff" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
