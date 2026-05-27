@@ -3,7 +3,11 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import index from "./index.html";
-import logViewer from "./log-viewer.html";
+
+// log-viewer.html は Bun の HTML bundler を通さず直接ファイルとして返す
+// （React JSX runtime と HMR bundle が競合するのを防ぐため）
+const LOG_VIEWER_PATH = path.resolve(import.meta.dir, "log-viewer.html");
+const logViewerHtml = fs.readFileSync(LOG_VIEWER_PATH, "utf8");
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -152,7 +156,13 @@ const server = Bun.serve({
   routes: {
     // ── HTML pages ─────────────────────────────────────────
     "/": index,
-    "/logs": logViewer,
+    "/logs": {
+      GET(_req: Request): Response {
+        return new Response(logViewerHtml, {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      },
+    },
 
     // ── REST: recent history ───────────────────────────────
     "/api/logs": {
