@@ -25,6 +25,15 @@ jobs:
       - name: 运行测试
         run: bun test
 
+      # ── 写入 .env（内容来自 GitHub Secret，不进代码库）────────────
+      - name: 生成 .env 文件
+        env:
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          echo "$ENV_FILE" > .env
+          chmod 600 .env
+          echo "✅ .env 已生成（$(wc -l < .env) 行）"
+
       # ── Docker 构建与滚动部署 ─────────────────────────────────────
       - name: 构建 Docker 镜像
         run: |
