@@ -16,6 +16,8 @@ node_modules
 
 # 运行时生成文件
 logs/
+data/logs/
+data/traces.jsonl
 *.log
 .synod.pid
 
