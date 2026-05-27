@@ -37,9 +37,9 @@ export class IntegrationRegistry {
         for (const { definition, handler } of integration.toolEntries()) {
           this.toolRegistry.register(definition, handler);
         }
-        logger.info(`[integrations] ✓ ${integration.id}: ${integration.description}`);
+        logger.info({ id: integration.id }, `✓ ${integration.id}: ${integration.description}`);
       } catch (err) {
-        logger.error({ err: String(err) }, `[integrations] ✗ ${integration.id} failed to initialize`);
+        logger.error({ err: String(err), id: integration.id }, `✗ ${integration.id} failed to initialize`);
         // Non-fatal — skip the integration, keep others running
       }
     }
@@ -52,7 +52,7 @@ export class IntegrationRegistry {
       try {
         await integration.destroy?.();
       } catch (err) {
-        logger.warn({ err: String(err) }, `[integrations] ${integration.id} destroy error`);
+        logger.warn({ err: String(err), id: integration.id }, `destroy error: ${integration.id}`);
       }
     }
   }

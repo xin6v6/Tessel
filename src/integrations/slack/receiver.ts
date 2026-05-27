@@ -69,7 +69,7 @@ export class SlackReceiver {
   private _registerHandlers() {
     // ---- 普通消息（排除 Bot 自己和子类型如 bot_message）----
     this.app.message(async ({ message, say }) => {
-      logger.debug(`[slack] raw message event: ${JSON.stringify(message)}`);
+      logger.debug({ raw: JSON.stringify(message) }, "raw message event");
 
       // 过滤掉 bot 消息和无文本消息
       if (
@@ -89,7 +89,7 @@ export class SlackReceiver {
         threadTs: ("thread_ts" in message ? message.thread_ts : undefined) ?? undefined,
       };
 
-      logger.debug(`[slack] message from ${event.user} in ${event.channel}: ${event.text}`);
+      logger.debug({ user: event.user, channel: event.channel, text: event.text }, "message received");
 
       const reply = await this.handler.onMessage?.(event);
       if (reply) {
@@ -111,7 +111,7 @@ export class SlackReceiver {
         threadTs: event.thread_ts ?? undefined,
       };
 
-      logger.debug(`[slack] mention from ${mentionEvent.user}: ${textClean}`);
+      logger.debug({ user: mentionEvent.user, text: textClean }, "mention received");
 
       const reply = await this.handler.onMention?.(mentionEvent);
       if (reply) {
@@ -126,11 +126,11 @@ export class SlackReceiver {
     this.botUserId = auth.user_id;
 
     await this.app.start();
-    logger.info(`[slack] Socket Mode connected (bot: @${auth.user})`);
+    logger.info({ bot: auth.user }, "Socket Mode connected");
   }
 
   async stop(): Promise<void> {
     await this.app.stop();
-    logger.info("[slack] Socket Mode disconnected");
+    logger.info("Socket Mode disconnected");
   }
 }

@@ -18,8 +18,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 APP_NAME="synod"
 PID_FILE="$PROJECT_DIR/.synod.pid"
-LOG_FILE="$PROJECT_DIR/logs/synod.log"
-LOG_DIR="$PROJECT_DIR/logs"
+DAEMON_LOG="$PROJECT_DIR/data/logs/daemon.log"   # daemon 自身的 stdout（启动/重试消息）
+LOG_DIR="$PROJECT_DIR/data/logs"
 
 MAX_RETRIES=5          # 连续失败超过此次数后停止重试
 RETRY_DELAY=5          # 初始重试等待（秒）
@@ -58,7 +58,8 @@ cmd_status() {
   if is_running; then
     local pid; pid=$(get_pid)
     ok "$APP_NAME 正在运行 (PID: $pid)"
-    echo -e "  日志文件: $LOG_FILE"
+    echo -e "  daemon 日志: $DAEMON_LOG"
+    echo -e "  应用日志:   $LOG_DIR/$(date +%Y-%m-%d).log"
     if command -v ps &>/dev/null; then
       echo -e "  $(ps -p "$pid" -o pid=,etime=,rss= 2>/dev/null | awk '{printf "运行时长: %s  内存: %sMB", $2, int($3/1024)}')"
     fi
@@ -98,12 +99,19 @@ cmd_stop() {
 # ── 子命令：查看日志 ────────────────────────────────────────────
 
 cmd_logs() {
-  if [[ ! -f "$LOG_FILE" ]]; then
-    warn "日志文件不存在：$LOG_FILE"
+  # 运行时动态取当天日期，确保跨天后追踪的是最新日志文件
+  local today_log="$LOG_DIR/$(date +%Y-%m-%d).log"
+  if [[ ! -f "$today_log" ]]; then
+    warn "今日日志文件不存在：$today_log"
+    warn "请先启动服务，或用 bun run logs 查看实时日志"
     return 0
   fi
   log "实时查看日志（Ctrl+C 退出）..."
-  tail -f "$LOG_FILE"
+  if command -v jq &>/dev/null; then
+    tail -f "$today_log" | jq -r '[.timestamp, (.level | ascii_upcase | .[0:5]), .logger, (.sessionId // ""), .message] | @tsv'
+  else
+    tail -f "$today_log"
+  fi
 }
 
 # ── 核心：带重试的运行循环 ──────────────────────────────────────
@@ -164,7 +172,7 @@ run_with_retry() {
     # 超过最大重试次数
     if [[ $retries -ge $MAX_RETRIES ]]; then
       err "连续失败 $MAX_RETRIES 次，停止重试"
-      err "请检查日志：$LOG_FILE"
+      err "请检查日志：$DAEMON_LOG"
       exit 1
     fi
 
@@ -193,13 +201,16 @@ cmd_daemon() {
   check_deps
 
   log "以后台模式启动 $APP_NAME..."
-  log "日志输出到：$LOG_FILE"
+  log "daemon 日志：$DAEMON_LOG（启动/重试消息）"
+  log "应用日志：$LOG_DIR/YYYY-MM-DD.log（结构化 JSON）"
 
   # 用 nohup + subshell 运行重试循环
+  # daemon 自身的 stdout（启动/重试消息）写到独立的 daemon.log，
+  # 与应用按天滚动的结构化日志文件分开
   nohup bash -c "
     source '$SCRIPT_DIR/start.sh'
     run_with_retry
-  " >> "$LOG_FILE" 2>&1 &
+  " >> "$DAEMON_LOG" 2>&1 &
 
   local pid=$!
   echo "$pid" > "$PID_FILE"
@@ -211,7 +222,7 @@ cmd_daemon() {
     echo -e "  查看日志：${BOLD}$0 --logs${RESET}"
     echo -e "  停止服务：${BOLD}$0 --stop${RESET}"
   else
-    err "启动失败，请检查日志：$LOG_FILE"
+    err "启动失败，请检查日志：$DAEMON_LOG"
     rm -f "$PID_FILE"
     exit 1
   fi

@@ -74,7 +74,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
-              logger.info(`[slack:mention] "${textClean}"`);
+              logger.info({ text: textClean }, "slack:mention received");
               return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
                 try {
                   const result = await graph!.invoke({
@@ -96,7 +96,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                   return reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
-                  logger.error({ err: String(err) }, "[slack:mention] error");
+                  logger.error({ err: String(err) }, "slack:mention error");
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
@@ -118,7 +118,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
-              logger.info(`[slack:dm] "${text}"`);
+              logger.info({ text }, "slack:dm received");
               return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
                 try {
                   const controller = new AbortController();
@@ -144,7 +144,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                   return reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
-                  logger.error({ err: String(err) }, "[slack:dm] error");
+                  logger.error({ err: String(err) }, "slack:dm error");
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
