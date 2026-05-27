@@ -1,7 +1,8 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { GraphStateType, SubAgentName } from "../state.ts";
-import { logger } from "../../utils/logger.ts";
+import { createLogger } from "../../observability/logger.ts";
+const logger = createLogger("supervisor");
 
 // ----------------------------------------------------------------
 // 子 Agent 注册表
@@ -53,6 +54,7 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
   return async function supervisorNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
+    const nodeStart = Date.now();
     const { messages, subAgentResult } = state;
 
     // ── 阶段 A：子 Agent 已完成 → 整合结果生成最终回复 ──
@@ -99,7 +101,7 @@ ${agentList}
         : JSON.stringify(routeReply.content);
 
     const next = parseRoute(routeText);
-    logger.info(`[supervisor] route → ${next} (raw: "${routeText.trim()}")`);
+    logger.info({ durationMs: Date.now() - nodeStart }, `[supervisor] route → ${next} (raw: "${routeText.trim()}")`);
 
     // ── 阶段 C：无需子 Agent，直接回复 ──
     if (next === "__end__") {
@@ -107,6 +109,7 @@ ${agentList}
         new SystemMessage("你是一个有帮助的个人助手。请直接回答用户的问题。"),
         ...messages,
       ]);
+      logger.info({ durationMs: Date.now() - nodeStart }, "[supervisor] direct reply composed");
       return {
         messages: [directReply],
         next: "__end__",

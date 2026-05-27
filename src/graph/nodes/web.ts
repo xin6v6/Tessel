@@ -3,7 +3,8 @@ import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { GraphStateType } from "../state.ts";
-import { logger } from "../../utils/logger.ts";
+import { createLogger } from "../../observability/logger.ts";
+const logger = createLogger("web-agent");
 
 // ----------------------------------------------------------------
 // Web Search Agent 节点（stub）
