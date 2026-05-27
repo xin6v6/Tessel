@@ -22,9 +22,10 @@ jobs:
 
       - name: 类型检查 & 测试
         run: |
-          bun run typecheck &
-          bun test &
-          wait
+          bun run typecheck & TPID=$!
+          bun test & TSPID=$!
+          wait $TPID || exit $?
+          wait $TSPID || exit $?
 
       # ── 写入 .env ─────────────────────────────────────────────────
       - name: 生成 .env 文件
@@ -52,6 +53,8 @@ jobs:
               [ $i -lt 3 ] && echo "第 $i 次失败，10s 后重试..." && sleep 10
             done
           fi
+          # 预拉取失败不阻断流程，docker compose build 会自行处理
+          true
 
       # ── 构建 & 滚动部署 ───────────────────────────────────────────
       - name: 构建 Docker 镜像
@@ -78,9 +81,10 @@ jobs:
             done
           }
 
-          check_container synod    10 &
-          check_container synod-ui  8 &
-          wait
+          check_container synod    10 & PID1=$!
+          check_container synod-ui  8 & PID2=$!
+          wait $PID1 || exit $?
+          wait $PID2 || exit $?
 
       # ── 确认服务运行 ──────────────────────────────────────────────
       - name: 确认服务运行
@@ -89,6 +93,9 @@ jobs:
 
           echo ""
           docker compose logs --tail=15 synod
+
+          echo ""
+          docker compose logs --tail=8 ui
 
           echo ""
           if docker compose logs --since=2m synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
