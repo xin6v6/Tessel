@@ -175,7 +175,7 @@ function entryMatches(entry: LogEntry, q: LogQuery): boolean {
  * logs, applies filters, sorts by timestamp, returns at most `limit` entries
  * (keeping the newest by default).
  *
- * Note: this reads files in full. For Synod's volume that's fine; if logs
+ * Note: this reads files in full. For Tessel's volume that's fine; if logs
  * grow large enough that this becomes slow, swap in a streaming reader.
  *
  * `readAllLines` already swallows ENOENT and parse errors per-file, but we
@@ -437,7 +437,7 @@ const server = Bun.serve({
 const localIP = getLocalIP();
 console.log(`
 ╔═══════════════════════════════════════════════╗
-║           Synod UI  (port ${PORT})               ║
+║           Tessel UI  (port ${PORT})               ║
 ╠═══════════════════════════════════════════════╣
 ║  Agent Graph  →  http://localhost:${PORT}        ║
 ║  Log Viewer   →  http://localhost:${PORT}/logs   ║

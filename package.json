@@ -1,5 +1,5 @@
 {
-  "name": "synod",
+  "name": "tessel",
   "module": "index.ts",
   "type": "module",
   "private": true,

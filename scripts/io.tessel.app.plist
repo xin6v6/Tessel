@@ -4,7 +4,7 @@
 <dict>
     <!-- 服务标识符，全局唯一 -->
     <key>Label</key>
-    <string>io.synod.app</string>
+    <string>io.tessel.app</string>
 
     <!-- 启动命令：由 launchd-install.sh 替换 __BUN__ 和 __PROJECT_DIR__ -->
     <key>ProgramArguments</key>
@@ -42,9 +42,9 @@
 
     <!-- 日志 -->
     <key>StandardOutPath</key>
-    <string>__PROJECT_DIR__/logs/synod.log</string>
+    <string>__PROJECT_DIR__/logs/tessel.log</string>
     <key>StandardErrorPath</key>
-    <string>__PROJECT_DIR__/logs/synod.error.log</string>
+    <string>__PROJECT_DIR__/logs/tessel.error.log</string>
 
     <!-- 开机后自动启动（登录时加载） -->
     <key>RunAtLoad</key>

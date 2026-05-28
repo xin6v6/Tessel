@@ -1,5 +1,5 @@
 # ================================================================
-# Synod — Multi-stage Dockerfile
+# Tessel — Multi-stage Dockerfile
 # Stage 1: install dependencies (frozen lockfile, production only)
 # Stage 2: lean runtime image (no dev tooling)
 # ================================================================

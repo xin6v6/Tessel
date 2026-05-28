@@ -391,7 +391,7 @@ export default function AgentGraph() {
             <Zap size={14} className="text-indigo-400" />
           </div>
           <span className="font-semibold text-sm tracking-wide">
-            <span className="text-white">Synod</span>
+            <span className="text-white">Tessel</span>
             <span className="text-slate-600 mx-2">·</span>
             <span className="text-slate-400">Agent Graph</span>
           </span>

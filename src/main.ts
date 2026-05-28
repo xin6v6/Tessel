@@ -192,7 +192,7 @@ async function main() {
   });
 
   logger.info("──────────────────────────────");
-  logger.info("Synod started");
+  logger.info("Tessel started");
   logger.info(`Model:        ${process.env.LLM_MODEL ?? "gpt-4o"}`);
   logger.info(`Integrations: ${integrations.list().map((i) => i.id).join(", ") || "none"}`);
   logger.info(`Socket Mode:  ${process.env.SLACK_APP_TOKEN ? "enabled" : "disabled"}`);

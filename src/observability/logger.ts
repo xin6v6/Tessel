@@ -48,7 +48,7 @@ function parseLevel(val: string | undefined, defaultVal: LogLevel): LogLevel {
 const isTestRun =
   process.env.NODE_ENV === "test" ||
   Boolean(process.env.BUN_TEST) ||
-  Boolean(process.env.SYNOD_DISABLE_FILE_LOGS);
+  Boolean(process.env.TESSEL_DISABLE_FILE_LOGS);
 
 const consoleLevel = parseLevel(process.env.LOG_LEVEL, "info");
 const fileLevel: LogLevel = isTestRun

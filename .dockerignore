@@ -19,7 +19,7 @@ logs/
 data/logs/
 data/traces.jsonl
 *.log
-.synod.pid
+.tessel.pid
 
 # macOS 噪声
 .DS_Store
