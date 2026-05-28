@@ -120,6 +120,85 @@ function parseJsonLines(lines: string[]): LogEntry[] {
   });
 }
 
+// ── Query layer ─────────────────────────────────────────────────────────────
+//
+// Server-side filtering so callers (you, me, scripts) don't have to grep on a
+// firehose. All filters are AND'd; absent params are skipped.
+
+const LEVEL_RANK: Record<string, number> = {
+  fatal: 1, error: 2, warn: 3, info: 4, debug: 5, trace: 6,
+};
+
+interface LogQuery {
+  date?: string;       // exact YYYY-MM-DD (mutually exclusive with since/until)
+  since?: string;      // YYYY-MM-DD inclusive
+  until?: string;      // YYYY-MM-DD inclusive
+  logger?: string;     // exact match
+  level?: string;      // "info" means: include info and everything more severe
+  sessionId?: string;  // exact match
+  contains?: string;   // case-insensitive substring on stringified entry
+  limit?: number;      // cap on returned entries, newest kept
+}
+
+/** Returns the list of dates this query covers, newest first. */
+function datesForQuery(q: LogQuery): string[] {
+  if (q.date) return DATE_RE.test(q.date) ? [q.date] : [];
+
+  const all = listLogDates(); // newest first
+  if (!q.since && !q.until) return all;
+
+  return all.filter(d => {
+    if (q.since && d < q.since) return false;
+    if (q.until && d > q.until) return false;
+    return true;
+  });
+}
+
+/** Decide if `entry` passes all the filter predicates. */
+function entryMatches(entry: LogEntry, q: LogQuery): boolean {
+  if (q.logger && entry.logger !== q.logger) return false;
+  if (q.sessionId && entry.sessionId !== q.sessionId) return false;
+  if (q.level) {
+    const want = LEVEL_RANK[q.level.toLowerCase()];
+    const got  = LEVEL_RANK[String(entry.level).toLowerCase()];
+    if (!want || !got || got > want) return false;
+  }
+  if (q.contains) {
+    const needle = q.contains.toLowerCase();
+    if (!JSON.stringify(entry).toLowerCase().includes(needle)) return false;
+  }
+  return true;
+}
+
+/**
+ * Top-level query: walks every covered date (full read), merges main + error
+ * logs, applies filters, sorts by timestamp, returns at most `limit` entries
+ * (keeping the newest by default).
+ *
+ * Note: this reads files in full. For Synod's volume that's fine; if logs
+ * grow large enough that this becomes slow, swap in a streaming reader.
+ */
+function queryLogs(q: LogQuery): { entries: LogEntry[]; dates: string[]; total: number } {
+  const limit = Math.max(1, Math.min(q.limit ?? 500, 5000));
+  const dates = datesForQuery(q);
+
+  const all: LogEntry[] = [];
+  for (const d of dates) {
+    const paths = logPathsForDate(d);
+    if (!paths) continue;
+    all.push(
+      ...parseJsonLines(readAllLines(paths.main)),
+      ...parseJsonLines(readAllLines(paths.error)),
+    );
+  }
+
+  const filtered = all.filter(e => entryMatches(e, q));
+  const sorted = sortByTimestamp(filtered);
+  const total = sorted.length;
+  const entries = total > limit ? sorted.slice(total - limit) : sorted;
+  return { entries, dates, total };
+}
+
 // ── SSE client registry ────────────────────────────────────────────────────
 
 const sseClients = new Set<ReadableStreamDefaultController<string>>();
@@ -237,33 +316,61 @@ const server = Bun.serve({
       },
     },
 
-    // ── REST: history — today (tailed) or a specific date (full) ──
+    // ── REST: query logs with optional filters ─────────────
+    //
+    // Query params (all optional, all AND'd):
+    //   date=YYYY-MM-DD       single day; mutually exclusive with since/until
+    //   since=YYYY-MM-DD      inclusive lower bound
+    //   until=YYYY-MM-DD      inclusive upper bound
+    //   logger=<name>         exact logger name match (e.g. supervisor)
+    //   level=<level>         severity floor — "warn" returns fatal/error/warn
+    //   sessionId=<id>        exact match — pulls a full conversation trail
+    //   contains=<text>       case-insensitive substring on the entry JSON
+    //   limit=<n>             cap, default 500, max 5000 (newest are kept)
+    //
+    // No params → today (or most recent day with data) up to 500 entries.
     "/api/logs": {
       GET(req: Request): Response {
         const url = new URL(req.url);
-        const date = url.searchParams.get("date");
+        const sp = url.searchParams;
 
-        if (date) {
-          const paths = logPathsForDate(date);
-          if (!paths) {
-            return Response.json({ error: "Invalid date format, expected YYYY-MM-DD" }, { status: 400 });
+        const dateParam = sp.get("date") ?? undefined;
+        if (dateParam !== undefined && !DATE_RE.test(dateParam)) {
+          return Response.json({ error: "Invalid date format, expected YYYY-MM-DD" }, { status: 400 });
+        }
+        for (const k of ["since", "until"] as const) {
+          const v = sp.get(k);
+          if (v && !DATE_RE.test(v)) {
+            return Response.json({ error: `Invalid ${k} format, expected YYYY-MM-DD` }, { status: 400 });
           }
-          const merged = [
-            ...parseJsonLines(readAllLines(paths.main)),
-            ...parseJsonLines(readAllLines(paths.error)),
-          ];
-          const entries = sortByTimestamp(merged);
-          return Response.json({ entries, total: entries.length, date });
+        }
+        const limitRaw = sp.get("limit");
+        const limit = limitRaw === null ? undefined : Number(limitRaw);
+        if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+          return Response.json({ error: "limit must be a positive number" }, { status: 400 });
         }
 
-        const today = new Date().toISOString().slice(0, 10);
-        const paths = logPathsForDate(today)!;
-        const merged = [
-          ...parseJsonLines(tailFile(paths.main, 500)),
-          ...parseJsonLines(tailFile(paths.error, 500)),
-        ];
-        const entries = sortByTimestamp(merged);
-        return Response.json({ entries, total: entries.length });
+        // If caller asked for "today" with no filters and no date, default to
+        // the most recent day with data — otherwise an empty today produces
+        // an empty response even when yesterday has the entries they want.
+        const noFilters = !dateParam && !sp.get("since") && !sp.get("until")
+          && !sp.get("logger") && !sp.get("level") && !sp.get("sessionId") && !sp.get("contains");
+        const effectiveDate = noFilters
+          ? (listLogDates()[0] ?? new Date().toISOString().slice(0, 10))
+          : dateParam;
+
+        const result = queryLogs({
+          date:      effectiveDate,
+          since:     sp.get("since")     ?? undefined,
+          until:     sp.get("until")     ?? undefined,
+          logger:    sp.get("logger")    ?? undefined,
+          level:     sp.get("level")     ?? undefined,
+          sessionId: sp.get("sessionId") ?? undefined,
+          contains:  sp.get("contains")  ?? undefined,
+          limit,
+        });
+
+        return Response.json(result);
       },
     },
 

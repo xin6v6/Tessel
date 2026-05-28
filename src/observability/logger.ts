@@ -41,8 +41,19 @@ function parseLevel(val: string | undefined, defaultVal: LogLevel): LogLevel {
   return defaultVal;
 }
 
+// `bun test` sets NODE_ENV=test by default. Even when it doesn't, the test
+// runner sets BUN_TEST. Either signal forces file logging off so test stubs
+// (`alpha`, `beta`, intentional `bad` failures, etc.) never reach the shared
+// data/logs/*.log files that the Log Viewer surfaces.
+const isTestRun =
+  process.env.NODE_ENV === "test" ||
+  Boolean(process.env.BUN_TEST) ||
+  Boolean(process.env.SYNOD_DISABLE_FILE_LOGS);
+
 const consoleLevel = parseLevel(process.env.LOG_LEVEL, "info");
-const fileLevel    = parseLevel(process.env.LOG_FILE_LEVEL, "debug");
+const fileLevel    = isTestRun
+  ? ("silent" as LogLevel)
+  : parseLevel(process.env.LOG_FILE_LEVEL, "debug");
 const jsonConsole  = process.env.LOG_FORMAT === "json";
 
 // ----------------------------------------------------------------
