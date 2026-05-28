@@ -24,23 +24,30 @@ type LogEntry = Record<string, unknown>;
 const DATA_DIR = path.resolve("data", "logs");
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function todayLogPath(): string {
-  const today = new Date().toISOString().slice(0, 10);
-  return path.join(DATA_DIR, `${today}.log`);
-}
-
-function logPathForDate(date: string): string | null {
+function logPathsForDate(date: string): { main: string; error: string } | null {
   if (!DATE_RE.test(date)) return null;
-  return path.join(DATA_DIR, `${date}.log`);
+  return {
+    main:  path.join(DATA_DIR, `${date}.log`),
+    error: path.join(DATA_DIR, `${date}.error.log`),
+  };
 }
 
-/** List available log dates (newest first) by scanning DATA_DIR */
+/** List available log dates (newest first); excludes dates whose files are all empty */
 function listLogDates(): string[] {
   try {
     if (!fs.existsSync(DATA_DIR)) return [];
-    return fs.readdirSync(DATA_DIR)
-      .map(f => f.endsWith(".log") ? f.slice(0, -4) : "")
-      .filter(d => DATE_RE.test(d))
+    const byDate = new Map<string, number>(); // date -> total bytes across .log + .error.log
+    for (const f of fs.readdirSync(DATA_DIR)) {
+      const m = f.match(/^(\d{4}-\d{2}-\d{2})(?:\.error)?\.log$/);
+      if (!m) continue;
+      const date = m[1]!;
+      let size = 0;
+      try { size = fs.statSync(path.join(DATA_DIR, f)).size; } catch {}
+      byDate.set(date, (byDate.get(date) ?? 0) + size);
+    }
+    return [...byDate.entries()]
+      .filter(([, size]) => size > 0)
+      .map(([d]) => d)
       .sort()
       .reverse();
   } catch {
@@ -56,6 +63,18 @@ function readAllLines(filePath: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** Sort entries by timestamp ascending; entries without timestamp go last in original order */
+function sortByTimestamp(entries: LogEntry[]): LogEntry[] {
+  return [...entries].sort((a, b) => {
+    const ta = typeof a.timestamp === "string" ? a.timestamp : "";
+    const tb = typeof b.timestamp === "string" ? b.timestamp : "";
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return ta.localeCompare(tb);
+  });
 }
 
 /** Read last N lines from a file by scanning backward in chunks */
@@ -118,38 +137,42 @@ export function broadcastLog(entry: LogEntry): void {
 }
 
 // ── File watcher: tail new lines as they arrive ────────────────────────────
+//
+// Tracks both the main log and the error log for today. Each file has its own
+// fd + offset state so they advance independently and survive day rollover.
 
-let watchedPath = "";
-let watchedFd: number | null = null;
-let watchedOffset = 0;
+type WatchState = { path: string; fd: number | null; offset: number };
 
-function startFileWatch(): void {
-  const logPath = todayLogPath();
+const watchers: { main: WatchState; error: WatchState } = {
+  main:  { path: "", fd: null, offset: 0 },
+  error: { path: "", fd: null, offset: 0 },
+};
 
-  // Rotate to new file if day changed
-  if (watchedPath !== logPath) {
-    if (watchedFd !== null) { try { fs.closeSync(watchedFd); } catch {} }
-    watchedPath = logPath;
-    watchedFd = null;
-    watchedOffset = 0;
+function tailWatchedFile(targetPath: string, state: WatchState): void {
+  // Rotate state if the target path changed (day rollover)
+  if (state.path !== targetPath) {
+    if (state.fd !== null) { try { fs.closeSync(state.fd); } catch {} }
+    state.path = targetPath;
+    state.fd = null;
+    state.offset = 0;
   }
 
   try {
-    if (!fs.existsSync(logPath)) return;
+    if (!fs.existsSync(targetPath)) return;
 
-    if (watchedFd === null) {
-      watchedFd = fs.openSync(logPath, "r");
+    if (state.fd === null) {
+      state.fd = fs.openSync(targetPath, "r");
       // Start from end — only stream entries written after UI starts
-      watchedOffset = fs.fstatSync(watchedFd).size;
+      state.offset = fs.fstatSync(state.fd).size;
     }
 
-    const stat = fs.fstatSync(watchedFd);
-    if (stat.size <= watchedOffset) return; // no new data
+    const stat = fs.fstatSync(state.fd);
+    if (stat.size <= state.offset) return; // no new data
 
-    const newBytes = stat.size - watchedOffset;
+    const newBytes = stat.size - state.offset;
     const buf = Buffer.alloc(newBytes);
-    fs.readSync(watchedFd, buf, 0, newBytes, watchedOffset);
-    watchedOffset = stat.size;
+    fs.readSync(state.fd, buf, 0, newBytes, state.offset);
+    state.offset = stat.size;
 
     const lines = buf.toString("utf8").split("\n").filter(l => l.trim());
     for (const line of lines) {
@@ -160,10 +183,17 @@ function startFileWatch(): void {
     }
   } catch {
     // Reset on error — will reopen file on next tick
-    if (watchedFd !== null) { try { fs.closeSync(watchedFd); } catch {} }
-    watchedFd = null;
-    watchedOffset = 0;
+    if (state.fd !== null) { try { fs.closeSync(state.fd); } catch {} }
+    state.fd = null;
+    state.offset = 0;
   }
+}
+
+function startFileWatch(): void {
+  const today = new Date().toISOString().slice(0, 10);
+  const paths = logPathsForDate(today)!;
+  tailWatchedFile(paths.main, watchers.main);
+  tailWatchedFile(paths.error, watchers.error);
 }
 
 // Poll every 500ms for new log lines
@@ -214,16 +244,25 @@ const server = Bun.serve({
         const date = url.searchParams.get("date");
 
         if (date) {
-          const filePath = logPathForDate(date);
-          if (!filePath) {
+          const paths = logPathsForDate(date);
+          if (!paths) {
             return Response.json({ error: "Invalid date format, expected YYYY-MM-DD" }, { status: 400 });
           }
-          const entries = parseJsonLines(readAllLines(filePath));
+          const merged = [
+            ...parseJsonLines(readAllLines(paths.main)),
+            ...parseJsonLines(readAllLines(paths.error)),
+          ];
+          const entries = sortByTimestamp(merged);
           return Response.json({ entries, total: entries.length, date });
         }
 
-        const lines = tailFile(todayLogPath(), 500);
-        const entries = parseJsonLines(lines);
+        const today = new Date().toISOString().slice(0, 10);
+        const paths = logPathsForDate(today)!;
+        const merged = [
+          ...parseJsonLines(tailFile(paths.main, 500)),
+          ...parseJsonLines(tailFile(paths.error, 500)),
+        ];
+        const entries = sortByTimestamp(merged);
         return Response.json({ entries, total: entries.length });
       },
     },
@@ -231,7 +270,12 @@ const server = Bun.serve({
     // ── SSE: real-time stream ──────────────────────────────
     "/api/logs/stream": {
       GET(req: Request): Response {
-        const history = parseJsonLines(tailFile(todayLogPath(), 200));
+        const today = new Date().toISOString().slice(0, 10);
+        const paths = logPathsForDate(today)!;
+        const history = sortByTimestamp([
+          ...parseJsonLines(tailFile(paths.main, 200)),
+          ...parseJsonLines(tailFile(paths.error, 200)),
+        ]);
 
         let ctrl: ReadableStreamDefaultController<string>;
 
