@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../../types/index.ts";
 import type { ToolHandler } from "../../tools/index.ts";
 import type { SlackClient } from "./client.ts";
+import { findContact, listForSource } from "../../contacts/store.ts";
 
 interface ToolEntry {
   definition: ToolDefinition;
@@ -211,6 +212,91 @@ export function buildSlackTools(client: SlackClient): ToolEntry[] {
           email: (u?.profile as { email?: string } | undefined)?.email,
           title: (u?.profile as { title?: string } | undefined)?.title,
           is_bot: u?.is_bot,
+        });
+      },
+    },
+
+    // ----------------------------------------------------------------
+    // notify (alias-based; preferred over slack_send_message for known
+    // recipients — the alias table resolves to the channel ID internally
+    // so the model never has to handle raw Slack IDs).
+    // ----------------------------------------------------------------
+    {
+      definition: {
+        name: "slack_notify",
+        description:
+          "Send a Slack message to a known contact by alias. The alias is looked up in the contact directory; you do NOT need to know the Slack channel ID. If you don't know whether an alias exists, call slack_list_contacts first. Cross-platform aliases are not supported here — this tool only sends to Slack.",
+        parameters: {
+          type: "object",
+          properties: {
+            alias: {
+              type: "string",
+              description: "Contact alias as listed in the contact directory (e.g. \"me\", \"boss\", \"general\").",
+            },
+            text: {
+              type: "string",
+              description: "Message text (supports Slack mrkdwn formatting).",
+            },
+            thread_ts: {
+              type: "string",
+              description: "Optional. Reply in a thread by providing the parent message timestamp.",
+            },
+          },
+          required: ["alias", "text"],
+        },
+      },
+      handler: async (input) => {
+        const alias = String(input.alias ?? "").trim();
+        const text  = String(input.text ?? "");
+        if (!alias) {
+          return JSON.stringify({ ok: false, error: "alias is required" });
+        }
+        const contact = findContact(alias, "slack");
+        if (!contact) {
+          const known = listForSource("slack").map((c) => c.alias);
+          return JSON.stringify({
+            ok: false,
+            error: `alias "${alias}" not found in Slack contact directory`,
+            known_aliases: known,
+            hint: known.length === 0
+              ? "Slack contact directory is empty. Operator must add entries via `bun run contacts add <alias> slack <U…|C…> --kind=user|channel` before this works."
+              : "Use one of known_aliases, or ask the user to clarify which contact they mean.",
+          });
+        }
+        const res = await client.sendMessage({
+          channel: contact.externalId,
+          text,
+          threadTs: input.thread_ts as string | undefined,
+        });
+        return JSON.stringify({
+          ok: res.ok,
+          ts: res.ts,
+          alias,
+          channelKind: contact.channelKind,
+        });
+      },
+    },
+
+    // ----------------------------------------------------------------
+    // list_contacts (lets the LLM enumerate known Slack aliases without
+    // exposing the raw IDs — useful when "send to boss" fails and the
+    // model needs to suggest alternatives).
+    // ----------------------------------------------------------------
+    {
+      definition: {
+        name: "slack_list_contacts",
+        description:
+          "List all known contact aliases for Slack. Returns alias names and optional notes; raw IDs are intentionally not included.",
+        parameters: { type: "object", properties: {} },
+      },
+      handler: async () => {
+        const contacts = listForSource("slack");
+        return JSON.stringify({
+          contacts: contacts.map((c) => ({
+            alias: c.alias,
+            channelKind: c.channelKind,
+            note: c.note,
+          })),
         });
       },
     },

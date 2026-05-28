@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "ui": "bun --hot src/ui/server.ts"
+    "ui": "bun --hot src/ui/server.ts",
+    "contacts": "bun run scripts/contacts.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

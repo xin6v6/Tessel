@@ -32,10 +32,11 @@ services:
       # LOG_LEVEL: debug
 
     volumes:
-      # 日志持久化：用 docker named volume，独立于 GitHub Actions
-      # workspace。actions/checkout 会清理工作目录里的未追踪文件
-      # (data/logs/ 被 .gitignore 忽略，曾经因此在部署时丢失日志)。
-      - synod-logs:/app/data/logs
+      # 持久化整个 /app/data：日志 (logs/)、通讯录 (contacts.db)、
+      # trace 文件等都跨部署保留。用 docker named volume 是因为
+      # actions/checkout 会清理 GitHub Actions workspace 里的未追踪
+      # 文件 (data/ 被 .gitignore 忽略)，曾经因此在部署时丢日志。
+      - synod-data:/app/data
 
     # Slack Socket Mode 是纯出站 WebSocket，无需暴露端口
     # ports:
@@ -78,8 +79,8 @@ services:
       - "3456:3456"
 
     volumes:
-      # 共享同一个 named volume（只读）
-      - synod-logs:/app/data/logs:ro
+      # UI 共享同一个 data volume，只读读取日志即可
+      - synod-data:/app/data:ro
 
     depends_on:
       - synod
@@ -97,8 +98,13 @@ services:
         max-file: "3"
 
 # ── Named volumes ─────────────────────────────────────────────────
-# synod-logs 由 docker 管理（默认存于 /var/lib/docker/volumes/）。
+# synod-data 由 docker 管理（默认存于 /var/lib/docker/volumes/）。
+# 包含 logs/、contacts.db、traces.jsonl 等所有跨部署需要保留的数据。
 # `docker compose down` 不会删除它；显式删除用
-# `docker volume rm synod_synod-logs`。
+# `docker volume rm synod_synod-data`。
+#
+# 编辑通讯录（在宿主机上跑）：
+#   docker compose exec synod bun run contacts add me slack U0B5YPFSG5C --kind=user
+#   docker compose exec synod bun run contacts list
 volumes:
-  synod-logs:
+  synod-data:
