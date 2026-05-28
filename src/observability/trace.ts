@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Source } from "./context.ts";
 
 // ----------------------------------------------------------------
 // TraceEntry
@@ -8,8 +9,9 @@ import * as path from "node:path";
 export interface TraceEntry {
   ts: string;            // ISO-8601
   sessionId: string;
-  userId?: string;
-  source: "slack" | "cli";
+  userId?: string;       // composite `<source>:<externalId>`
+  externalId?: string;   // platform-native id
+  source: Source;
   agentName?: string;
   input: string;         // user message (truncated to 2000 chars)
   reply: string;         // final reply (truncated to 2000 chars)
