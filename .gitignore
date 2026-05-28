@@ -37,3 +37,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # runtime
 .synod.pid
 .claude/
+
+# contacts directory: SQLite DB with real platform identities
+data/contacts.db
+data/contacts.db-*
