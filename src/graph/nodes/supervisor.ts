@@ -2,7 +2,26 @@ import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
+import { getContext, type Source } from "../../observability/context.ts";
 const logger = createLogger("supervisor");
+
+// ----------------------------------------------------------------
+// 平台出口锁定 (Hard-coded source → platform agent)
+// ----------------------------------------------------------------
+//
+// 来自 Slack 的请求只能路由到 slack agent，来自 Telegram 只能到 telegram agent。
+// 防止 LLM 看到用户消息里偶然出现的平台名 (例如 Slack 用户说
+// "我在 Telegram 上看到…") 就把工具调用送错出口。
+//
+// 实现方式：在路由 prompt 里，LLM 看到的"平台 agent"选项只剩当前 source
+// 对应的那一个，其他平台 agent **完全不出现在候选里**。LLM 只决定
+// "要不要用工具 / 要不要查能力 / 直接回复"，而不是"用哪个平台"。
+//
+// 加新平台 = 在这张表加一行；不会涉及 supervisor 其它逻辑。
+const SOURCE_TO_PLATFORM_AGENT: Partial<Record<Source, Exclude<SubAgentName, "__end__">>> = {
+  slack: "slack",
+  // telegram: "telegram",  // 接入 Telegram integration + agent 时取消注释
+};
 
 // ----------------------------------------------------------------
 // 通用回复护栏：约束模型只依据已知证据回答，不编造细节
@@ -139,21 +158,39 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
     }
 
     // ── 阶段 B：路由决策 ──
-    const agentList = Object.entries(SUB_AGENTS)
-      .map(([name, desc]) => `- ${name}: ${desc}`)
+    //
+    // Candidate agents are filtered by the request source so the routing LLM
+    // physically cannot pick another platform's agent. Slack-originated
+    // requests see only the slack agent (plus capabilities / __end__);
+    // Telegram-originated requests see only the telegram agent; CLI sees
+    // none of the platform agents at all (no default outbound channel).
+    const source = getContext()?.source as Source | undefined;
+    const platformAgent = source ? SOURCE_TO_PLATFORM_AGENT[source] : undefined;
+
+    const candidateNames: SubAgentName[] = [
+      ...(platformAgent ? [platformAgent] : []),
+      "capabilities",
+      "__end__",
+    ];
+    const candidateLines = candidateNames
+      .map((name) => {
+        if (name === "__end__") return "- __end__: 与以上无关，直接回复用户";
+        return `- ${name}: ${SUB_AGENTS[name as Exclude<SubAgentName, "__end__">]}`;
+      })
       .join("\n");
 
-    logger.info({ inputSnippet }, "routing");
+    logger.info({ inputSnippet, source, candidateNames }, "routing");
 
     const t0 = Date.now();
     const routeReply = await llm.invoke([
       new SystemMessage(
         `你是一个路由助手。根据用户最新的消息，从下列选项中选择一个，只回复该选项的名字，不要有其他文字：
 
-${agentList}
-- __end__: 与以上无关，直接回复用户
+${candidateLines}
 
-可选值：${VALID_ROUTES.join(" / ")}`
+可选值：${candidateNames.join(" / ")}
+
+注意：用户消息中即便提到了其他平台名称（如「telegram」「微信」），也必须从上述候选里挑选。本次请求只能在以上候选范围内路由。`
       ),
       ...messages,
     ]);
@@ -163,10 +200,18 @@ ${agentList}
         ? routeReply.content
         : JSON.stringify(routeReply.content);
 
-    const next = parseRoute(routeText);
+    // parseRoute looks across ALL known routes; clamp the result to the
+    // candidate set so a stray "telegram" token in the LLM reply cannot
+    // escape the source lock.
+    let next = parseRoute(routeText);
+    if (!candidateNames.includes(next)) {
+      logger.warn({ rejected: next, candidateNames }, "route outside candidate set — clamped to __end__");
+      next = "__end__";
+    }
     logger.info({
       phase: "route",
       next,
+      source,
       durationMs: Date.now() - t0,
       ...extractTokenUsage(routeReply),
     }, `route → ${next}`);

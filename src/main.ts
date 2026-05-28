@@ -2,7 +2,7 @@ import { HumanMessage } from "@langchain/core/messages";
 import { buildGraph } from "./graph/index.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { logger } from "./utils/logger.ts";
-import { runWithContext, newSessionId } from "./observability/context.ts";
+import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
 import { traceWriter } from "./observability/trace.ts";
 
 // ----------------------------------------------------------------
@@ -74,8 +74,9 @@ if (process.env.SLACK_BOT_TOKEN) {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
+              const userId = makeUserId("slack", user);
               logger.info({ text: textClean }, "slack:mention received");
-              return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const result = await graph!.invoke({
                     messages: [new HumanMessage(textClean)],
@@ -84,7 +85,8 @@ if (process.env.SLACK_BOT_TOKEN) {
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
-                    userId: user,
+                    userId,
+                    externalId: user,
                     source: "slack",
                     input: textClean.slice(0, 2000),
                     reply: reply.slice(0, 2000),
@@ -100,7 +102,8 @@ if (process.env.SLACK_BOT_TOKEN) {
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
-                    userId: user,
+                    userId,
+                    externalId: user,
                     source: "slack",
                     input: textClean.slice(0, 2000),
                     reply: "",
@@ -118,8 +121,9 @@ if (process.env.SLACK_BOT_TOKEN) {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
+              const userId = makeUserId("slack", user);
               logger.info({ text }, "slack:dm received");
-              return runWithContext({ sessionId, userId: user, source: "slack" }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const controller = new AbortController();
                   const timeout = setTimeout(() => controller.abort(), 120_000);
@@ -132,7 +136,8 @@ if (process.env.SLACK_BOT_TOKEN) {
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
-                    userId: user,
+                    userId,
+                    externalId: user,
                     source: "slack",
                     input: text.slice(0, 2000),
                     reply: reply.slice(0, 2000),
@@ -148,7 +153,8 @@ if (process.env.SLACK_BOT_TOKEN) {
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
-                    userId: user,
+                    userId,
+                    externalId: user,
                     source: "slack",
                     input: text.slice(0, 2000),
                     reply: "",
@@ -218,8 +224,12 @@ async function main() {
 
       const sessionId = newSessionId();
       const startTime = Date.now();
+      // CLI mode: identify by host OS user so multi-user shells can be
+      // distinguished in logs without needing a real platform login.
+      const externalId = process.env.USER ?? process.env.USERNAME ?? "unknown";
+      const userId = makeUserId("cli", externalId);
 
-      await runWithContext({ sessionId, userId: "cli", source: "cli" }, async () => {
+      await runWithContext({ sessionId, source: "cli", externalId, userId }, async () => {
         try {
           const result = await graph!.invoke({
             messages: [new HumanMessage(userMessage)],
@@ -229,7 +239,8 @@ async function main() {
           await traceWriter.write({
             ts: new Date().toISOString(),
             sessionId,
-            userId: "cli",
+            userId,
+            externalId,
             source: "cli",
             input: userMessage.slice(0, 2000),
             reply: reply.slice(0, 2000),
@@ -244,7 +255,8 @@ async function main() {
           await traceWriter.write({
             ts: new Date().toISOString(),
             sessionId,
-            userId: "cli",
+            userId,
+            externalId,
             source: "cli",
             input: userMessage.slice(0, 2000),
             reply: "",

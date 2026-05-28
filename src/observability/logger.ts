@@ -133,7 +133,8 @@ interface LogEntry {
   level: string;
   logger: string;
   sessionId?: string;
-  userId?: string;
+  userId?: string;        // composite: `<source>:<externalId>`
+  externalId?: string;    // platform-native id, e.g. slack U…, telegram numeric
   source?: string;
   agentName?: string;
   message: string;
@@ -156,6 +157,7 @@ function buildEntry(
     logger: loggerName,
     ...(ctx?.sessionId  ? { sessionId: ctx.sessionId }   : {}),
     ...(ctx?.userId     ? { userId: ctx.userId }          : {}),
+    ...(ctx?.externalId ? { externalId: ctx.externalId }  : {}),
     ...(ctx?.source     ? { source: ctx.source }          : {}),
     ...(ctx?.agentName  ? { agentName: ctx.agentName }    : {}),
     ...mergedFields,
