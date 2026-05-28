@@ -32,8 +32,10 @@ services:
       # LOG_LEVEL: debug
 
     volumes:
-      # 日志持久化：容器内写 /app/data/logs，宿主机可直接读
-      - ./data/logs:/app/data/logs
+      # 日志持久化：用 docker named volume，独立于 GitHub Actions
+      # workspace。actions/checkout 会清理工作目录里的未追踪文件
+      # (data/logs/ 被 .gitignore 忽略，曾经因此在部署时丢失日志)。
+      - synod-logs:/app/data/logs
 
     # Slack Socket Mode 是纯出站 WebSocket，无需暴露端口
     # ports:
@@ -76,8 +78,8 @@ services:
       - "3456:3456"
 
     volumes:
-      # 共享同一份日志目录（只读）
-      - ./data/logs:/app/data/logs:ro
+      # 共享同一个 named volume（只读）
+      - synod-logs:/app/data/logs:ro
 
     depends_on:
       - synod
@@ -93,3 +95,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# ── Named volumes ─────────────────────────────────────────────────
+# synod-logs 由 docker 管理（默认存于 /var/lib/docker/volumes/）。
+# `docker compose down` 不会删除它；显式删除用
+# `docker volume rm synod_synod-logs`。
+volumes:
+  synod-logs:
