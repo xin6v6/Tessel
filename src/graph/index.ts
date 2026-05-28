@@ -17,7 +17,7 @@ export type { GraphStateType } from "./state.ts";
 // ----------------------------------------------------------------
 
 /**
- * 构建并编译 Synod 主 Graph。
+ * 构建并编译 Tessel 主 Graph。
  *
  * 拓扑结构：
  *

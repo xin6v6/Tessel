@@ -61,7 +61,7 @@ jobs:
       - name: 滚动重启容器
         run: docker compose up -d
 
-      # ── 健康检查（synod + ui 并行轮询）───────────────────────────
+      # ── 健康检查（tessel + ui 并行轮询）───────────────────────────
       - name: 健康检查
         run: |
           check_container() {
@@ -79,8 +79,8 @@ jobs:
             done
           }
 
-          check_container synod    10 & PID1=$!
-          check_container synod-ui  8 & PID2=$!
+          check_container tessel    10 & PID1=$!
+          check_container tessel-ui  8 & PID2=$!
           wait $PID1 || exit $?
           wait $PID2 || exit $?
 
@@ -90,13 +90,13 @@ jobs:
           docker compose ps
 
           echo ""
-          docker compose logs --tail=15 synod
+          docker compose logs --tail=15 tessel
 
           echo ""
           docker compose logs --tail=8 ui
 
           echo ""
-          if docker compose logs --since=2m synod 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
+          if docker compose logs --since=2m tessel 2>/dev/null | grep -q "Socket Mode connected\|Socket connected\|已连接"; then
             echo "✅ Slack Socket Mode 连接正常"
           else
             echo "⚠️  未检测到 Socket Mode 连接日志（可能仍在初始化）"

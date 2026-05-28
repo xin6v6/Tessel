@@ -37,14 +37,14 @@ done
 
 log "Docker 守护进程就绪（等待了 ${waited}s）"
 
-# ── 构建并启动 Synod ──────────────────────────────────────────────
+# ── 构建并启动 Tessel ──────────────────────────────────────────────
 cd "$PROJECT_DIR"
 
 log "构建镜像（使用缓存，如已构建则瞬间完成）..."
 docker compose build --quiet
 
-log "启动 Synod 容器..."
+log "启动 Tessel 容器..."
 docker compose up -d
 
-log "Synod 启动完成"
+log "Tessel 启动完成"
 docker compose ps

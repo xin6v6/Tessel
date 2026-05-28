@@ -9,7 +9,7 @@
 //   bun run contacts rm   <alias> <source>
 //
 // Source must be one of: slack, telegram, cli, … (free-form string, but
-// in practice matches the platforms Synod has integrations for).
+// in practice matches the platforms Tessel has integrations for).
 // ----------------------------------------------------------------
 
 import {
@@ -32,7 +32,7 @@ const KNOWN_SOURCES: Source[] = ["slack", "cli"];
 
 function usage(): never {
   console.error(`
-Synod contacts admin
+Tessel contacts admin
 
 Commands:
   list [source]                    List contacts (optionally filter by source)

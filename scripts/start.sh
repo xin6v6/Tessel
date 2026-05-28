@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ================================================================
-# Synod 后台启动脚本
+# Tessel 后台启动脚本
 #
 # 用法：
 #   ./scripts/start.sh          # 前台运行（带自动重试）
@@ -16,8 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-APP_NAME="synod"
-PID_FILE="$PROJECT_DIR/.synod.pid"
+APP_NAME="tessel"
+PID_FILE="$PROJECT_DIR/.tessel.pid"
 DAEMON_LOG="$PROJECT_DIR/data/logs/daemon.log"   # daemon 自身的 stdout（启动/重试消息）
 LOG_DIR="$PROJECT_DIR/data/logs"
 

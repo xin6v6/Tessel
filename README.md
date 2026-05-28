@@ -1,4 +1,4 @@
-# Synod
+# Tessel
 
 > 基于 LangGraph 的多 Agent 个人助手，通过 Slack 交互，支持工具调用和自动代码审查。
 

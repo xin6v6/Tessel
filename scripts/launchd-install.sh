@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ================================================================
-# Synod launchd 安装/卸载脚本（Docker Compose 版本）
+# Tessel launchd 安装/卸载脚本（Docker Compose 版本）
 #
 # 用法：
 #   ./scripts/launchd-install.sh install    # 构建镜像、启动容器、注册开机自启
@@ -19,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PLIST_NAME="io.synod.app"
+PLIST_NAME="io.tessel.app"
 PLIST_DST="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 WRAPPER="$SCRIPT_DIR/launchd-docker-start.sh"
 LOG_DIR="$PROJECT_DIR/logs"
@@ -102,9 +102,9 @@ write_plist() {
     <false/>
 
     <key>StandardOutPath</key>
-    <string>${LOG_DIR}/launchd-synod.log</string>
+    <string>${LOG_DIR}/launchd-tessel.log</string>
     <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/launchd-synod.error.log</string>
+    <string>${LOG_DIR}/launchd-tessel.error.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>
@@ -120,7 +120,7 @@ PLIST
 # ── install ───────────────────────────────────────────────────────
 
 cmd_install() {
-  log "安装 Synod（Docker Compose + launchd 开机自启）..."
+  log "安装 Tessel（Docker Compose + launchd 开机自启）..."
 
   check_deps
   mkdir -p "$LOG_DIR"
@@ -149,7 +149,7 @@ cmd_install() {
   docker compose build
 
   # 启动容器（不通过 launchd，直接启动）
-  log "启动 Synod 容器..."
+  log "启动 Tessel 容器..."
   docker compose up -d
 
   # 注册 launchd 服务（仅用于开机自启，不立即执行）
@@ -165,7 +165,7 @@ cmd_install() {
   echo ""
   cmd_status
   echo ""
-  echo -e "  跟踪日志：${BOLD}docker compose logs -f synod${RESET}"
+  echo -e "  跟踪日志：${BOLD}docker compose logs -f tessel${RESET}"
   echo -e "  停止服务：${BOLD}$0 uninstall${RESET}"
   echo -e "  重启容器：${BOLD}$0 restart${RESET}"
 }
@@ -173,7 +173,7 @@ cmd_install() {
 # ── uninstall ─────────────────────────────────────────────────────
 
 cmd_uninstall() {
-  log "卸载 Synod Docker Compose 服务..."
+  log "卸载 Tessel Docker Compose 服务..."
 
   # 卸载 launchd 开机自启
   if [[ -f "$PLIST_DST" ]]; then
@@ -193,11 +193,11 @@ cmd_uninstall() {
   # 停止并移除容器（保留镜像和绑定挂载的日志）
   if [[ -f "$PROJECT_DIR/docker-compose.yml" ]]; then
     cd "$PROJECT_DIR"
-    if docker compose ps -q synod 2>/dev/null | grep -q .; then
+    if docker compose ps -q tessel 2>/dev/null | grep -q .; then
       docker compose down
-      ok "Synod 容器已停止并移除"
+      ok "Tessel 容器已停止并移除"
     else
-      warn "Synod 容器未在运行，跳过 docker compose down"
+      warn "Tessel 容器未在运行，跳过 docker compose down"
     fi
   fi
 
@@ -208,7 +208,7 @@ cmd_uninstall() {
 
 cmd_status() {
   echo ""
-  echo -e "${BOLD}── Synod 服务状态 ──${RESET}"
+  echo -e "${BOLD}── Tessel 服务状态 ──${RESET}"
 
   # launchd 开机自启状态
   if launchctl list "$PLIST_NAME" &>/dev/null 2>&1; then
@@ -226,7 +226,7 @@ cmd_status() {
 
   echo ""
   echo -e "${BOLD}最近日志（最后 10 行）：${RESET}"
-  docker compose logs --tail=10 synod 2>/dev/null || true
+  docker compose logs --tail=10 tessel 2>/dev/null || true
 
   echo ""
 }
@@ -234,9 +234,9 @@ cmd_status() {
 # ── restart ───────────────────────────────────────────────────────
 
 cmd_restart() {
-  log "重启 Synod 容器..."
+  log "重启 Tessel 容器..."
   cd "$PROJECT_DIR"
-  docker compose restart synod
+  docker compose restart tessel
   sleep 3
   cmd_status
 }

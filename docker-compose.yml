@@ -1,23 +1,23 @@
 # ================================================================
-# Synod — docker-compose 服务定义
+# Tessel — docker-compose 服务定义
 # ================================================================
 # 常用命令：
 #   docker compose up -d           # 后台启动
 #   docker compose down            # 停止并移除容器
-#   docker compose logs -f synod   # 跟踪 agent 日志
+#   docker compose logs -f tessel   # 跟踪 agent 日志
 #   docker compose logs -f ui      # 跟踪 UI 日志
 #   docker compose build           # 重新构建镜像
-#   docker compose restart synod   # 重启 agent
+#   docker compose restart tessel   # 重启 agent
 # ================================================================
 
 services:
   # ── 主 Agent 服务 ──────────────────────────────────────────────
-  synod:
+  tessel:
     build:
       context: .
       dockerfile: Dockerfile
-    image: synod:latest
-    container_name: synod
+    image: tessel:latest
+    container_name: tessel
 
     # Docker 重启策略：崩溃或守护进程重启后自动恢复
     restart: unless-stopped
@@ -62,8 +62,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ui
-    image: synod-ui:latest
-    container_name: synod-ui
+    image: tessel-ui:latest
+    container_name: tessel-ui
 
     restart: unless-stopped
 
@@ -83,7 +83,7 @@ services:
       - synod-data:/app/data:ro
 
     depends_on:
-      - synod
+      - tessel
 
     deploy:
       resources:
@@ -98,13 +98,17 @@ services:
         max-file: "3"
 
 # ── Named volumes ─────────────────────────────────────────────────
-# synod-data 由 docker 管理（默认存于 /var/lib/docker/volumes/）。
 # 包含 logs/、contacts.db、traces.jsonl 等所有跨部署需要保留的数据。
 # `docker compose down` 不会删除它；显式删除用
 # `docker volume rm synod_synod-data`。
 #
+# 注意：`name: synod_synod-data` 显式锁定卷名，绕过 compose 自动加的
+# project 前缀。这样 2026-05 项目从 Synod 改名为 Tessel 时旧 volume
+# 仍能被复用，已存的日志和通讯录不丢。
+#
 # 编辑通讯录（在宿主机上跑）：
-#   docker compose exec synod bun run contacts add me slack U0B5YPFSG5C --kind=user
-#   docker compose exec synod bun run contacts list
+#   docker compose exec tessel bun run contacts add me slack U0B5YPFSG5C --kind=user
+#   docker compose exec tessel bun run contacts list
 volumes:
   synod-data:
+    name: synod_synod-data

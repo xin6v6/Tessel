@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Synod** is a TypeScript + Bun multi-agent personal assistant. An Orchestrator receives user messages, routes them to specialist agents, and aggregates results. Multiple LLM providers (Anthropic, OpenAI) are supported via a unified adapter interface.
+**Tessel** is a TypeScript + Bun multi-agent personal assistant. An Orchestrator receives user messages, routes them to specialist agents, and aggregates results. Multiple LLM providers (Anthropic, OpenAI) are supported via a unified adapter interface.
 
 ## Commands
 
