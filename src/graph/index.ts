@@ -5,7 +5,9 @@ import { buildSupervisorNode } from "./nodes/supervisor.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
+import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
 import type { ToolRegistry } from "../tools/index.ts";
+import type { IntegrationRegistry } from "../integrations/registry.ts";
 
 export { GraphState } from "./state.ts";
 export type { GraphStateType } from "./state.ts";
@@ -40,6 +42,7 @@ export function buildGraph(params: {
   apiKey?: string;
   model?: string;
   toolRegistry: ToolRegistry;
+  integrations: IntegrationRegistry;
 }) {
   const llm = new ChatOpenAI({
     model: params.model ?? process.env.LLM_MODEL ?? "gpt-4o",
@@ -53,17 +56,19 @@ export function buildGraph(params: {
   });
 
   // 构建各节点
-  const supervisorNode = buildSupervisorNode(llm);
-  const slackAgentNode = buildSlackAgentNode(llm, params.toolRegistry);
-  const webAgentNode   = buildWebAgentNode(llm);
-  const mcpAgentNode   = buildMcpAgentNode(llm);
+  const supervisorNode    = buildSupervisorNode(llm);
+  const slackAgentNode    = buildSlackAgentNode(llm, params.toolRegistry);
+  const webAgentNode      = buildWebAgentNode(llm);
+  const mcpAgentNode      = buildMcpAgentNode(llm);
+  const capabilitiesNode  = buildCapabilitiesNode(params.toolRegistry, params.integrations);
 
   const graph = new StateGraph(GraphState)
     // 注册节点
-    .addNode("supervisor", supervisorNode)
-    .addNode("slack",      slackAgentNode)
-    .addNode("web",        webAgentNode)
-    .addNode("mcp",        mcpAgentNode)
+    .addNode("supervisor",   supervisorNode)
+    .addNode("slack",        slackAgentNode)
+    .addNode("web",          webAgentNode)
+    .addNode("mcp",          mcpAgentNode)
+    .addNode("capabilities", capabilitiesNode)
 
     // 入口
     .addEdge(START, "supervisor")
@@ -73,17 +78,19 @@ export function buildGraph(params: {
       "supervisor",
       (state) => state.next,
       {
-        slack:   "slack",
-        web:     "web",
-        mcp:     "mcp",
-        __end__: END,
+        slack:        "slack",
+        web:          "web",
+        mcp:          "mcp",
+        capabilities: "capabilities",
+        __end__:      END,
       }
     )
 
     // 子 Agent 完成 → 回到 supervisor 整合结果
-    .addEdge("slack", "supervisor")
-    .addEdge("web",   "supervisor")
-    .addEdge("mcp",   "supervisor");
+    .addEdge("slack",        "supervisor")
+    .addEdge("web",          "supervisor")
+    .addEdge("mcp",          "supervisor")
+    .addEdge("capabilities", "supervisor");
 
   return graph.compile();
 }

@@ -10,10 +10,11 @@ import type { BaseMessage } from "@langchain/core/messages";
  * 新增 Agent 时在这里添加对应名称，并在 graph/index.ts 注册节点。
  */
 export type SubAgentName =
-  | "slack"   // Slack ReAct Agent
-  | "web"     // Web Search ReAct Agent（待接入）
-  | "mcp"     // MCP Tools ReAct Agent（待接入）
-  | "__end__"; // 直接回复，无需子 Agent
+  | "slack"        // Slack ReAct Agent
+  | "web"          // Web Search ReAct Agent（待接入）
+  | "mcp"          // MCP Tools ReAct Agent（待接入）
+  | "capabilities" // 自省节点：列出当前真实可用的能力（tools + integrations）
+  | "__end__";     // 直接回复，无需子 Agent
 
 // ----------------------------------------------------------------
 // Graph State

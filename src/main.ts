@@ -182,6 +182,7 @@ async function main() {
     apiKey:       process.env.OPENAI_API_KEY,
     model:        process.env.LLM_MODEL,
     toolRegistry,
+    integrations,
   });
 
   logger.info("──────────────────────────────");
