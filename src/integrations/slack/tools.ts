@@ -259,7 +259,7 @@ export function buildSlackTools(client: SlackClient): ToolEntry[] {
             error: `alias "${alias}" not found in Slack contact directory`,
             known_aliases: known,
             hint: known.length === 0
-              ? "Slack contact directory is empty. Operator must add an entry to data/contacts.json before this works."
+              ? "Slack contact directory is empty. Operator must add entries via `bun run contacts add <alias> slack <U…|C…> --kind=user|channel` before this works."
               : "Use one of known_aliases, or ask the user to clarify which contact they mean.",
           });
         }

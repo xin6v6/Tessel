@@ -23,6 +23,13 @@ import type { Source } from "../src/observability/context.ts";
 
 const VALID_KINDS: ChannelKind[] = ["user", "channel", "group"];
 
+// Known platforms accepted by the CLI when writing. The store itself
+// accepts any string (so future integrations don't need a schema change),
+// but the admin path validates input so typos like "slak" don't silently
+// create an unreachable contact. Add new platforms here as integrations
+// land — mirrors SOURCE_TO_PLATFORM_AGENT in supervisor.ts.
+const KNOWN_SOURCES: Source[] = ["slack", "cli"];
+
 function usage(): never {
   console.error(`
 Synod contacts admin
@@ -83,6 +90,12 @@ switch (cmd) {
     const { positional, flags } = parseFlags(rest);
     const [alias, source, externalId] = positional;
     if (!alias || !source || !externalId) usage();
+
+    if (!KNOWN_SOURCES.includes(source as Source)) {
+      console.error(`✗ source "${source}" is not a known platform. Allowed: ${KNOWN_SOURCES.join(", ")}`);
+      console.error(`  (If you're adding a new integration, extend KNOWN_SOURCES in scripts/contacts.ts.)`);
+      process.exit(1);
+    }
 
     const kind = (flags.kind ?? "user") as ChannelKind;
     if (!VALID_KINDS.includes(kind)) {
