@@ -22,10 +22,40 @@ type LogEntry = Record<string, unknown>;
 // ── Log file helpers ────────────────────────────────────────────────────────
 
 const DATA_DIR = path.resolve("data", "logs");
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function todayLogPath(): string {
   const today = new Date().toISOString().slice(0, 10);
   return path.join(DATA_DIR, `${today}.log`);
+}
+
+function logPathForDate(date: string): string | null {
+  if (!DATE_RE.test(date)) return null;
+  return path.join(DATA_DIR, `${date}.log`);
+}
+
+/** List available log dates (newest first) by scanning DATA_DIR */
+function listLogDates(): string[] {
+  try {
+    if (!fs.existsSync(DATA_DIR)) return [];
+    return fs.readdirSync(DATA_DIR)
+      .map(f => f.endsWith(".log") ? f.slice(0, -4) : "")
+      .filter(d => DATE_RE.test(d))
+      .sort()
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+/** Read all lines from a file (used when loading a full historical day) */
+function readAllLines(filePath: string): string[] {
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    return fs.readFileSync(filePath, "utf8").split("\n").filter(l => l.trim());
+  } catch {
+    return [];
+  }
 }
 
 /** Read last N lines from a file by scanning backward in chunks */
@@ -170,9 +200,28 @@ const server = Bun.serve({
       },
     },
 
-    // ── REST: recent history ───────────────────────────────
-    "/api/logs": {
+    // ── REST: list available log dates (newest first) ──────
+    "/api/logs/dates": {
       GET(_req: Request): Response {
+        return Response.json({ dates: listLogDates() });
+      },
+    },
+
+    // ── REST: history — today (tailed) or a specific date (full) ──
+    "/api/logs": {
+      GET(req: Request): Response {
+        const url = new URL(req.url);
+        const date = url.searchParams.get("date");
+
+        if (date) {
+          const filePath = logPathForDate(date);
+          if (!filePath) {
+            return Response.json({ error: "Invalid date format, expected YYYY-MM-DD" }, { status: 400 });
+          }
+          const entries = parseJsonLines(readAllLines(filePath));
+          return Response.json({ entries, total: entries.length, date });
+        }
+
         const lines = tailFile(todayLogPath(), 500);
         const entries = parseJsonLines(lines);
         return Response.json({ entries, total: entries.length });

@@ -73,6 +73,11 @@
       <button class="filter-btn" data-level="trace" style="color:#8b949e">TRACE</button>
     </div>
     <div class="w-px h-4 bg-gray-600"></div>
+    <span class="text-xs text-gray-400">日期:</span>
+    <select id="date-select" class="search-input" style="width:auto;min-width:140px">
+      <option value="">今天 (实时)</option>
+    </select>
+    <div class="w-px h-4 bg-gray-600"></div>
     <input class="search-input" id="search-input" type="text" placeholder="搜索日志..." />
     <div class="flex-1"></div>
     <span class="text-xs text-gray-500" id="log-count">0 条</span>
@@ -96,6 +101,7 @@
     let searchTerm = '';
     let eventSource = null;
     let reconnectTimer = null;
+    let viewingDate = ''; // '' = today/live, 'YYYY-MM-DD' = historical snapshot
 
     const levelOrder = { fatal: 1, error: 2, warn: 3, info: 4, debug: 5, trace: 6 };
 
@@ -107,6 +113,7 @@
     const logCount    = document.getElementById('log-count');
     const autoScroll  = document.getElementById('auto-scroll');
     const searchInput = document.getElementById('search-input');
+    const dateSelect  = document.getElementById('date-select');
 
     // ── Render ─────────────────────────────────────────────────────
     function escapeHtml(str) {
@@ -218,6 +225,59 @@
       }, 200);
     });
 
+    // ── Date selector: historical log loading ─────────────────────
+    async function loadDateList() {
+      try {
+        const res = await fetch('/api/logs/dates');
+        const { dates } = await res.json();
+        const today = new Date().toISOString().slice(0, 10);
+        // Keep the "今天 (实时)" option, append historical dates (skip today)
+        for (const d of dates) {
+          if (d === today) continue;
+          const opt = document.createElement('option');
+          opt.value = d;
+          opt.textContent = d;
+          dateSelect.appendChild(opt);
+        }
+      } catch (e) {
+        console.error('Failed to load date list', e);
+      }
+    }
+
+    async function loadHistoricalLogs(date) {
+      try {
+        const res = await fetch(`/api/logs?date=${encodeURIComponent(date)}`);
+        const data = await res.json();
+        allLogs = data.entries || [];
+        renderAll();
+      } catch (e) {
+        console.error('Failed to load logs for', date, e);
+        allLogs = [];
+        renderAll();
+      }
+    }
+
+    function disconnectStream() {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      clearTimeout(reconnectTimer);
+    }
+
+    dateSelect.addEventListener('change', () => {
+      viewingDate = dateSelect.value;
+      allLogs = [];
+      logLines.innerHTML = '';
+      if (viewingDate) {
+        // Historical view — stop live stream, load full day
+        disconnectStream();
+        setStatus('disconnected');
+        connStatus.textContent = `历史: ${viewingDate}`;
+        loadHistoricalLogs(viewingDate);
+      } else {
+        // Back to live view
+        connect();
+      }
+    });
+
     // ── SSE connection ─────────────────────────────────────────────
     function setStatus(state) {
       connDot.className = 'conn-dot ' + state;
@@ -259,6 +319,7 @@
       });
     }
 
+    loadDateList();
     connect();
   </script>
 </body>
