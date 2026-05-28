@@ -177,19 +177,30 @@ function entryMatches(entry: LogEntry, q: LogQuery): boolean {
  *
  * Note: this reads files in full. For Synod's volume that's fine; if logs
  * grow large enough that this becomes slow, swap in a streaming reader.
+ *
+ * `readAllLines` already swallows ENOENT and parse errors per-file, but we
+ * still wrap the outer loop so an unexpected failure (e.g. a corrupted
+ * date entry, future refactor breaking an invariant) degrades to an empty
+ * result instead of bubbling up as a 500 from /api/logs.
  */
 function queryLogs(q: LogQuery): { entries: LogEntry[]; dates: string[]; total: number } {
   const limit = Math.max(1, Math.min(q.limit ?? 500, 5000));
-  const dates = datesForQuery(q);
-
+  let dates: string[] = [];
   const all: LogEntry[] = [];
-  for (const d of dates) {
-    const paths = logPathsForDate(d);
-    if (!paths) continue;
-    all.push(
-      ...parseJsonLines(readAllLines(paths.main)),
-      ...parseJsonLines(readAllLines(paths.error)),
-    );
+
+  try {
+    dates = datesForQuery(q);
+    for (const d of dates) {
+      const paths = logPathsForDate(d);
+      if (!paths) continue;
+      all.push(
+        ...parseJsonLines(readAllLines(paths.main)),
+        ...parseJsonLines(readAllLines(paths.error)),
+      );
+    }
+  } catch (e) {
+    process.stderr.write(`[ui] queryLogs failed: ${e}\n`);
+    return { entries: [], dates, total: 0 };
   }
 
   const filtered = all.filter(e => entryMatches(e, q));

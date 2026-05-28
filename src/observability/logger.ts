@@ -51,8 +51,8 @@ const isTestRun =
   Boolean(process.env.SYNOD_DISABLE_FILE_LOGS);
 
 const consoleLevel = parseLevel(process.env.LOG_LEVEL, "info");
-const fileLevel    = isTestRun
-  ? ("silent" as LogLevel)
+const fileLevel: LogLevel = isTestRun
+  ? "silent"
   : parseLevel(process.env.LOG_FILE_LEVEL, "debug");
 const jsonConsole  = process.env.LOG_FORMAT === "json";
 
