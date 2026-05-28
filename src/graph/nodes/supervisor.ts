@@ -29,9 +29,10 @@ const REPLY_GUARDRAILS = `
 // ----------------------------------------------------------------
 
 const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
-  slack: "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
-  web:   "搜索互联网获取实时信息、新闻、文档等（待接入）",
-  mcp:   "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
+  slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
+  web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
+  mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
+  capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
 };
 
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
