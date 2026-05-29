@@ -116,13 +116,35 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
-    const { messages, subAgentResult } = state;
+    const { messages, subAgentResult, finalReply } = state;
 
     // 取最后一条用户消息用于日志（截断避免刷屏）
     const lastHuman = [...messages].reverse().find((m) => m instanceof HumanMessage);
     const inputSnippet = typeof lastHuman?.content === "string"
       ? lastHuman.content.slice(0, 120)
       : "";
+
+    // ── 阶段 A0：子 Agent 给了成稿 finalReply → 原样转发（仅 sanitize） ──
+    //
+    // 子 Agent 通过 finalReply 显式声明「这是给用户看的最终回复」，supervisor
+    // 不再用 LLM 重写。避免子 Agent 已写好的表格 / 列表被 compose 阶段
+    // 「理解掉」（LLM 看到 prompt 里有表格，误以为表格已展示过，只补结尾）。
+    if (finalReply && finalReply.trim()) {
+      const cleaned = stripThinking(finalReply);
+      const replyMsg = new AIMessage({ content: cleaned });
+      logger.info({
+        phase: "compose",
+        mode: "passthrough",
+        durationMs: Date.now() - nodeStart,
+        replySnippet: cleaned.slice(0, 120),
+      }, "final reply passthrough");
+      return {
+        messages: [replyMsg],
+        next: "__end__",
+        subAgentResult: "",
+        finalReply: "",
+      };
+    }
 
     // ── 阶段 A：子 Agent 已完成 → 整合结果生成最终回复 ──
     if (subAgentResult) {
@@ -154,6 +176,7 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
         messages: [safeFinalReply],
         next: "__end__",
         subAgentResult: "",
+        finalReply: "",
       };
     }
 

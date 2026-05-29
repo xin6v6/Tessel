@@ -74,11 +74,18 @@ export class SlackClient {
   // Channels
   // ----------------------------------------------------------------
 
+  /**
+   * List channels the bot itself is a member of.
+   * Uses `users.conversations` without a `user` param, which scopes the
+   * result to the token's own membership — public channels the bot has
+   * NOT joined are excluded by the API, not filtered client-side.
+   */
   async listChannels(params: { limit?: number; cursor?: string } = {}) {
-    return this.client.conversations.list({
+    return this.client.users.conversations({
       limit: params.limit ?? 50,
       cursor: params.cursor,
       types: "public_channel,private_channel",
+      exclude_archived: true,
     });
   }
 
