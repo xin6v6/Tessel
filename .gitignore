@@ -38,6 +38,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .tessel.pid
 .claude/
 
-# contacts directory: SQLite DB with real platform identities
-data/contacts.db
-data/contacts.db-*
+# runtime data directory: SQLite DB, traces, logs, etc.
+data/
