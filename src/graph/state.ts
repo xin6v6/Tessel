@@ -25,7 +25,11 @@ export type SubAgentName =
  *
  * messages       — 完整对话历史（HumanMessage / AIMessage / ToolMessage）
  * next           — Supervisor 决定的下一个节点
- * subAgentResult — 子 Agent 执行完毕后写入的文字摘要，供 Supervisor 整合
+ * subAgentResult — 子 Agent 的原始/未成稿输出。Supervisor 在 finalReply 为空时
+ *                  会用它走 LLM compose 兜底，整合成给用户的回复。
+ * finalReply     — 子 Agent 已经成稿、可直接发给用户的回复文本。Supervisor 看到
+ *                  非空时会跳过 LLM 重写、原样转发（仅做 sanitize），避免成稿
+ *                  内容（表格 / 列表等）被 LLM 二次改写后丢失。
  */
 export const GraphState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
@@ -40,6 +44,11 @@ export const GraphState = Annotation.Root({
 
   subAgentResult: Annotation<string>({
     reducer: (_, result) => result,
+    default: () => "",
+  }),
+
+  finalReply: Annotation<string>({
+    reducer: (_, reply) => reply,
     default: () => "",
   }),
 });
