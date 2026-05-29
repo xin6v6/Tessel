@@ -137,7 +137,10 @@ export function buildSlackTools(client: SlackClient): ToolEntry[] {
     {
       definition: {
         name: "slack_list_channels",
-        description: "List channels in the Slack workspace (public and private the bot has access to).",
+        description:
+          "List the channels the bot itself has joined (both public and private). " +
+          "This is scoped to the bot's own membership — it does NOT enumerate all public channels in the workspace. " +
+          "To reach a channel the bot has not joined, the bot must be invited first.",
         parameters: {
           type: "object",
           properties: {
@@ -152,7 +155,7 @@ export function buildSlackTools(client: SlackClient): ToolEntry[] {
           id: c.id,
           name: c.name,
           is_private: c.is_private,
-          num_members: c.num_members,
+          num_members: (c as { num_members?: number }).num_members,
           topic: (c.topic as { value?: string } | undefined)?.value,
         }));
         return JSON.stringify(channels);
