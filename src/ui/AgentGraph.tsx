@@ -42,21 +42,25 @@ const nodes = [
 
 职责
   · 理解用户意图
-  · 决定路由到哪个工具 Agent
-  · 整合子 Agent 结果生成最终回复
+  · 决定路由到哪个子节点
+  · 整合子节点结果生成最终回复
 
-路由决策（纯文本解析，兼容所有 LLM）
-  回复 "slack"     → 路由到 Slack Agent
-  回复 "__end__"   → 直接回复用户
+路由候选（按 source 过滤后给 LLM）
+  slack         → Slack 操作（仅当 source=slack）
+  web           → 网络搜索（占位 stub）
+  mcp           → MCP 工具（占位 stub）
+  capabilities  → 自省"你能做什么"
+  __end__       → 直接回复用户，无需工具
 
 执行阶段
-  A. 路由阶段：分析意图 → 选择子 Agent
-  B. 整合阶段：收到子 Agent 结果 → 生成最终回复
-  C. 直接回复：无需工具时直接输出
+  A0. finalReply 非空 → passthrough（原样转发 + stripThinking）
+  A.  仅 subAgentResult → LLM compose（兜底，重写为自然语言）
+  B.  路由阶段：分析意图 → 选择子节点
 
-系统提示
-  你是一个路由助手。根据用户最新的消息，
-  从下列选项中选择一个，只回复该选项的名字。
+为什么要分 A0 / A 两条路径
+  让子节点显式声明"这是给用户看的成稿"，
+  Supervisor 不再 LLM 重写，避免成稿内容（表格、列表）
+  被重写时被"理解掉"。
 
 文件  src/graph/nodes/supervisor.ts`,
   },
@@ -91,27 +95,28 @@ SDK
     id: 'slack_agent',
     type: 'agent',
     label: 'Slack Agent',
-    sub: 'ReAct Agent',
-    x: 280, y: 600,
-    size: 120,
+    sub: 'ReAct + Finalizer',
+    x: 200, y: 600,
+    size: 100,
     icon: () => <MessageSquare size={26} className="mb-1 opacity-90" />,
-    prompt: `Slack 工具 Agent
+    prompt: `Slack 工具 Agent（两阶段）
 
-类型
+阶段 1：ReAct 循环
   createReactAgent（LangGraph prebuilt）
-  挂载所有 Slack 工具，自主决定调用顺序
+  Thought → Action → Observation
 
-职责
-  · 执行所有 Slack 操作
-  · 可多步调用（如先搜索再发消息）
-  · 将结果汇总为 subAgentResult 返回 Supervisor
+阶段 2：Finalizer（withStructuredOutput）
+  把草稿收敛成 { displayMessage, status }
+  displayMessage 写入 state.finalReply
+  原始 ReAct 文本写入 state.subAgentResult（兜底）
+
+为什么要 Finalizer
+  ReAct 输出常混 <think>、内部推理、JSON 片段。
+  Finalizer 强制产出"直接发给用户的成稿"，
+  Supervisor 看到 finalReply 后原样转发，不再 LLM 重写，
+  避免已渲染的表格 / 列表被改写时丢失。
 
 工具列表（见 Slack Tools 节点）
-
-执行流
-  Supervisor → slack_agent.invoke()
-  → ReAct 循环（Thought → Action → Observation）
-  → 完成 → 返回 ToolMessage 结果
 
 文件  src/graph/nodes/slack.ts`,
   },
@@ -119,57 +124,77 @@ SDK
     id: 'web_agent',
     type: 'agent',
     label: 'Web Agent',
-    sub: 'ReAct Agent · 待接入',
-    x: 480, y: 600,
-    size: 120,
+    sub: '占位 stub',
+    x: 400, y: 600,
+    size: 100,
     icon: () => <Search size={26} className="mb-1 opacity-90" />,
-    prompt: `Web Search Agent（待接入）
+    prompt: `Web Search Agent（占位 stub）
 
-类型
-  createReactAgent + Search Tool
+当前状态
+  节点已挂入 graph，可被 supervisor 路由到。
+  内部 tool 是占位实现，调用即返回"未接入"。
 
-职责
-  · 实时网络信息检索
-  · 处理需要最新信息的查询
+输出
+  写入 subAgentResult（暂未走 finalReply 结构化通道）。
+  Supervisor 走 LLM compose 兜底路径生成回复。
 
-候选工具
-  · Tavily Search API（LangChain 原生）
-  · Brave Search API（隐私友好）
+候选搜索 API
+  · Tavily Search（LangChain 原生）
+  · Brave Search（隐私友好）
   · SerpAPI（Google 结果）
 
-接入方式
-  1. 新建 src/integrations/web/ 目录
-  2. 实现 Integration 接口
-  3. 注册到 IntegrationRegistry
-  4. Supervisor 路由增加 "web" 选项`,
+接入步骤
+  见 src/graph/nodes/web.ts 顶部注释。`,
   },
   {
     id: 'mcp_agent',
     type: 'agent',
     label: 'MCP Agent',
-    sub: 'ReAct Agent · 待接入',
-    x: 680, y: 600,
-    size: 120,
+    sub: '占位 stub',
+    x: 600, y: 600,
+    size: 100,
     icon: () => <Wrench size={26} className="mb-1 opacity-90" />,
-    prompt: `MCP Tools Agent（待接入）
+    prompt: `MCP Tools Agent（占位 stub）
 
-类型
-  createReactAgent + MCP 工具集
+当前状态
+  节点已挂入 graph，可被 supervisor 路由到。
+  内部 tool 是占位实现，调用即返回"未接入"。
 
-职责
-  · 通过 MCP 协议接入任意外部服务
-  · 单个 Agent 管理多个 MCP Server
+输出
+  写入 subAgentResult（暂未走 finalReply 结构化通道）。
 
 候选 MCP Server
-  · filesystem   — 读写本地文件
-  · github       — 仓库操作
-  · notion       — 笔记/知识库
-  · postgres     — 数据库查询
-  · calendar     — 日历管理
+  · filesystem / github / notion
+  · postgres / calendar
 
 接入方式
   @langchain/mcp-adapters
-  将 MCP server 工具转为 LangChain Tool`,
+  将 MCP server 工具转为 LangChain Tool。`,
+  },
+  {
+    id: 'capabilities',
+    type: 'agent',
+    label: 'Capabilities',
+    sub: '自省节点',
+    x: 800, y: 600,
+    size: 100,
+    icon: () => <Settings2 size={26} className="mb-1 opacity-90" />,
+    prompt: `自省节点（非 ReAct，无 LLM 调用）
+
+触发
+  用户问"你能做什么 / 你有什么工具 / 列一下能力"
+
+行为
+  · 读取 IntegrationRegistry 当前已声明 + 已就绪的集成
+  · 读取 ToolRegistry 当前已注册的工具列表
+  · 按集成分组渲染成 Markdown 报告
+  · 写入 subAgentResult，Supervisor LLM compose 输出给用户
+
+为什么不让 LLM 答
+  避免 LLM 凭训练记忆"猜"能力清单，
+  确保答案来自运行时真实状态。
+
+文件  src/graph/nodes/capabilities.ts`,
   },
 
   // ── 工具层（各 Agent 下方）──
@@ -178,8 +203,8 @@ SDK
     type: 'tools',
     label: 'Slack Tools',
     sub: 'API Wrappers',
-    x: 280, y: 800,
-    size: 90,
+    x: 200, y: 800,
+    size: 80,
     icon: () => <Zap size={20} className="mb-1 opacity-80" />,
     prompt: `Slack 工具集（挂载在 Slack Agent）
 
@@ -187,9 +212,12 @@ SDK
   slack_send_message        发送消息 / 回复 Thread
   slack_get_messages        读取频道历史
   slack_get_thread_replies  读取 Thread 回复
-  slack_list_channels       列出频道
+  slack_list_channels       列出 bot 已加入的频道
+                            （API：users.conversations）
   slack_search_messages     全局搜索
   slack_get_user_info       查询用户资料
+  slack_notify              按名字 / 别名给人或频道发消息
+  slack_list_contacts       列出已保存的联系人别名
 
 来源
   SlackIntegration.toolEntries()
@@ -203,34 +231,38 @@ SDK
     id: 'web_tools',
     type: 'tools',
     label: 'Search APIs',
-    sub: '待接入',
-    x: 480, y: 800,
-    size: 90,
+    sub: '占位 stub',
+    x: 400, y: 800,
+    size: 80,
     icon: () => <Search size={20} className="mb-1 opacity-80" />,
-    prompt: `Web Search 工具集（待接入）
+    prompt: `Web Search 工具集（占位 stub）
 
-候选工具
+当前实现
+  src/graph/nodes/web.ts 内置 stubSearchTool
+  调用即返回"未接入"字符串。
+
+候选搜索 API
   · Tavily Search
   · Brave Search
-  · SerpAPI
-
-接入后挂载到 Web Agent`,
+  · SerpAPI`,
   },
   {
     id: 'mcp_tools',
     type: 'tools',
     label: 'MCP Servers',
-    sub: '待接入',
-    x: 680, y: 800,
-    size: 90,
+    sub: '占位 stub',
+    x: 600, y: 800,
+    size: 80,
     icon: () => <Wrench size={20} className="mb-1 opacity-80" />,
-    prompt: `MCP Server 工具集（待接入）
+    prompt: `MCP Server 工具集（占位 stub）
+
+当前实现
+  src/graph/nodes/mcp.ts 内置 stub tool
+  调用即返回"未接入"字符串。
 
 候选 Server
   · filesystem / github / notion
-  · postgres / calendar
-
-接入后挂载到 MCP Agent`,
+  · postgres / calendar`,
   },
 
   // ── State（顶部）──
@@ -247,15 +279,19 @@ SDK
 State 字段
   messages       完整消息列表（Human/AI/Tool）
   next           Supervisor 路由决策
-  subAgentResult 子 Agent 执行结果
+  subAgentResult 子节点 ReAct 原始输出（兜底）
+  finalReply     子节点已成稿、可直接发给用户的回复
+                 Supervisor 看到非空时原样转发，不再 LLM 重写
+
+为什么要双通道
+  子节点输出 = 内部推理 + 工具结果 + 用户回复 混在一起。
+  单通道（subAgentResult）时 supervisor 只能整段 LLM 重写，
+  常把已渲染的表格 / 列表"理解掉"。
+  finalReply 让子节点显式声明"这是成稿"，避免被改写。
 
 Checkpointer（跨会话记忆，待接入）
   将每轮对话 checkpoint 写入持久化存储，
   支持对话历史、中断恢复、Time Travel 调试。
-
-待接入存储
-  bun:sqlite  — 本地 SQLite
-  Redis       — 分布式部署
 
 文件  src/graph/state.ts
       src/memory/index.ts`,
@@ -269,22 +305,26 @@ const edges = [
   { id: 'e1', from: 'user',        to: 'supervisor',  type: 'main',  label: 'invoke(HumanMessage)' },
   { id: 'e2', from: 'supervisor',  to: 'slack_reply', type: 'main',  label: 'next = __end__' },
 
-  // Supervisor → 子 Agent（路由）
-  { id: 'e3', from: 'supervisor',  to: 'slack_agent', type: 'route', label: 'next = slack' },
-  { id: 'e4', from: 'supervisor',  to: 'web_agent',   type: 'route', label: 'next = web' },
-  { id: 'e5', from: 'supervisor',  to: 'mcp_agent',   type: 'route', label: 'next = mcp' },
+  // Supervisor → 子节点（路由）
+  { id: 'e3', from: 'supervisor',  to: 'slack_agent',  type: 'route', label: 'next = slack' },
+  { id: 'e4', from: 'supervisor',  to: 'web_agent',    type: 'route', label: 'next = web' },
+  { id: 'e5', from: 'supervisor',  to: 'mcp_agent',    type: 'route', label: 'next = mcp' },
+  { id: 'e6', from: 'supervisor',  to: 'capabilities', type: 'route', label: 'next = capabilities' },
 
-  // 子 Agent → Supervisor（结果返回）
-  { id: 'e6', from: 'slack_agent', to: 'supervisor',  type: 'return', label: 'subAgentResult' },
+  // 子节点 → Supervisor（结果返回）
+  { id: 'e7',  from: 'slack_agent',  to: 'supervisor', type: 'return', label: 'finalReply | subAgentResult' },
+  { id: 'e8',  from: 'web_agent',    to: 'supervisor', type: 'return', label: 'subAgentResult' },
+  { id: 'e9',  from: 'mcp_agent',    to: 'supervisor', type: 'return', label: 'subAgentResult' },
+  { id: 'e10', from: 'capabilities', to: 'supervisor', type: 'return', label: 'subAgentResult' },
 
-  // 子 Agent → 工具
-  { id: 'e7', from: 'slack_agent', to: 'slack_tools', type: 'tool',  label: 'tool call' },
-  { id: 'e8', from: 'web_agent',   to: 'web_tools',   type: 'tool',  label: 'tool call' },
-  { id: 'e9', from: 'mcp_agent',   to: 'mcp_tools',   type: 'tool',  label: 'tool call' },
+  // 子节点 → 工具（capabilities 无外部工具）
+  { id: 'e11', from: 'slack_agent', to: 'slack_tools', type: 'tool',  label: 'tool call' },
+  { id: 'e12', from: 'web_agent',   to: 'web_tools',   type: 'tool',  label: 'tool call' },
+  { id: 'e13', from: 'mcp_agent',   to: 'mcp_tools',   type: 'tool',  label: 'tool call' },
 
   // State 读写
-  { id: 'e10', from: 'supervisor', to: 'state',       type: 'state', label: '写入 State' },
-  { id: 'e11', from: 'state',      to: 'supervisor',  type: 'state', label: '读取历史' },
+  { id: 'e14', from: 'supervisor', to: 'state',       type: 'state', label: '写入 State' },
+  { id: 'e15', from: 'state',      to: 'supervisor',  type: 'state', label: '读取历史' },
 ];
 
 // ─── 曲线路径────────────────────────────────────────────────────────
