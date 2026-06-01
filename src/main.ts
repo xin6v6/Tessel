@@ -1,3 +1,5 @@
+import { Command } from "@langchain/langgraph";
+import type { HumanMessage } from "@langchain/core/messages";
 import { buildGraph } from "./graph/index.ts";
 import { humanMessageWithSpeaker } from "./graph/speaker.ts";
 import {
@@ -59,6 +61,43 @@ function extractRoute(
   return typeof state["next"] === "string" ? state["next"] : "__end__";
 }
 
+/** 用户消息是否表达"同意"（用于审批恢复）。 */
+function isApproval(text: string): boolean {
+  return /(^|\s)(同意|确认|可以|好的|批准|approve|yes|ok|go)(\s|$|，|。|!|！)/i.test(text.trim());
+}
+
+/**
+ * 调度图：若该 thread 有挂起的 workflow-approval 中断，则把本次消息当作审批
+ * 回复用 Command 恢复；否则正常发起新一轮 invoke。
+ *
+ * Workflow Runner 用 interrupt() 暂停后，状态落进 checkpointer。下一条用户
+ * 消息进来时在这里判定 —— "同意"则 resume({approved:true}) 让它继续编程/提交，
+ * 否则 resume({approved:false}) 放弃。
+ */
+async function invokeOrResume(
+  g: NonNullable<typeof graph>,
+  threadId: string,
+  message: HumanMessage,
+  rawText: string,
+  signal?: AbortSignal,
+): Promise<Awaited<ReturnType<typeof g.invoke>>> {
+  const config = { configurable: { thread_id: threadId }, ...(signal ? { signal } : {}) };
+  let pending = false;
+  try {
+    const snap = await g.getState({ configurable: { thread_id: threadId } });
+    pending = Array.isArray(snap?.tasks) && snap.tasks.some((t) => (t.interrupts?.length ?? 0) > 0);
+  } catch {
+    pending = false; // 无 state / 读取失败 → 当作新对话
+  }
+
+  if (pending) {
+    const approved = isApproval(rawText);
+    logger.info({ threadId, approved }, "workflow: resuming from approval interrupt");
+    return g.invoke(new Command({ resume: { approved } }), config);
+  }
+  return g.invoke({ messages: [message] }, config);
+}
+
 // ----------------------------------------------------------------
 // 集成层初始化
 // ----------------------------------------------------------------
@@ -88,13 +127,11 @@ if (process.env.SLACK_BOT_TOKEN) {
               logger.info({ text: textClean, threadId, speakerName }, "slack:mention received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
-                  const result = await graph!.invoke(
-                    {
-                      messages: [
-                        humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" }),
-                      ],
-                    },
-                    { configurable: { thread_id: threadId } }
+                  const result = await invokeOrResume(
+                    graph!,
+                    threadId,
+                    humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" }),
+                    textClean,
                   );
                   const reply = extractReply(result);
                   await traceWriter.write({
@@ -145,14 +182,14 @@ if (process.env.SLACK_BOT_TOKEN) {
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const controller = new AbortController();
-                  const timeout = setTimeout(() => controller.abort(), 120_000);
-                  const result = await graph!.invoke(
-                    {
-                      messages: [
-                        humanMessageWithSpeaker(text, { speakerId: user, speakerName, source: "slack" }),
-                      ],
-                    },
-                    { signal: controller.signal, configurable: { thread_id: threadId } }
+                  // 普通对话 120s 超时;但开发类 workflow 可能跑很久,这里放宽到 30 分钟。
+                  const timeout = setTimeout(() => controller.abort(), 30 * 60_000);
+                  const result = await invokeOrResume(
+                    graph!,
+                    threadId,
+                    humanMessageWithSpeaker(text, { speakerId: user, speakerName, source: "slack" }),
+                    text,
+                    controller.signal,
                   );
                   clearTimeout(timeout);
                   const reply = extractReply(result);
@@ -265,13 +302,11 @@ async function main() {
 
       await runWithContext({ sessionId, source: "cli", externalId, userId }, async () => {
         try {
-          const result = await graph!.invoke(
-            {
-              messages: [
-                humanMessageWithSpeaker(userMessage, { speakerId: externalId, source: "cli" }),
-              ],
-            },
-            { configurable: { thread_id: replThreadId } }
+          const result = await invokeOrResume(
+            graph!,
+            replThreadId,
+            humanMessageWithSpeaker(userMessage, { speakerId: externalId, source: "cli" }),
+            userMessage,
           );
           const reply = extractReply(result);
           console.log(`\n${reply}\n`);
