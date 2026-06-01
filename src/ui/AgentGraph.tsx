@@ -1,665 +1,554 @@
-import React, { useState } from 'react';
-import { Zap, X, Settings2, Code2, Database, User, BrainCircuit, Bot, Wrench, MessageSquare, Search, ChevronRight, ScrollText } from 'lucide-react';
-
-// ─── 节点数据────────────────────────────────────────────────────────
-// 布局：水平主流程 + 垂直子 Agent 层
-
-const nodes = [
-  // ── 主流程（水平）──
-  {
-    id: 'user',
-    type: 'io',
-    label: 'User',
-    sub: 'Slack @mention / DM',
-    x: 120, y: 360,
-    size: 100,
-    icon: () => <User size={24} className="mb-1 opacity-90" />,
-    prompt: `触发方式
-  · Slack 频道 @mention Bot
-  · 直接向 Bot 发送私信（DM）
-
-入站流程
-  Socket Mode WebSocket 收到事件
-  → SlackReceiver.onMention() / onMessage()
-  → 封装为 HumanMessage
-  → graph.invoke({ messages })
-
-说明
-  每次触发对应一次完整的 LangGraph
-  执行，无持久循环。
-
-文件  src/integrations/slack/receiver.ts`,
-  },
-  {
-    id: 'supervisor',
-    type: 'supervisor',
-    label: 'Supervisor',
-    sub: 'Orchestrator Agent',
-    x: 480, y: 360,
-    size: 160,
-    icon: () => <BrainCircuit size={36} className="mb-1 opacity-95 text-indigo-200" />,
-    prompt: `核心调度 Agent（主节点）
-
-职责
-  · 第一轮：判断要不要用工具
-  · 第二轮（仅 tool_routing）：从能力快照里挑具体 agent
-  · 整合子节点结果生成最终回复
-
-══ 上行：路由阶段 ══════════════════════
-第一轮 LLM（意图分类）— 三选一
-  chat              → 直接 LLM 回复（一次 LLM 即结束）
-  list_capabilities → 路由到 capabilities 节点
-  tool_routing      → 进入第二轮
-
-第二轮 LLM（仅 tool_routing 走）
-  · 候选 = 启动时算好的能力快照 ∩ source 平台锁 ∩ ready ∩ !isStub
-  · 输出 = 候选 agent 名 / none
-  · none → 固定回复 "我没这个工具"，不让 LLM 假装能做
-  · stub 节点物理上不在候选集，无法被选
-
-══ 下行：结果整合阶段 ════════════════════
-A0. finalReply 非空  → passthrough（原样转发 + stripThinking）
-A.  仅 subAgentResult → LLM compose 兜底（重写为自然语言）
-
-为什么要分 A0 / A
-  子节点用 finalReply 显式声明"这是成稿"，Supervisor 不再 LLM 重写，
-  避免已渲染的表格 / 列表被改写时被"理解掉"。
-
-为什么要两阶段路由
-  老版本路由 LLM 看静态 SUB_AGENTS 表，会把任务派给 stub 节点，
-  也没法感知"哪些 integration 真的就绪"。两阶段后，工具路径才付
-  第二轮 LLM 代价，chat / list_capabilities 仍是单次 LLM。
-
-能力快照在 Supervisor 构造时算一次缓存住（闭包内），后续不重扫。
-
-文件  src/graph/nodes/supervisor.ts
-      src/graph/capabilities-snapshot.ts`,
-  },
-  {
-    id: 'slack_reply',
-    type: 'io',
-    label: 'Slack Reply',
-    sub: 'chat.postMessage',
-    x: 860, y: 360,
-    size: 100,
-    icon: () => <Bot size={24} className="mb-1 opacity-90" />,
-    prompt: `回复出站
-
-流程
-  Supervisor 生成最终 AIMessage
-  → Graph 执行完毕（next = __end__）
-  → SlackReceiver 的 say() 回调触发
-  → chat.postMessage({ channel, text, thread_ts })
-  → 消息发送到原 Slack Thread
-
-SDK
-  @slack/web-api  chat.postMessage()
-
-说明
-  总是回复到原 Thread，保持对话连贯性。
-
-文件  src/integrations/slack/receiver.ts`,
-  },
-
-  // ── 工具 Agent 层（Supervisor 下方）──
-  {
-    id: 'slack_agent',
-    type: 'agent',
-    label: 'Slack Agent',
-    sub: 'ReAct + Finalizer',
-    x: 200, y: 600,
-    size: 100,
-    icon: () => <MessageSquare size={26} className="mb-1 opacity-90" />,
-    prompt: `Slack 工具 Agent（两阶段）
-
-阶段 1：ReAct 循环
-  createReactAgent（LangGraph prebuilt）
-  Thought → Action → Observation
-
-阶段 2：Finalizer（withStructuredOutput）
-  把草稿收敛成 { displayMessage, status }
-  displayMessage 写入 state.finalReply
-  原始 ReAct 文本写入 state.subAgentResult（兜底）
-
-为什么要 Finalizer
-  ReAct 输出常混 <think>、内部推理、JSON 片段。
-  Finalizer 强制产出"直接发给用户的成稿"，
-  Supervisor 看到 finalReply 后原样转发，不再 LLM 重写，
-  避免已渲染的表格 / 列表被改写时丢失。
-
-工具列表（见 Slack Tools 节点）
-
-文件  src/graph/nodes/slack.ts`,
-  },
-  {
-    id: 'web_agent',
-    type: 'agent',
-    label: 'Web Agent',
-    sub: '占位 stub',
-    x: 400, y: 600,
-    size: 100,
-    icon: () => <Search size={26} className="mb-1 opacity-90" />,
-    prompt: `Web Search Agent（占位 stub）
-
-路由可达性
-  节点已挂入 graph，但 Supervisor 的两阶段路由会因为
-  isStub=true 把它从第二轮候选集中过滤掉 —— 实际上
-  路由层永远不会把任务派给它。
-  （capabilities-snapshot.ts 中的 STUB_AGENTS 集合控制）
-
-内部
-  tool 是占位实现，调用即返回"未接入"。
-
-接入后
-  从 STUB_AGENTS 移除即自动出现在路由候选集中。
-
-候选搜索 API
-  · Tavily Search（LangChain 原生）
-  · Brave Search（隐私友好）
-  · SerpAPI（Google 结果）
-
-接入步骤
-  见 src/graph/nodes/web.ts 顶部注释。`,
-  },
-  {
-    id: 'mcp_agent',
-    type: 'agent',
-    label: 'MCP Agent',
-    sub: '占位 stub',
-    x: 600, y: 600,
-    size: 100,
-    icon: () => <Wrench size={26} className="mb-1 opacity-90" />,
-    prompt: `MCP Tools Agent（占位 stub）
-
-路由可达性
-  与 web agent 同：isStub=true 让两阶段路由
-  把它从第二轮候选集中过滤掉，永远不会被派到。
-  （capabilities-snapshot.ts 中的 STUB_AGENTS 集合控制）
-
-内部
-  tool 是占位实现，调用即返回"未接入"。
-
-候选 MCP Server
-  · filesystem / github / notion
-  · postgres / calendar
-
-接入方式
-  @langchain/mcp-adapters
-  将 MCP server 工具转为 LangChain Tool。
-  接入后从 STUB_AGENTS 移除即自动出现在路由候选集中。`,
-  },
-  {
-    id: 'capabilities',
-    type: 'agent',
-    label: 'Capabilities',
-    sub: '自省节点',
-    x: 800, y: 600,
-    size: 100,
-    icon: () => <Settings2 size={26} className="mb-1 opacity-90" />,
-    prompt: `自省节点（非 ReAct，无 LLM 调用）
-
-触发
-  Supervisor 第一轮意图分类得到 list_capabilities 时被路由到。
-  用户语义：「你能做什么 / 列一下你的工具 / 支持哪些操作」。
-
-行为
-  · 读取 IntegrationRegistry / ToolRegistry 当前状态
-  · 构建结构化 CapabilitiesSnapshot
-    - 每个 agent 含 ready / isStub / tools 字段
-  · 渲染成 Markdown 报告写入 subAgentResult
-  · Supervisor compose 输出给用户
-
-snapshot 是单一事实源
-  同一个 buildCapabilitiesSnapshot() 在 Supervisor 启动时也算过
-  一次（缓存在闭包），用于"tool_routing"路径决定派给哪个 agent。
-  本节点的用户视图和 Supervisor 的路由视图永远一致。
-
-为什么不让 LLM 答
-  避免 LLM 凭训练记忆"猜"能力清单，
-  确保答案来自运行时真实状态。
-
-文件  src/graph/nodes/capabilities.ts
-      src/graph/capabilities-snapshot.ts`,
-  },
-
-  // ── 工具层（各 Agent 下方）──
-  {
-    id: 'slack_tools',
-    type: 'tools',
-    label: 'Slack Tools',
-    sub: 'API Wrappers',
-    x: 200, y: 800,
-    size: 80,
-    icon: () => <Zap size={20} className="mb-1 opacity-80" />,
-    prompt: `Slack 工具集（挂载在 Slack Agent）
-
-可用工具
-  slack_send_message        发送消息 / 回复 Thread
-  slack_get_messages        读取频道历史
-  slack_get_thread_replies  读取 Thread 回复
-  slack_list_channels       列出 bot 已加入的频道
-                            （API：users.conversations）
-  slack_search_messages     全局搜索
-  slack_get_user_info       查询用户资料
-  slack_notify              按名字 / 别名给人或频道发消息
-  slack_list_contacts       列出已保存的联系人别名
-
-来源
-  SlackIntegration.toolEntries()
-  → ToolRegistry
-  → Slack Agent 工具列表
-
-文件  src/integrations/slack/tools.ts
-      src/tools/index.ts`,
-  },
-  {
-    id: 'web_tools',
-    type: 'tools',
-    label: 'Search APIs',
-    sub: '占位 stub',
-    x: 400, y: 800,
-    size: 80,
-    icon: () => <Search size={20} className="mb-1 opacity-80" />,
-    prompt: `Web Search 工具集（占位 stub）
-
-当前实现
-  src/graph/nodes/web.ts 内置 stubSearchTool
-  调用即返回"未接入"字符串。
-
-候选搜索 API
-  · Tavily Search
-  · Brave Search
-  · SerpAPI`,
-  },
-  {
-    id: 'mcp_tools',
-    type: 'tools',
-    label: 'MCP Servers',
-    sub: '占位 stub',
-    x: 600, y: 800,
-    size: 80,
-    icon: () => <Wrench size={20} className="mb-1 opacity-80" />,
-    prompt: `MCP Server 工具集（占位 stub）
-
-当前实现
-  src/graph/nodes/mcp.ts 内置 stub tool
-  调用即返回"未接入"字符串。
-
-候选 Server
-  · filesystem / github / notion
-  · postgres / calendar`,
-  },
-
-  // ── State（顶部）──
-  {
-    id: 'state',
-    type: 'state',
-    label: 'Graph State',
-    sub: 'Annotation + Checkpointer',
-    x: 480, y: 140,
-    size: 120,
-    icon: () => <Database size={28} className="mb-1 opacity-90 text-cyan-200" />,
-    prompt: `LangGraph 全局状态（单次对话生命周期）
-
-State 字段
-  messages       完整消息列表（Human/AI/Tool）
-  next           Supervisor 路由决策
-  subAgentResult 子节点 ReAct 原始输出（兜底）
-  finalReply     子节点已成稿、可直接发给用户的回复
-                 Supervisor 看到非空时原样转发，不再 LLM 重写
-
-为什么要双通道
-  子节点输出 = 内部推理 + 工具结果 + 用户回复 混在一起。
-  单通道（subAgentResult）时 supervisor 只能整段 LLM 重写，
-  常把已渲染的表格 / 列表"理解掉"。
-  finalReply 让子节点显式声明"这是成稿"，避免被改写。
-
-Checkpointer（跨会话记忆，待接入）
-  将每轮对话 checkpoint 写入持久化存储，
-  支持对话历史、中断恢复、Time Travel 调试。
-
-文件  src/graph/state.ts
-      src/memory/index.ts`,
-  },
-];
-
-// ─── 边数据────────────────────────────────────────────────────────
-
-const edges = [
-  // 主执行流
-  { id: 'e1', from: 'user',        to: 'supervisor',  type: 'main',  label: 'invoke(HumanMessage)' },
-  { id: 'e2', from: 'supervisor',  to: 'slack_reply', type: 'main',  label: 'next = __end__' },
-
-  // Supervisor → 子节点（路由）
-  { id: 'e3', from: 'supervisor',  to: 'slack_agent',  type: 'route', label: 'next = slack' },
-  { id: 'e4', from: 'supervisor',  to: 'web_agent',    type: 'route', label: 'next = web' },
-  { id: 'e5', from: 'supervisor',  to: 'mcp_agent',    type: 'route', label: 'next = mcp' },
-  { id: 'e6', from: 'supervisor',  to: 'capabilities', type: 'route', label: 'next = capabilities' },
-
-  // 子节点 → Supervisor（结果返回）
-  { id: 'e7',  from: 'slack_agent',  to: 'supervisor', type: 'return', label: 'finalReply | subAgentResult' },
-  { id: 'e8',  from: 'web_agent',    to: 'supervisor', type: 'return', label: 'subAgentResult' },
-  { id: 'e9',  from: 'mcp_agent',    to: 'supervisor', type: 'return', label: 'subAgentResult' },
-  { id: 'e10', from: 'capabilities', to: 'supervisor', type: 'return', label: 'subAgentResult' },
-
-  // 子节点 → 工具（capabilities 无外部工具）
-  { id: 'e11', from: 'slack_agent', to: 'slack_tools', type: 'tool',  label: 'tool call' },
-  { id: 'e12', from: 'web_agent',   to: 'web_tools',   type: 'tool',  label: 'tool call' },
-  { id: 'e13', from: 'mcp_agent',   to: 'mcp_tools',   type: 'tool',  label: 'tool call' },
-
-  // State 读写
-  { id: 'e14', from: 'supervisor', to: 'state',       type: 'state', label: '写入 State' },
-  { id: 'e15', from: 'state',      to: 'supervisor',  type: 'state', label: '读取历史' },
-];
-
-// ─── 曲线路径────────────────────────────────────────────────────────
-
-function getCurvedPath(src: typeof nodes[0], tgt: typeof nodes[0], type: string) {
-  if (!src || !tgt) return { path: '', midX: 0, midY: 0 };
-
-  const sx = src.x, sy = src.y;
-  const tx = tgt.x, ty = tgt.y;
-  const dx = tx - sx, dy = ty - sy;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-
-  const sr = src.size / 2 + 6;
-  const tr = tgt.size / 2 + 10;
-
-  // 控制点偏移
-  let curvature = 0;
-  if (type === 'state') curvature = -60;
-  if (type === 'return') curvature = 40;
-
-  const mx = (sx + tx) / 2 + (curvature !== 0 ? -dy / dist * curvature : 0);
-  const my = (sy + ty) / 2 + (curvature !== 0 ? dx / dist * curvature : 0);
-
-  // 从圆心到控制点方向截取起终点
-  const angle1 = Math.atan2(my - sy, mx - sx);
-  const angle2 = Math.atan2(ty - my, tx - mx);
-
-  const startX = sx + Math.cos(angle1) * sr;
-  const startY = sy + Math.sin(angle1) * sr;
-  const endX   = tx - Math.cos(angle2) * tr;
-  const endY   = ty - Math.sin(angle2) * tr;
-
-  if (curvature !== 0) {
-    return {
-      path: `M ${startX} ${startY} Q ${mx} ${my} ${endX} ${endY}`,
-      midX: mx,
-      midY: my,
-    };
-  }
-
-  return {
-    path: `M ${startX} ${startY} L ${endX} ${endY}`,
-    midX: (startX + endX) / 2,
-    midY: (startY + endY) / 2,
-  };
+import { useState, useMemo } from 'react';
+import {
+  X, User, Bot, BrainCircuit, MessageSquare, Search, Wrench, Settings2,
+  Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck, ThumbsUp,
+  GitBranch, Database, ScrollText, ChevronRight, Code2,
+} from 'lucide-react';
+
+// ────────────────────────────────────────────────────────────────────────────
+// 分层纵向 DAG（Mermaid / n8n 风格）。
+//
+// 每个节点声明 { layer, col }，坐标由布局引擎按"层 → y、列 → x"自动计算，
+// 边用正交折线（曼哈顿布线）连接，避免手摆坐标导致的斜穿与交叉。
+//
+// 架构要点（用户反馈后定稿）：
+//   · Supervisor 只对话/路由/整合，保持纯粹。
+//   · Workflow Runner 是【通用】多阶段调度器，不绑定"开发"。coding 只是它的
+//     一份 workflow 定义（stages + 审批点 + 重试规则）。以后加新流程只需加
+//     一份定义，无需新增节点 / 改图。
+//   · 当前装载的 coding workflow：需求 → 编程 → 测试 → 审核 → 提交，
+//     仅在"需求"后停一次等人工确认，之后自动连跑。
+// ────────────────────────────────────────────────────────────────────────────
+
+type NodeType =
+  | 'entry' | 'exit' | 'supervisor' | 'agent' | 'tool' | 'state'
+  | 'runner' | 'stage' | 'approval';
+
+interface GNode {
+  id: string;
+  type: NodeType;
+  label: string;
+  sub?: string;
+  layer: number;      // 行（从 0 顶部往下）
+  col: number;        // 列内位置（用于同层水平分布，单位：列槽）
+  Icon: React.ComponentType<{ size?: number; className?: string }>;
+  prompt?: string;
 }
 
-// ─── 样式────────────────────────────────────────────────────────
+interface GEdge {
+  from: string;
+  to: string;
+  kind: 'flow' | 'route' | 'return' | 'aux' | 'retry' | 'approval';
+  label?: string;
+}
 
-const NODE_STYLES: Record<string, string> = {
-  io:         'bg-gradient-to-br from-[#f43f5e] to-[#be123c] shadow-[0_0_30px_rgba(244,63,94,0.35)]',
-  state:      'bg-gradient-to-br from-[#06b6d4] to-[#0891b2] shadow-[0_0_35px_rgba(6,182,212,0.45)]',
-  supervisor: 'bg-gradient-to-br from-[#805af5] to-[#5936c7] shadow-[0_0_45px_rgba(128,90,245,0.45)]',
-  agent:      'bg-gradient-to-br from-[#10b981] to-[#059669] shadow-[0_0_30px_rgba(16,185,129,0.35)]',
-  tools:      'bg-gradient-to-br from-[#f59e0b] to-[#d97706] shadow-[0_0_25px_rgba(245,158,11,0.3)]',
-};
+// ─── 节点 ────────────────────────────────────────────────────────────────────
 
-const DOT_COLORS: Record<string, string> = {
-  io:         '#f43f5e',
-  state:      '#06b6d4',
-  supervisor: '#805af5',
-  agent:      '#10b981',
-  tools:      '#f59e0b',
-};
+const NODES: GNode[] = [
+  // L0 — 入口 / 出口
+  { id: 'slack_in', type: 'entry', label: 'Slack 入站', sub: '@mention / DM',
+    layer: 0, col: 2, Icon: User,
+    prompt:
+`消息入站
 
-const EDGE_STYLES: Record<string, { stroke: string; dash: string; marker: string; width: string }> = {
-  main:   { stroke: '#64748b', dash: 'none', marker: 'arr-main',   width: '2' },
-  route:  { stroke: '#7c3aed', dash: '6,4',  marker: 'arr-route',  width: '1.5' },
-  return: { stroke: '#10b981', dash: '5,4',  marker: 'arr-return', width: '1.5' },
-  tool:   { stroke: '#475569', dash: '4,3',  marker: 'arr-tool',   width: '1.5' },
-  state:  { stroke: '#0891b2', dash: '4,4',  marker: 'arr-state',  width: '1.5' },
-};
+  Socket Mode 收到事件
+  → SlackReceiver.onMention / onMessage
+  → 封装 HumanMessage
+  → graph.invoke({ messages }, { thread_id })
 
-const LEGEND = [
-  { color: '#f43f5e', label: 'Slack I/O' },
-  { color: '#06b6d4', label: 'State' },
-  { color: '#805af5', label: 'Supervisor' },
-  { color: '#10b981', label: 'Tool Agent' },
-  { color: '#f59e0b', label: 'Tools' },
+文件  src/integrations/slack/*` },
+  { id: 'slack_out', type: 'exit', label: 'Slack 回复', sub: 'chat.postMessage',
+    layer: 0, col: 6, Icon: Bot,
+    prompt:
+`消息出站
+
+  Supervisor 生成最终 AIMessage（next = __end__）
+  → say() → chat.postMessage 回到原 Thread
+
+文件  src/integrations/slack/*` },
+
+  // L1 — 状态
+  { id: 'state', type: 'state', label: 'Graph State', sub: 'Annotation + Checkpointer',
+    layer: 1, col: 6.4, Icon: Database,
+    prompt:
+`LangGraph 全局状态 + 持久化
+
+State 字段
+  messages / next / subAgentResult / finalReply
+
+Checkpointer（data/checkpoints.db）
+  按 thread_id 持久化，支持多轮历史与 interrupt 跨消息恢复。
+  Workflow 的人工审批就靠它跨 Slack 消息暂停 / 恢复。
+
+文件  src/graph/state.ts、src/graph/checkpointer.ts` },
+
+  // L2 — Supervisor
+  { id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '对话 / 路由 / 整合',
+    layer: 2, col: 4, Icon: BrainCircuit,
+    prompt:
+`核心调度 Agent —— 保持纯粹
+
+职责（只这三件，不掺业务细节）
+  · 意图分类（chat / list_capabilities / tool_routing）
+  · 第二轮按能力快照选 sub-agent
+  · 整合子节点结果 → 最终回复
+
+刻意不做
+  多阶段任务的"分任务 / 判断结果 / 重试"不在这里 ——
+  那是 Workflow Runner 的职责，避免 Supervisor 被污染。
+
+文件  src/graph/nodes/supervisor.ts` },
+
+  // L3 — sub-agent 横排（slack / web / mcp / capabilities / workflow）
+  { id: 'slack_agent', type: 'agent', label: 'Slack Agent', sub: 'ReAct + Finalizer',
+    layer: 3, col: 0, Icon: MessageSquare,
+    prompt:
+`Slack 工具 Agent（ReAct）
+
+  阶段1 ReAct 循环 → 阶段2 Finalizer 收敛成稿
+  finalReply 写回 state，Supervisor 原样转发不重写。
+
+文件  src/graph/nodes/slack.ts` },
+  { id: 'web_agent', type: 'agent', label: 'Web Agent', sub: '占位 stub',
+    layer: 3, col: 1.5, Icon: Search,
+    prompt:
+`Web Search Agent（stub）
+
+  isStub=true，被两阶段路由从候选集过滤，永不被派到。
+  接入真实 Search API 后从 STUB_AGENTS 移除即可。
+
+文件  src/graph/nodes/web.ts` },
+  { id: 'mcp_agent', type: 'agent', label: 'MCP Agent', sub: '占位 stub',
+    layer: 3, col: 3, Icon: Wrench,
+    prompt:
+`MCP Tools Agent（stub）
+
+  同 web：isStub 过滤。接入 @langchain/mcp-adapters 后启用。
+
+文件  src/graph/nodes/mcp.ts` },
+  { id: 'capabilities', type: 'agent', label: 'Capabilities', sub: '自省节点',
+    layer: 3, col: 4.5, Icon: Settings2,
+    prompt:
+`自省节点（无 LLM）
+
+  读取 Integration/Tool Registry 真实状态，渲染能力清单。
+  与 Supervisor 路由用的是同一份 snapshot，视图永远一致。
+
+文件  src/graph/nodes/capabilities.ts` },
+  { id: 'workflow', type: 'runner', label: 'Workflow Runner', sub: '通用多阶段调度器',
+    layer: 3, col: 6.2, Icon: Workflow,
+    prompt:
+`Workflow Runner —— 【通用】多阶段任务调度器
+
+不绑定"开发"
+  本节点不认识"编程 / 测试"这些具体阶段。它只做通用的事：
+    · 从 Recipe 库取一份已记录好的流程（不再每次靠 LLM 临时决定顺序）
+    · 按 recipe 依次调度 stage sub-agent
+    · 判断各 stage 结果（pass / fail）、管重试计数
+    · 在 recipe 指定的 stage 后 interrupt() 等人工审批
+
+recipe = 一份可复用、可进化的流程配方
+  { tag, stages: [...], approveAfter: [...], maxRetries }
+  · LLM 只判断任务属于哪个 tag → 取对应 recipe；命不中才临时决策
+  · coding 只是【第一个】recipe；加新流程 = 加一份 recipe，不改图
+  · 运行时按成败自动优化（如某 stage 老失败 → 提高重试上限）
+
+触发
+  Supervisor 路由 next = workflow；仅白名单用户放行。
+
+跨后端
+  stage sub-agent 底层用 Claude Agent SDK（headless）。
+  本地真 Claude；生产 DeepSeek（ANTHROPIC_BASE_URL 切换）。
+
+文件  src/graph/nodes/workflow-runner.ts
+      src/workflows/recipe-store.ts` },
+  { id: 'recipes', type: 'state', label: 'Recipe 库', sub: '流程配方 · 可复用',
+    layer: 2, col: 6.6, Icon: ClipboardList,
+    prompt:
+`Recipe 库 —— 记录好的流程，供复用
+
+为什么有它
+  Workflow Runner 早期靠 LLM 临时决定阶段顺序。把跑通的好流程
+  记录下来，下次同类任务直接复用 —— 省 LLM 决策、稳定可靠。
+
+一份 recipe（src/workflows/recipes/*.ts，进版本控制、可手改）
+  { tag: 'bugfix' | 'feature' | …,    // 任务类型标签，用于匹配
+    stages: ['需求','编程','测试','审核'],
+    approveAfter: ['需求'],            // 哪些 stage 后停下等人工审批
+    maxRetries: 2 }
+
+匹配
+  LLM 只判断任务属于哪个 tag → 取对应 recipe；命不中才临时决策。
+
+统计观测（不自动改 recipe）
+  每次运行把各 stage 的成功 / 重试 / 耗时记录到
+  data/workflow-stats.sqlite（纯观测、不进版本控制）。
+
+⚠ 本期不做自动优化
+  "哪步该优化"的判断策略尚未定 —— 先只攒统计数据，
+  要优化就人工改 recipes/*.ts。将来想清楚再决定是否加自动优化。
+
+文件  src/workflows/recipe-store.ts
+      src/workflows/recipes/*.ts` },
+
+  // L4 — 工具层（挂在部分 agent 下）
+  { id: 'slack_tools', type: 'tool', label: 'Slack Tools', sub: 'API wrappers',
+    layer: 4, col: 0, Icon: Wrench,
+    prompt:
+`Slack 工具集（挂在 Slack Agent）
+
+  slack_send_message / get_messages / list_channels /
+  search_messages / notify / list_contacts …
+
+文件  src/integrations/slack/tools.ts` },
+
+  // L4 — coding workflow 的 stages（横排，作为 Runner 当前装载的定义）
+  { id: 'wf_requirement', type: 'stage', label: '需求分析', sub: 'stage · 只读',
+    layer: 4, col: 3.4, Icon: ClipboardList,
+    prompt:
+`Stage · 需求分析（只读）
+
+allowedTools  Read / Glob / Grep
+产出  plan → 回 Runner
+
+唯一人工审批点
+  本 stage 跑完，Runner interrupt() 把 plan 发回 Slack 等你
+  确认需求。同意后才进编程；之后自动连跑不再打断。
+
+为什么先审需求
+  需求理解错，后面全白做 —— 先对齐再动手。
+
+文件  src/graph/nodes/workflow/stage-runner.ts` },
+  { id: 'wf_code', type: 'stage', label: '编程', sub: 'stage · 改文件',
+    layer: 4, col: 4.7, Icon: FileCode,
+    prompt:
+`Stage · 编程（真实改文件）
+
+allowedTools  Read / Edit / Write / Bash / Glob / Grep
+cwd  CODING_REPO_PATH（锁死）
+护栏  屏蔽 rm -rf / dd / git push（push 受控自跑，不交 SDK）
+
+产出  codeResult → 回 Runner
+回退  测试/审核失败时 Runner 再次派到本 stage（retry < 2）` },
+  { id: 'wf_test', type: 'stage', label: '测试', sub: 'stage · 不改文件',
+    layer: 4, col: 6, Icon: FlaskConical,
+    prompt:
+`Stage · 测试
+
+allowedTools  Read / Bash / Glob / Grep
+跑  bun test 等项目测试命令
+
+结果 → Runner 判断：
+  失败 & retry<2 → 回编程；超限 → 报告；通过 → 审核` },
+  { id: 'wf_review', type: 'stage', label: '审核', sub: 'stage · 自审 diff',
+    layer: 4, col: 7.3, Icon: ShieldCheck,
+    prompt:
+`Stage · 审核
+
+allowedTools  Read / Bash / Glob / Grep
+审  diff + 测试结果，给 verdict
+
+结果 → Runner 判断：
+  不过 & retry<2 → 回编程；通过 → 提交（不再二次审批）` },
+
+  // L5 — 审批 + 提交
+  { id: 'wf_approval', type: 'approval', label: '需求审批', sub: 'interrupt · 等你确认',
+    layer: 5, col: 3.4, Icon: ThumbsUp,
+    prompt:
+`需求审批（唯一人工审批点 · interrupt）
+
+机制
+  需求 stage 后 Runner interrupt()，图暂停并落盘 checkpointer，
+  plan 经 Supervisor 发回 Slack。
+
+恢复（跨两条 Slack 消息）
+  你下一条消息：含"同意/确认/yes" → resume(approved) → 进编程；
+  否则 → resume(rejected) → 放弃任务。
+
+文件  src/main.ts（审批恢复）+ workflow-runner.ts（interrupt）` },
+  { id: 'wf_commit', type: 'stage', label: '提交推送', sub: 'branch + push',
+    layer: 5, col: 7.3, Icon: GitBranch,
+    prompt:
+`提交推送（审核通过后由 Runner 触发，无需再审批）
+
+受控 git（Bun.$ 自跑，不交 SDK）
+  checkout -b → add -A → commit（绝不带 Co-Authored-By）→ push -u
+
+目标  新分支 + push，不动 main、不自动开 PR
+结果  分支 / push URL → Runner → Supervisor → Slack
+
+文件  src/workflows/coding/git.ts` },
 ];
 
-const EDGE_LEGEND = [
-  { stroke: '#64748b', dash: false, label: '主执行流' },
-  { stroke: '#7c3aed', dash: true,  label: '路由' },
-  { stroke: '#10b981', dash: true,  label: '结果返回' },
-  { stroke: '#0891b2', dash: true,  label: '状态读写' },
+// ─── 边 ──────────────────────────────────────────────────────────────────────
+
+const EDGES: GEdge[] = [
+  // 主流程纵向
+  { from: 'slack_in',   to: 'supervisor', kind: 'flow',   label: 'invoke' },
+  { from: 'supervisor', to: 'slack_out',  kind: 'flow',   label: 'next=__end__' },
+  { from: 'state',      to: 'supervisor', kind: 'aux',    label: '读写 State' },
+
+  // Supervisor → sub-agent
+  { from: 'supervisor', to: 'slack_agent',  kind: 'route' },
+  { from: 'supervisor', to: 'web_agent',    kind: 'route' },
+  { from: 'supervisor', to: 'mcp_agent',    kind: 'route' },
+  { from: 'supervisor', to: 'capabilities', kind: 'route' },
+  { from: 'supervisor', to: 'workflow',     kind: 'route' },
+  { from: 'workflow',   to: 'supervisor',   kind: 'return' },
+
+  // agent → 工具
+  { from: 'slack_agent', to: 'slack_tools', kind: 'aux', label: 'tool' },
+
+  // Recipe 库 → Runner（取流程配方）
+  { from: 'recipes', to: 'workflow', kind: 'aux', label: '取 recipe' },
+
+  // Runner → stages（调度）
+  { from: 'workflow', to: 'wf_requirement', kind: 'route', label: '①' },
+  { from: 'workflow', to: 'wf_code',        kind: 'route', label: '②' },
+  { from: 'workflow', to: 'wf_test',        kind: 'route', label: '③' },
+  { from: 'workflow', to: 'wf_review',      kind: 'route', label: '④' },
+
+  // 需求审批 + 提交
+  { from: 'wf_requirement', to: 'wf_approval', kind: 'approval', label: 'interrupt' },
+  { from: 'wf_review',      to: 'wf_commit',   kind: 'flow',     label: '通过' },
+  { from: 'wf_test',        to: 'wf_code',     kind: 'retry',    label: '失败↺' },
+  { from: 'wf_review',      to: 'wf_code',     kind: 'retry',    label: '不过↺' },
 ];
 
-// ─── 主组件────────────────────────────────────────────────────────
+// ─── 布局引擎（层 → y，列 → x；正交折线）─────────────────────────────────────
+
+const CANVAS_W = 1320;
+const LAYER_Y = [80, 210, 360, 530, 740, 940];    // 每层的 y（加大行距）
+const COL_W = 150;                                 // 列槽宽（加大列距）
+const COL_X0 = 175;                                // 第 0 列的 x（左侧 ~100px gutter 放层标签）
+
+function nodeXY(n: GNode): { x: number; y: number } {
+  return { x: COL_X0 + n.col * COL_W, y: LAYER_Y[n.layer] ?? 70 };
+}
+
+const NODE_R: Record<NodeType, number> = {
+  entry: 38, exit: 38, supervisor: 54, agent: 44, tool: 36, state: 40,
+  runner: 54, stage: 44, approval: 38,
+};
+
+// ─── 配色（扁平、克制）────────────────────────────────────────────────────────
+
+const FILL: Record<NodeType, string> = {
+  entry:      '#3f4756',
+  exit:       '#3f4756',
+  supervisor: '#6366f1',  // indigo
+  agent:      '#10b981',  // emerald
+  tool:       '#64748b',  // slate
+  state:      '#06b6d4',  // cyan
+  runner:     '#0ea5e9',  // sky — 通用调度器
+  stage:      '#3b82f6',  // blue — workflow stage
+  approval:   '#ec4899',  // pink — 人工
+};
+
+const EDGE_COLOR: Record<GEdge['kind'], string> = {
+  flow:     '#94a3b8',
+  route:    '#6366f1',
+  return:   '#10b981',
+  aux:      '#475569',
+  retry:    '#f59e0b',
+  approval: '#ec4899',
+};
+const EDGE_DASH: Record<GEdge['kind'], string> = {
+  flow: 'none', route: '5,5', return: '5,5', aux: '3,4', retry: '5,4', approval: 'none',
+};
+
+const LEGEND_NODES = [
+  { c: FILL.supervisor, t: 'Supervisor' },
+  { c: FILL.agent,      t: 'Sub-Agent' },
+  { c: FILL.runner,     t: 'Workflow Runner（通用）' },
+  { c: FILL.stage,      t: 'Workflow Stage' },
+  { c: FILL.approval,   t: '人工审批' },
+  { c: FILL.state,      t: 'State' },
+];
+const LEGEND_EDGES = [
+  { c: EDGE_COLOR.flow,     dash: false, t: '主流程' },
+  { c: EDGE_COLOR.route,    dash: true,  t: '调度' },
+  { c: EDGE_COLOR.return,   dash: true,  t: '返回' },
+  { c: EDGE_COLOR.retry,    dash: true,  t: '回退重试' },
+  { c: EDGE_COLOR.approval, dash: false, t: '审批' },
+];
+
+const TYPE_LABEL: Record<NodeType, string> = {
+  entry: 'Graph Entry', exit: 'Graph Exit', supervisor: 'Orchestrator',
+  agent: 'Sub-Agent', tool: 'Tool', state: 'State / Memory',
+  runner: 'Workflow Runner', stage: 'Workflow Stage', approval: 'Human Approval',
+};
+
+// ─── 正交折线 ─────────────────────────────────────────────────────────────────
+// 纵向相邻层：竖→横→竖的曼哈顿折线，在中点换列。
+// 同层或反向（retry/return/aux）：带圆角的侧向折线。
+
+function orthPath(
+  a: { x: number; y: number }, ra: number,
+  b: { x: number; y: number }, rb: number,
+  kind: GEdge['kind'],
+): { d: string; mx: number; my: number } {
+  // 同层（retry / aux 横向）
+  if (Math.abs(a.y - b.y) < 4) {
+    const y = a.y;
+    const dir = b.x > a.x ? 1 : -1;
+    const off = kind === 'retry' ? -54 : 38;       // 弓出方向
+    const x1 = a.x + dir * ra, x2 = b.x - dir * rb;
+    const my = y + off;
+    const d = `M${x1},${y} C${x1},${my} ${x2},${my} ${x2},${y}`;
+    return { d, mx: (x1 + x2) / 2, my: my * 0.5 + y * 0.5 };
+  }
+  // 纵向：a 在上，b 在下（或反向 return）
+  const goingDown = b.y > a.y;
+  const y1 = a.y + (goingDown ? ra : -ra);
+  const y2 = b.y - (goingDown ? rb : -rb);
+  // return 边把中线略微上移，并让竖直段错开一点，避免与同列的 route 边重叠
+  const lift = kind === 'return' ? -22 : 0;
+  const xOff = kind === 'return' ? 14 : 0;
+  const ax = a.x + xOff, bx = b.x + xOff;
+  const midY = (y1 + y2) / 2 + lift;
+  // 竖 → 到中线 → 横到目标列 → 竖
+  const d = `M${ax},${y1} L${ax},${midY} L${bx},${midY} L${bx},${y2}`;
+  return { d, mx: (ax + bx) / 2, my: midY };
+}
+
+// ─── 组件 ─────────────────────────────────────────────────────────────────────
 
 export default function AgentGraph() {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = nodes.find(n => n.id === selectedId) ?? null;
-
-  const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const [sel, setSel] = useState<string | null>(null);
+  const byId = useMemo(() => Object.fromEntries(NODES.map(n => [n.id, n])), []);
+  const selected = sel ? byId[sel] : null;
 
   return (
-    <div className="w-full h-screen bg-[#0a0c14] text-gray-200 font-sans overflow-hidden flex flex-col">
-
+    <div className="w-full h-screen bg-[#0b0e16] text-slate-200 font-sans flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="flex items-center justify-between px-8 py-3.5 bg-[#0a0c14]/90 backdrop-blur-sm border-b border-slate-800/60 z-20 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-7 h-7 rounded-lg bg-indigo-500/20 flex items-center justify-center border border-indigo-500/40">
-            <Zap size={14} className="text-indigo-400" />
+      <header className="flex items-center justify-between px-7 py-3 border-b border-slate-800/70 bg-[#0b0e16]/90 backdrop-blur z-20 flex-shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center">
+            <Workflow size={14} className="text-indigo-400" />
           </div>
-          <span className="font-semibold text-sm tracking-wide">
+          <span className="text-sm font-semibold">
             <span className="text-white">Tessel</span>
             <span className="text-slate-600 mx-2">·</span>
             <span className="text-slate-400">Agent Graph</span>
           </span>
         </div>
-
-        <div className="flex items-center gap-4 text-[11px] text-slate-400 font-medium">
-          {LEGEND.map(({ color, label }) => (
-            <div key={label} className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-full" style={{ background: color }} />
-              {label}
-            </div>
+        <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap justify-end">
+          {LEGEND_NODES.map(({ c, t }) => (
+            <span key={t} className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full" style={{ background: c }} />{t}
+            </span>
           ))}
-          <div className="w-px h-4 bg-slate-700/60 mx-1" />
-          {EDGE_LEGEND.map(({ stroke, dash, label }) => (
-            <div key={label} className="flex items-center gap-1.5">
-              <svg width="20" height="8">
-                <line x1="0" y1="4" x2="20" y2="4"
-                  stroke={stroke} strokeWidth="1.5"
-                  strokeDasharray={dash ? '4,3' : 'none'} />
-              </svg>
-              {label}
-            </div>
+          <span className="w-px h-3.5 bg-slate-700/60" />
+          {LEGEND_EDGES.map(({ c, dash, t }) => (
+            <span key={t} className="flex items-center gap-1.5">
+              <svg width="18" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke={c} strokeWidth="1.5" strokeDasharray={dash ? '4,3' : 'none'} /></svg>{t}
+            </span>
           ))}
-          <div className="w-px h-4 bg-slate-700/60 mx-1" />
-          <a
-            href="/logs"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium
-              text-emerald-400 border border-emerald-500/30 bg-emerald-500/10
-              hover:bg-emerald-500/20 hover:border-emerald-500/50 transition-all duration-150"
-          >
-            <ScrollText size={12} />
-            Log Viewer
+          <span className="w-px h-3.5 bg-slate-700/60" />
+          <a href="/logs" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 transition">
+            <ScrollText size={12} /> Logs
           </a>
         </div>
       </header>
 
       {/* Canvas */}
-      <div className="flex-1 flex items-center justify-center overflow-auto">
-        <div className="relative" style={{ width: 1000, height: 700 }}>
+      <div className="flex-1 overflow-auto flex justify-center">
+        <svg width={CANVAS_W} height={LAYER_Y[LAYER_Y.length - 1]! + 130} className="overflow-visible">
+          <defs>
+            {Object.entries(EDGE_COLOR).map(([k, c]) => (
+              <marker key={k} id={`mk-${k}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill={c} opacity="0.85" />
+              </marker>
+            ))}
+          </defs>
 
-          {/* 层级标注 */}
+          {/* 层带分区标签（最左 gutter 内，水平，不与节点重叠） */}
           {[
-            { y: 60,  label: '状态层', color: '#0891b2' },
-            { y: 290, label: '主流程', color: '#805af5' },
-            { y: 530, label: '工具 Agent 层', color: '#10b981' },
-            { y: 730, label: 'Tools', color: '#f59e0b' },
-          ].map(({ y, label, color }) => (
-            <div
-              key={label}
-              className="absolute left-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest select-none"
-              style={{ top: y, color, opacity: 0.5 }}
-            >
-              <div className="w-1 h-1 rounded-full" style={{ background: color }} />
-              {label}
-            </div>
+            { i: 0, t: 'I/O' }, { i: 1, t: '状态' }, { i: 2, t: '调度' },
+            { i: 3, t: 'AGENTS' }, { i: 4, t: 'STAGES' }, { i: 5, t: '审批' },
+          ].map(({ i, t }) => (
+            <text key={t} x={14} y={LAYER_Y[i]! + 4} className="select-none"
+              fill="#3a4658" fontSize="10" fontWeight="700" letterSpacing="1">{t}</text>
           ))}
 
-          {/* 水平分割线 */}
-          {[215, 480, 680].map(y => (
-            <div
-              key={y}
-              className="absolute w-full border-t border-dashed"
-              style={{ top: y, left: 0, borderColor: 'rgba(255,255,255,0.04)' }}
-            />
-          ))}
-
-          {/* SVG Edges */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
-            <defs>
-              {Object.entries(EDGE_STYLES).map(([key, { stroke }]) => (
-                <marker key={key} id={`arr-${key}`} viewBox="0 0 10 10"
-                  refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={stroke} opacity="0.8" />
-                </marker>
-              ))}
-            </defs>
-
-            {edges.map(edge => {
-              const src = nodeMap[edge.from];
-              const tgt = nodeMap[edge.to];
-              if (!src || !tgt) return null;
-              const { path, midX, midY } = getCurvedPath(src, tgt, edge.type);
-              const style = EDGE_STYLES[edge.type] ?? EDGE_STYLES['main']!;
-
-              return (
-                <g key={edge.id}>
-                  <path
-                    d={path} fill="none"
-                    stroke={style.stroke} strokeWidth={style.width}
-                    strokeDasharray={style.dash}
-                    markerEnd={`url(#${style.marker})`}
-                    opacity="0.75"
-                  />
-                  {edge.label && (
-                    <foreignObject x={midX - 65} y={midY - 11} width="130" height="22">
-                      <div className="flex items-center justify-center w-full h-full">
-                        <span
-                          className="text-[9.5px] px-2 py-0.5 rounded-full border whitespace-nowrap"
-                          style={{
-                            background: '#0a0c14',
-                            color: style.stroke,
-                            borderColor: `${style.stroke}40`,
-                          }}
-                        >
-                          {edge.label}
-                        </span>
-                      </div>
-                    </foreignObject>
-                  )}
-                </g>
-              );
-            })}
-          </svg>
-
-          {/* Nodes */}
-          {nodes.map(node => {
-            const isSelected = selectedId === node.id;
-            const style = NODE_STYLES[node.type] ?? 'bg-gray-800';
+          {/* Edges */}
+          {EDGES.map((e, idx) => {
+            const a = byId[e.from], b = byId[e.to];
+            if (!a || !b) return null;
+            const pa = nodeXY(a), pb = nodeXY(b);
+            const { d, mx, my } = orthPath(pa, NODE_R[a.type], pb, NODE_R[b.type], e.kind);
+            const c = EDGE_COLOR[e.kind];
             return (
-              <div
-                key={node.id}
-                onClick={() => setSelectedId(node.id === selectedId ? null : node.id)}
-                style={{
-                  left: node.x, top: node.y,
-                  width: node.size, height: node.size,
-                  transform: 'translate(-50%, -50%)',
-                }}
-                className={`absolute rounded-full flex flex-col items-center justify-center text-center
-                  cursor-pointer transition-all duration-200 hover:scale-108 select-none
-                  ${style}
-                  ${isSelected ? 'ring-4 ring-white/20 scale-110' : 'ring-1 ring-white/8'}
-                `}
-              >
-                {node.icon()}
-                <span className="font-bold text-white text-xs leading-tight drop-shadow px-2">
-                  {node.label}
-                </span>
-                {node.sub && (
-                  <span className="text-[8.5px] text-white/65 font-medium mt-0.5 leading-tight px-1">
-                    {node.sub}
-                  </span>
+              <g key={idx}>
+                <path d={d} fill="none" stroke={c} strokeWidth={e.kind === 'flow' || e.kind === 'approval' ? 2 : 1.4}
+                  strokeDasharray={EDGE_DASH[e.kind]} markerEnd={`url(#mk-${e.kind})`} opacity="0.8" strokeLinejoin="round" />
+                {e.label && (
+                  <g>
+                    <rect x={mx - e.label.length * 3.6 - 5} y={my - 8} width={e.label.length * 7.2 + 10} height={16} rx={4} fill="#0b0e16" />
+                    <text x={mx} y={my + 3} textAnchor="middle" fontSize="10" fill={c} fontWeight="600">{e.label}</text>
+                  </g>
                 )}
-              </div>
+              </g>
             );
           })}
+
+          {/* Nodes */}
+          {NODES.map(n => {
+            const { x, y } = nodeXY(n);
+            const r = NODE_R[n.type];
+            const isSel = sel === n.id;
+            const fill = FILL[n.type];
+            return (
+              <g key={n.id} onClick={() => setSel(isSel ? null : n.id)} style={{ cursor: 'pointer' }}>
+                {isSel && <circle cx={x} cy={y} r={r + 7} fill="none" stroke={fill} strokeWidth="2" opacity="0.5" />}
+                <circle cx={x} cy={y} r={r} fill={fill} opacity={isSel ? 1 : 0.92}
+                  stroke={isSel ? '#fff' : 'rgba(255,255,255,0.12)'} strokeWidth={isSel ? 1.5 : 1} />
+                {/* 图标:圆内偏上 */}
+                <foreignObject x={x - 13} y={y - r * 0.52} width={26} height={26} style={{ pointerEvents: 'none' }}>
+                  <div className="flex justify-center text-white/95"><n.Icon size={n.type === 'supervisor' || n.type === 'runner' ? 24 : 20} /></div>
+                </foreignObject>
+                {/* 主标题:圆内居中偏下 */}
+                <text x={x} y={y + r * 0.42} textAnchor="middle"
+                  fontSize={n.type === 'supervisor' || n.type === 'runner' ? 13 : 11.5}
+                  fontWeight="700" fill="#fff" style={{ pointerEvents: 'none' }}>{n.label}</text>
+                {/* 副标题:移到圆外下方,不再挤在圆内 */}
+                {n.sub && (
+                  <text x={x} y={y + r + 15} textAnchor="middle" fontSize="10"
+                    fill="rgba(148,163,184,0.85)" style={{ pointerEvents: 'none' }}>{n.sub}</text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Hint */}
+      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 bg-[#11141f] border border-slate-800/60 px-3.5 py-1.5 rounded-full">
+          <ChevronRight size={12} className="text-indigo-400" />点击节点查看详情
         </div>
       </div>
 
-      {/* 底部提示 */}
-      <div className="absolute bottom-5 w-full flex justify-center z-20 pointer-events-none">
-        <div className="bg-[#141720] border border-slate-800/50 text-slate-500 text-[11px] px-4 py-1.5 rounded-full flex items-center gap-1.5">
-          <ChevronRight size={12} className="text-indigo-400" />
-          点击节点查看详情
-        </div>
-      </div>
-
-      {/* Detail Panel */}
-      <div className={`fixed right-0 top-0 h-full w-96 bg-[#0e1018]/95 backdrop-blur-xl
-        border-l border-slate-800/70 shadow-2xl transition-transform duration-300 z-30 flex flex-col
-        ${selected ? 'translate-x-0' : 'translate-x-full'}`}>
+      {/* Detail panel */}
+      <div className={`fixed right-0 top-0 h-full w-96 bg-[#0e1119]/96 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col transition-transform duration-300 ${selected ? 'translate-x-0' : 'translate-x-full'}`}>
         {selected && (
           <>
             <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60">
               <div className="flex items-center gap-3">
-                <div className="w-3 h-3 rounded-full" style={{ background: DOT_COLORS[selected.type] }} />
+                <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: FILL[selected.type] }}>
+                  <selected.Icon size={18} className="text-white" />
+                </div>
                 <div>
                   <h2 className="text-base font-semibold text-white leading-tight">{selected.label}</h2>
-                  {selected.sub && <p className="text-xs text-slate-500 mt-0.5">{selected.sub}</p>}
+                  <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-0.5">{TYPE_LABEL[selected.type]}</p>
                 </div>
               </div>
-              <button onClick={() => setSelectedId(null)}
-                className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition-colors">
-                <X size={16} />
-              </button>
+              <button onClick={() => setSel(null)} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition"><X size={16} /></button>
             </div>
-
             <div className="px-6 py-5 flex-1 overflow-auto">
-              <div className="space-y-5">
-                <div>
-                  <h3 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-2.5">
-                    <Settings2 size={11} /> 节点属性
-                  </h3>
-                  <div className="bg-[#080a0f] border border-slate-800/80 rounded-xl p-3.5 space-y-2">
-                    {[['Node ID', selected.id], ['Type', selected.type]].map(([k, v]) => (
-                      <div key={k} className="flex justify-between items-center text-xs">
-                        <span className="text-slate-500">{k}</span>
-                        <span className="text-slate-300 font-mono bg-slate-800/50 px-2 py-0.5 rounded-md">{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <h3 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest flex items-center gap-2 mb-2.5">
-                    <Code2 size={11} /> 架构说明
-                  </h3>
-                  <div className="bg-[#080a0f] border border-slate-800/80 rounded-xl p-4
-                    text-xs text-slate-300 leading-relaxed whitespace-pre-wrap font-mono"
-                    style={{ borderLeftColor: DOT_COLORS[selected.type], borderLeftWidth: 2 }}>
-                    {selected.prompt}
-                  </div>
-                </div>
-              </div>
+              <pre className="text-xs leading-relaxed text-slate-300 whitespace-pre-wrap font-mono bg-[#080a11] border border-slate-800/80 rounded-xl p-4"
+                style={{ borderLeftColor: FILL[selected.type], borderLeftWidth: 2 }}>{selected.prompt ?? '该节点暂无说明'}</pre>
             </div>
           </>
         )}
@@ -667,3 +556,6 @@ export default function AgentGraph() {
     </div>
   );
 }
+
+// 保留 Code2 引用以备后用（详情图标候选）
+void Code2;
