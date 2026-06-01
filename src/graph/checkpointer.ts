@@ -48,8 +48,8 @@ interface CheckpointRow {
   type: string | null;
   checkpoint: Uint8Array | null;
   metadata: Uint8Array | null;
-  pending_writes: string; // JSON array
-  pending_sends: string;  // JSON array
+  pending_writes: string | null; // JSON array; null 兜底（驱动行为变化时）
+  pending_sends: string | null;  // JSON array
 }
 
 export class BunSqliteSaver extends BaseCheckpointSaver {
@@ -163,7 +163,9 @@ export class BunSqliteSaver extends BaseCheckpointSaver {
       throw new Error("Missing thread_id or checkpoint_id");
     }
 
-    const pendingWritesRaw = JSON.parse(row.pending_writes) as Array<{
+    // json_group_array 在子查询无匹配行时通常返回 '[]'，但万一驱动行为
+    // 变化导致返回 null，这里兜底成空数组。
+    const pendingWritesRaw = JSON.parse(row.pending_writes ?? "[]") as Array<{
       task_id: string;
       channel: string;
       type: string | null;
@@ -276,7 +278,7 @@ export class BunSqliteSaver extends BaseCheckpointSaver {
 
     const rows = this.db.prepare(sql).all(...(args as never[])) as CheckpointRow[];
     for (const row of rows) {
-      const pendingWritesRaw = JSON.parse(row.pending_writes) as Array<{
+      const pendingWritesRaw = JSON.parse(row.pending_writes ?? "[]") as Array<{
         task_id: string;
         channel: string;
         type: string | null;
@@ -443,9 +445,9 @@ export class BunSqliteSaver extends BaseCheckpointSaver {
          WHERE ps.thread_id = ? AND ps.checkpoint_id = ? AND ps.channel = '${TASKS}'
          ORDER BY ps.idx`,
       )
-      .get(threadId, parentCheckpointId) as { pending_sends: string } | undefined;
+      .get(threadId, parentCheckpointId) as { pending_sends: string | null } | undefined;
     if (!row) return;
-    const pendingSends = JSON.parse(row.pending_sends) as Array<{
+    const pendingSends = JSON.parse(row.pending_sends ?? "[]") as Array<{
       type: string;
       value: string;
     }>;
@@ -478,7 +480,14 @@ export class BunSqliteSaver extends BaseCheckpointSaver {
 export function buildCheckpointer(dbPath?: string): BunSqliteSaver {
   const path = dbPath ?? process.env.CHECKPOINT_DB ?? "data/checkpoints.db";
   if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true });
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch (err) {
+      // 目录创建失败（权限 / 只读 fs）—— 让 sqlite open 阶段给出更具体的
+      // 错误信息，不在这里 throw 一个更抽象的。
+      logger.warn({ path, err: err instanceof Error ? err.message : String(err) },
+        "failed to ensure checkpoint directory; continuing — sqlite open may fail next");
+    }
   }
   const saver = BunSqliteSaver.fromConnString(path);
   logger.info({ path }, "checkpointer ready");
