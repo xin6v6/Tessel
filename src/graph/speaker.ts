@@ -22,24 +22,23 @@ export interface SpeakerMeta {
 /**
  * 构造带 speaker 元数据的 HumanMessage。
  *
- * 重要：HumanMessage.name 字段会被 LangChain 序列化进发给 LLM 的请求
- * （OpenAI-compatible provider 一般会作为 `name` 透传给模型）。所以
- * 这里只把 **speakerName**（人名）放到 .name，绝不 fallback 到
- * speakerId —— 不希望 LLM 看到原始平台 ID。
+ * speaker 信息（speakerId / speakerName / source）全部只放在
+ * additional_kwargs.speaker 里。LangChain 默认不会把 additional_kwargs
+ * 写进发给 LLM 的请求 body，所以它仅用于：内部 thread 路由、trace、
+ * supervisor 入口的 currentSpeakerLine() 注入（把人名写进 system prompt），
+ * 以及后续 Step 1.1 的加权裁剪。
  *
- * speakerId 只放在 additional_kwargs.speaker 里，LangChain 默认不会
- * 把它写进发给 LLM 的请求 body。它仅用于：内部 thread 路由、trace、
- * 后续 Step 1.1 的加权裁剪。
+ * 注意：**绝不**把 speakerName 写进 HumanMessage.name 字段。该字段会被
+ * 透传给 LLM provider，而 OpenAI-compatible API（含 MiniMax）对 message
+ * 的 `name` 有格式 / 一致性校验——人名如 "xin6v6" 会触发
+ * `400 invalid params, user name must be consistent (2013)`。LLM 想知道
+ * "当前是谁"完全由 supervisor 的 system prompt 锚定，不依赖此字段。
  */
 export function humanMessageWithSpeaker(content: string, speaker: SpeakerMeta): HumanMessage {
-  const fields: ConstructorParameters<typeof HumanMessage>[0] = {
+  return new HumanMessage({
     content,
     additional_kwargs: { speaker },
-  };
-  if (speaker.speakerName) {
-    (fields as { name?: string }).name = speaker.speakerName;
-  }
-  return new HumanMessage(fields);
+  });
 }
 
 export function getSpeaker(msg: { additional_kwargs?: Record<string, unknown> }): SpeakerMeta | undefined {
