@@ -6,6 +6,7 @@ import {
   threadIdForSlackMention,
 } from "./graph/thread-id.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
+import { resolveUserName } from "./integrations/slack/user-names.ts";
 import { logger } from "./utils/logger.ts";
 import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
 import { traceWriter } from "./observability/trace.ts";
@@ -70,24 +71,27 @@ let graph: ReturnType<typeof buildGraph> | null = null;
 if (process.env.SLACK_BOT_TOKEN) {
   const socketMode = Boolean(process.env.SLACK_APP_TOKEN);
 
-  integrations.add(
-    new SlackIntegration({
-      socketMode,
-      eventHandler: socketMode
-        ? {
+  const slackIntegration = new SlackIntegration({
+    socketMode,
+    eventHandler: socketMode
+      ? {
             onMention: async ({ textClean, user, channel, threadTs }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
               const userId = makeUserId("slack", user);
               const threadId = threadIdForSlackMention({ channel, threadTs });
-              logger.info({ text: textClean, threadId }, "slack:mention received");
+              // 解析 user_id → 名字 (display_name / real_name / "Slack 用户")。
+              // 进 LLM 的 HumanMessage 只带这个名字,user_id 仅留作内部 thread
+              // 路由和 trace。
+              const speakerName = await resolveUserName(slackIntegration.getClient(), user);
+              logger.info({ text: textClean, threadId, speakerName }, "slack:mention received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const result = await graph!.invoke(
                     {
                       messages: [
-                        humanMessageWithSpeaker(textClean, { speakerId: user, source: "slack" }),
+                        humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" }),
                       ],
                     },
                     { configurable: { thread_id: threadId } }
@@ -136,7 +140,8 @@ if (process.env.SLACK_BOT_TOKEN) {
               const startTime = Date.now();
               const userId = makeUserId("slack", user);
               const threadId = threadIdForSlackDm({ userId: user });
-              logger.info({ text, threadId }, "slack:dm received");
+              const speakerName = await resolveUserName(slackIntegration.getClient(), user);
+              logger.info({ text, threadId, speakerName }, "slack:dm received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const controller = new AbortController();
@@ -144,7 +149,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                   const result = await graph!.invoke(
                     {
                       messages: [
-                        humanMessageWithSpeaker(text, { speakerId: user, source: "slack" }),
+                        humanMessageWithSpeaker(text, { speakerId: user, speakerName, source: "slack" }),
                       ],
                     },
                     { signal: controller.signal, configurable: { thread_id: threadId } }
@@ -190,8 +195,8 @@ if (process.env.SLACK_BOT_TOKEN) {
             },
           }
         : undefined,
-    })
-  );
+  });
+  integrations.add(slackIntegration);
 }
 
 // ----------------------------------------------------------------

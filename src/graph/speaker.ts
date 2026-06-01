@@ -19,12 +19,27 @@ export interface SpeakerMeta {
   source: "slack" | "cli";
 }
 
+/**
+ * 构造带 speaker 元数据的 HumanMessage。
+ *
+ * 重要：HumanMessage.name 字段会被 LangChain 序列化进发给 LLM 的请求
+ * （OpenAI-compatible provider 一般会作为 `name` 透传给模型）。所以
+ * 这里只把 **speakerName**（人名）放到 .name，绝不 fallback 到
+ * speakerId —— 不希望 LLM 看到原始平台 ID。
+ *
+ * speakerId 只放在 additional_kwargs.speaker 里，LangChain 默认不会
+ * 把它写进发给 LLM 的请求 body。它仅用于：内部 thread 路由、trace、
+ * 后续 Step 1.1 的加权裁剪。
+ */
 export function humanMessageWithSpeaker(content: string, speaker: SpeakerMeta): HumanMessage {
-  return new HumanMessage({
+  const fields: ConstructorParameters<typeof HumanMessage>[0] = {
     content,
-    name: speaker.speakerName ?? speaker.speakerId,
     additional_kwargs: { speaker },
-  });
+  };
+  if (speaker.speakerName) {
+    (fields as { name?: string }).name = speaker.speakerName;
+  }
+  return new HumanMessage(fields);
 }
 
 export function getSpeaker(msg: { additional_kwargs?: Record<string, unknown> }): SpeakerMeta | undefined {

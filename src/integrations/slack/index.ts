@@ -87,6 +87,15 @@ export class SlackIntegration implements Integration {
     return this.entries;
   }
 
+  /**
+   * Slack 客户端句柄。main.ts 的 event handlers 用它做 user_id → 名字
+   * 的解析(详见 src/integrations/slack/user-names.ts)。其他场景不应该
+   * 直接持有它 —— 工具调用走 ToolRegistry，不绕过来。
+   */
+  getClient(): SlackClient {
+    return this.client;
+  }
+
   async destroy(): Promise<void> {
     await this.receiver?.stop();
   }
