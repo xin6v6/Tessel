@@ -67,11 +67,23 @@ export class SlackReceiver {
   }
 
   private _registerHandlers() {
-    // ---- 普通消息（排除 Bot 自己和子类型如 bot_message）----
+    // ---- DM 消息（仅 1:1 私聊）----
+    //
+    // Slack Bolt 的 app.message() 会捕获所有订阅范围内的 message 事件 ——
+    // 包括公开频道里的 message.channels。在频道里 @bot 时,事件会同时
+    // 触发 app_mention 和 message.channels;两个 handler 都跑,bot 就回
+    // 两次。
+    //
+    // 这里显式 gate 在 channel_type === "im":
+    //   - 频道里的消息 (channel_type=channel/group) → 走 app_mention,
+    //     仅当用户 @ 了 bot 才响应
+    //   - DM 私聊 (channel_type=im) → 这条路径,任何消息都响应
     this.app.message(async ({ message, say }) => {
       logger.debug({ raw: JSON.stringify(message) }, "raw message event");
 
-      // 过滤掉 bot 消息和无文本消息
+      // 过滤:仅响应 DM,过滤 bot 自己和无文本消息
+      const channelType = "channel_type" in message ? message.channel_type : undefined;
+      if (channelType !== "im") return;
       if (
         !("user" in message) ||
         !message.user ||
