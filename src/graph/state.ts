@@ -14,7 +14,23 @@ export type SubAgentName =
   | "web"          // Web Search ReAct Agent（待接入）
   | "mcp"          // MCP Tools ReAct Agent（待接入）
   | "capabilities" // 自省节点：列出当前真实可用的能力（tools + integrations）
+  | "workflow"     // 通用多阶段工作流调度器（按 recipe 跑 stage + 人工审批）
   | "__end__";     // 直接回复，无需子 Agent
+
+/**
+ * Workflow Runner 的进度快照（落进 GraphState，随 checkpointer 持久化）。
+ * 用于 interrupt 审批后恢复时跳过已完成的 stage —— 不重跑需求分析等昂贵步骤。
+ */
+export interface WorkflowProgress {
+  recipe: string;          // 用的 recipe 名
+  phase: "running" | "awaiting_approval" | "running_after_approval" | "done" | "aborted";
+  requirement: string;     // 用户原始需求
+  plan?: string;           // isPlan stage 的产出（已确认的计划）
+  lastStageOutput?: string;// 最近一个 stage 的输出
+  snapshot?: string;       // 最近一次 workspace 快照（如 git diff）
+  outputs: Record<string, string>; // 各 stage 的输出累积（stageId → output）
+  attempt: number;         // 当前重试计数
+}
 
 // ----------------------------------------------------------------
 // Graph State
@@ -50,6 +66,13 @@ export const GraphState = Annotation.Root({
   finalReply: Annotation<string>({
     reducer: (_, reply) => reply,
     default: () => "",
+  }),
+
+  // Workflow Runner 进度快照（null = 没有进行中的 workflow）
+  // 注意：字段名不能叫 "workflow" —— 会和同名的 graph 节点冲突（LangGraph 限制）。
+  workflowProgress: Annotation<WorkflowProgress | null>({
+    reducer: (_, w) => w,
+    default: () => null,
   }),
 });
 
