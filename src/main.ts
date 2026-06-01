@@ -1,5 +1,10 @@
-import { HumanMessage } from "@langchain/core/messages";
 import { buildGraph } from "./graph/index.ts";
+import { humanMessageWithSpeaker } from "./graph/speaker.ts";
+import {
+  makeThreadId,
+  threadIdForSlackDm,
+  threadIdForSlackMention,
+} from "./graph/thread-id.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { logger } from "./utils/logger.ts";
 import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
@@ -70,17 +75,23 @@ if (process.env.SLACK_BOT_TOKEN) {
       socketMode,
       eventHandler: socketMode
         ? {
-            onMention: async ({ textClean, user }) => {
+            onMention: async ({ textClean, user, channel, threadTs }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
               const userId = makeUserId("slack", user);
-              logger.info({ text: textClean }, "slack:mention received");
+              const threadId = threadIdForSlackMention({ channel, threadTs });
+              logger.info({ text: textClean, threadId }, "slack:mention received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
-                  const result = await graph!.invoke({
-                    messages: [new HumanMessage(textClean)],
-                  });
+                  const result = await graph!.invoke(
+                    {
+                      messages: [
+                        humanMessageWithSpeaker(textClean, { speakerId: user, source: "slack" }),
+                      ],
+                    },
+                    { configurable: { thread_id: threadId } }
+                  );
                   const reply = extractReply(result);
                   await traceWriter.write({
                     ts: new Date().toISOString(),
@@ -94,11 +105,12 @@ if (process.env.SLACK_BOT_TOKEN) {
                     tokens: extractTokens(result),
                     timing: { totalMs: Date.now() - startTime },
                     route: extractRoute(result),
+                    threadId,
                   });
                   return reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
-                  logger.error({ err: String(err) }, "slack:mention error");
+                  logger.error({ err: String(err), threadId }, "slack:mention error");
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
@@ -111,6 +123,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     tokens: { prompt: 0, completion: 0, total: 0 },
                     timing: { totalMs: Date.now() - startTime },
                     route: "__end__",
+                    threadId,
                     error,
                   });
                   return "❌ 处理出错，请稍后重试";
@@ -122,14 +135,19 @@ if (process.env.SLACK_BOT_TOKEN) {
               const sessionId = newSessionId();
               const startTime = Date.now();
               const userId = makeUserId("slack", user);
-              logger.info({ text }, "slack:dm received");
+              const threadId = threadIdForSlackDm({ userId: user });
+              logger.info({ text, threadId }, "slack:dm received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
                 try {
                   const controller = new AbortController();
                   const timeout = setTimeout(() => controller.abort(), 120_000);
                   const result = await graph!.invoke(
-                    { messages: [new HumanMessage(text)] },
-                    { signal: controller.signal }
+                    {
+                      messages: [
+                        humanMessageWithSpeaker(text, { speakerId: user, source: "slack" }),
+                      ],
+                    },
+                    { signal: controller.signal, configurable: { thread_id: threadId } }
                   );
                   clearTimeout(timeout);
                   const reply = extractReply(result);
@@ -145,11 +163,12 @@ if (process.env.SLACK_BOT_TOKEN) {
                     tokens: extractTokens(result),
                     timing: { totalMs: Date.now() - startTime },
                     route: extractRoute(result),
+                    threadId,
                   });
                   return reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
-                  logger.error({ err: String(err) }, "slack:dm error");
+                  logger.error({ err: String(err), threadId }, "slack:dm error");
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
@@ -162,6 +181,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     tokens: { prompt: 0, completion: 0, total: 0 },
                     timing: { totalMs: Date.now() - startTime },
                     route: "__end__",
+                    threadId,
                     error,
                   });
                   return "❌ 处理出错，请稍后重试";
@@ -202,6 +222,15 @@ async function main() {
   // REPL（本地调试用）
   // ----------------------------------------------------------------
 
+  // REPL 整个生命周期共享一个 thread_id；进程退出后该 thread 的历史
+  // 仍保留在 SQLite 里，但下次启动 pid 不同即另开新会话。
+  const replThreadId = makeThreadId({
+    source: "cli",
+    pid: process.pid,
+    startTime: Date.now(),
+  });
+  logger.info({ threadId: replThreadId }, "REPL thread initialised");
+
   const stdin = process.stdin;
   stdin.setEncoding("utf-8");
   process.stdout.write("\n> ");
@@ -231,9 +260,14 @@ async function main() {
 
       await runWithContext({ sessionId, source: "cli", externalId, userId }, async () => {
         try {
-          const result = await graph!.invoke({
-            messages: [new HumanMessage(userMessage)],
-          });
+          const result = await graph!.invoke(
+            {
+              messages: [
+                humanMessageWithSpeaker(userMessage, { speakerId: externalId, source: "cli" }),
+              ],
+            },
+            { configurable: { thread_id: replThreadId } }
+          );
           const reply = extractReply(result);
           console.log(`\n${reply}\n`);
           await traceWriter.write({
@@ -248,6 +282,7 @@ async function main() {
             tokens: extractTokens(result),
             timing: { totalMs: Date.now() - startTime },
             route: extractRoute(result),
+            threadId: replThreadId,
           });
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
@@ -264,6 +299,7 @@ async function main() {
             tokens: { prompt: 0, completion: 0, total: 0 },
             timing: { totalMs: Date.now() - startTime },
             route: "__end__",
+            threadId: replThreadId,
             error,
           });
         }
