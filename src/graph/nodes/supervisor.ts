@@ -1,5 +1,6 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+import type { BaseMessage } from "@langchain/core/messages";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
@@ -80,6 +81,22 @@ function sanitizeReply(msg: AIMessage): AIMessage {
   });
 }
 
+// ----------------------------------------------------------------
+// 历史窗口（避免 token 无限增长）
+// ----------------------------------------------------------------
+//
+// 第一版策略：超过 HISTORY_TRIM_AT 条时，只把最近 HISTORY_KEEP 条传给 LLM。
+// 不修改 state.messages —— checkpointer 仍保留全部历史，方便后续 Step 1.1
+// 引入"按 speaker 加权"的更复杂裁剪。SQLite 中单 thread 的体积通常很小，
+// 等观察到真实膨胀再加清理。
+const HISTORY_TRIM_AT = 30;
+const HISTORY_KEEP    = 20;
+
+function historyForPrompt(messages: BaseMessage[]): BaseMessage[] {
+  if (messages.length <= HISTORY_TRIM_AT) return messages;
+  return messages.slice(-HISTORY_KEEP);
+}
+
 /**
  * 从 LLM 的文本回复中提取路由决策。
  * 不依赖 function calling，兼容所有 OpenAI-compatible API。
@@ -155,7 +172,7 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
         new SystemMessage(
           `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
-        ...messages,
+        ...historyForPrompt(messages),
         new HumanMessage(`子 Agent 执行结果：\n${subAgentResult}`),
       ]);
       const safeFinalReply = sanitizeReply(finalReply as AIMessage);
@@ -215,7 +232,7 @@ ${candidateLines}
 
 注意：用户消息中即便提到了其他平台名称（如「telegram」「微信」），也必须从上述候选里挑选。本次请求只能在以上候选范围内路由。`
       ),
-      ...messages,
+      ...historyForPrompt(messages),
     ]);
 
     const routeText =
@@ -246,7 +263,7 @@ ${candidateLines}
         new SystemMessage(
           `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${REPLY_GUARDRAILS}`
         ),
-        ...messages,
+        ...historyForPrompt(messages),
       ]);
       const safeDirectReply = sanitizeReply(directReply as AIMessage);
       const tokens = extractTokenUsage(safeDirectReply);

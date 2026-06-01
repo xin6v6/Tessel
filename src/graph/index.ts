@@ -1,6 +1,8 @@
 import { StateGraph, END, START } from "@langchain/langgraph";
+import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { ChatOpenAI } from "@langchain/openai";
 import { GraphState } from "./state.ts";
+import { buildCheckpointer } from "./checkpointer.ts";
 import { buildSupervisorNode } from "./nodes/supervisor.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
@@ -43,6 +45,9 @@ export function buildGraph(params: {
   model?: string;
   toolRegistry: ToolRegistry;
   integrations: IntegrationRegistry;
+  /** 显式注入 checkpointer。测试时传 SqliteSaver.fromConnString(":memory:")；
+   *  不传则使用默认的 data/checkpoints.db。 */
+  checkpointer?: BaseCheckpointSaver;
 }) {
   const llm = new ChatOpenAI({
     model: params.model ?? process.env.LLM_MODEL ?? "gpt-4o",
@@ -92,7 +97,8 @@ export function buildGraph(params: {
     .addEdge("mcp",          "supervisor")
     .addEdge("capabilities", "supervisor");
 
-  return graph.compile();
+  const checkpointer = params.checkpointer ?? buildCheckpointer();
+  return graph.compile({ checkpointer });
 }
 
 export type CompiledGraph = ReturnType<typeof buildGraph>;
