@@ -8,6 +8,7 @@ import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
+import { buildWorkflowRunnerNode } from "./nodes/workflow-runner.ts";
 import type { ToolRegistry } from "../tools/index.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 
@@ -71,6 +72,7 @@ export function buildGraph(params: {
     KNOWN_AGENTS,
     SUB_AGENTS,
   );
+  const workflowNode      = buildWorkflowRunnerNode();
 
   const graph = new StateGraph(GraphState)
     // 注册节点
@@ -79,6 +81,7 @@ export function buildGraph(params: {
     .addNode("web",          webAgentNode)
     .addNode("mcp",          mcpAgentNode)
     .addNode("capabilities", capabilitiesNode)
+    .addNode("workflow",     workflowNode)
 
     // 入口
     .addEdge(START, "supervisor")
@@ -92,6 +95,7 @@ export function buildGraph(params: {
         web:          "web",
         mcp:          "mcp",
         capabilities: "capabilities",
+        workflow:     "workflow",
         __end__:      END,
       }
     )
@@ -100,7 +104,8 @@ export function buildGraph(params: {
     .addEdge("slack",        "supervisor")
     .addEdge("web",          "supervisor")
     .addEdge("mcp",          "supervisor")
-    .addEdge("capabilities", "supervisor");
+    .addEdge("capabilities", "supervisor")
+    .addEdge("workflow",     "supervisor");
 
   const checkpointer = params.checkpointer ?? buildCheckpointer();
   return graph.compile({ checkpointer });

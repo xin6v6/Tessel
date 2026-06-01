@@ -12,6 +12,7 @@ import {
   type CapabilitiesSnapshot,
 } from "../capabilities-snapshot.ts";
 import { getSpeaker } from "../speaker.ts";
+import { workflowAgentDescription } from "../../workflows/recipe-store.ts";
 const logger = createLogger("supervisor");
 
 // ----------------------------------------------------------------
@@ -61,6 +62,9 @@ export const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
   web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
   capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
+  // workflow 是【通用】多阶段调度器，不绑定开发。描述由已注册 recipe 动态生成：
+  // 现在只有 coding recipe 就只提开发；以后加 research/docs 等 recipe 自动扩展。
+  workflow:     workflowAgentDescription(),
 };
 
 /** 全部已知的 agent 名（不含 __end__），用于 capabilities snapshot。 */
