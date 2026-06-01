@@ -22,6 +22,10 @@ import type { IntegrationRegistry } from "../integrations/registry.ts";
 // 一旦真正接入（替换掉 stubSearchTool / stubMcpTool），从这个集合移除。
 const STUB_AGENTS = new Set<string>(["web", "mcp"]);
 
+// 纯节点（无 integration、无前缀工具）但本身就绪、可作为 tool_routing 候选。
+// workflow runner 的能力来自 recipe 库，不依赖注册工具，所以显式标记为就绪。
+const READY_PURE_NODES = new Set<string>(["workflow"]);
+
 /** 描述一个子节点（agent）的能力。 */
 export interface AgentCapability {
   /** 路由名（state.next 的合法值，如 "slack" / "web" / "mcp"） */
@@ -90,7 +94,8 @@ export function buildCapabilitiesSnapshot(params: {
     const isStub = STUB_AGENTS.has(agentName);
     // 就绪条件：要么是 integration 派生的 agent（且 integration 注册成功），
     // 要么是 stub 节点（节点本身可路由，但工具是占位）。
-    const ready = declaredIntegrations.has(agentName) || isStub || tools.length > 0;
+    const ready =
+      declaredIntegrations.has(agentName) || isStub || tools.length > 0 || READY_PURE_NODES.has(agentName);
     return {
       agentName,
       description: agentDescriptions[agentName] ?? "",
