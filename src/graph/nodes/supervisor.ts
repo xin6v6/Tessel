@@ -132,8 +132,32 @@ const HISTORY_TRIM_AT = 30;
 const HISTORY_KEEP    = 20;
 
 function historyForPrompt(messages: BaseMessage[]): BaseMessage[] {
-  if (messages.length <= HISTORY_TRIM_AT) return messages;
-  return messages.slice(-HISTORY_KEEP);
+  const windowed =
+    messages.length <= HISTORY_TRIM_AT ? messages : messages.slice(-HISTORY_KEEP);
+  // 发给 LLM 前统一剥掉 message.name —— OpenAI-compatible provider（含
+  // MiniMax）对 `name` 有格式 / 一致性校验，人名值会触发
+  // `400 ... user name must be consistent (2013)`。即使当前代码不再写入
+  // name，checkpointer 里仍可能存有历史脏数据（早期版本写入的 name），
+  // 每次从 checkpoint 加载后照样会送给 provider。这里是发往 provider 的
+  // 唯一收口，统一兜底剥离最稳妥。speaker 信息仍由 additional_kwargs +
+  // currentSpeakerLine() 注入 system prompt 承载，不受影响。
+  return windowed.map((m) => (m.name ? stripName(m) : m));
+}
+
+/** 返回去掉 name 字段的 message 副本（不修改原 message / state / checkpointer）。 */
+function stripName(m: BaseMessage): BaseMessage {
+  const fields = {
+    content: m.content,
+    additional_kwargs: m.additional_kwargs,
+    response_metadata: m.response_metadata,
+    id: m.id,
+  };
+  if (m instanceof HumanMessage) return new HumanMessage(fields);
+  if (m instanceof SystemMessage) return new SystemMessage(fields);
+  if (m instanceof AIMessage) {
+    return new AIMessage({ ...fields, usage_metadata: (m as AIMessage).usage_metadata });
+  }
+  return m;
 }
 
 /**
