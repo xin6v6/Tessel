@@ -483,13 +483,30 @@ export function buildCheckpointer(dbPath?: string): BunSqliteSaver {
     try {
       mkdirSync(dirname(path), { recursive: true });
     } catch (err) {
-      // 目录创建失败（权限 / 只读 fs）—— 让 sqlite open 阶段给出更具体的
-      // 错误信息，不在这里 throw 一个更抽象的。
       logger.warn({ path, err: err instanceof Error ? err.message : String(err) },
         "failed to ensure checkpoint directory; continuing — sqlite open may fail next");
     }
   }
-  const saver = BunSqliteSaver.fromConnString(path);
+  // sqlite open 失败时给出明确诊断信息（最常见原因：容器中 data 目录未挂卷
+  // 或只读）。原始 SqliteError 经 main().catch 丢出后栈被吞，难以排查 ——
+  // 这里在 throw 之前先 log 细节。
+  let saver: BunSqliteSaver;
+  try {
+    saver = BunSqliteSaver.fromConnString(path);
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    logger.error(
+      {
+        path,
+        errMessage: e.message,
+        errName: e.name,
+        errStack: e.stack,
+        hint: "is data/ writable? in container, mount a volume at /app/data or set CHECKPOINT_DB=:memory:",
+      },
+      "failed to open checkpoint sqlite db",
+    );
+    throw e;
+  }
   logger.info({ path }, "checkpointer ready");
   return saver;
 }
