@@ -41,28 +41,39 @@ const nodes = [
     prompt: `核心调度 Agent（主节点）
 
 职责
-  · 理解用户意图
-  · 决定路由到哪个子节点
+  · 第一轮：判断要不要用工具
+  · 第二轮（仅 tool_routing）：从能力快照里挑具体 agent
   · 整合子节点结果生成最终回复
 
-路由候选（按 source 过滤后给 LLM）
-  slack         → Slack 操作（仅当 source=slack）
-  web           → 网络搜索（占位 stub）
-  mcp           → MCP 工具（占位 stub）
-  capabilities  → 自省"你能做什么"
-  __end__       → 直接回复用户，无需工具
+══ 上行：路由阶段 ══════════════════════
+第一轮 LLM（意图分类）— 三选一
+  chat              → 直接 LLM 回复（一次 LLM 即结束）
+  list_capabilities → 路由到 capabilities 节点
+  tool_routing      → 进入第二轮
 
-执行阶段
-  A0. finalReply 非空 → passthrough（原样转发 + stripThinking）
-  A.  仅 subAgentResult → LLM compose（兜底，重写为自然语言）
-  B.  路由阶段：分析意图 → 选择子节点
+第二轮 LLM（仅 tool_routing 走）
+  · 候选 = 启动时算好的能力快照 ∩ source 平台锁 ∩ ready ∩ !isStub
+  · 输出 = 候选 agent 名 / none
+  · none → 固定回复 "我没这个工具"，不让 LLM 假装能做
+  · stub 节点物理上不在候选集，无法被选
 
-为什么要分 A0 / A 两条路径
-  让子节点显式声明"这是给用户看的成稿"，
-  Supervisor 不再 LLM 重写，避免成稿内容（表格、列表）
-  被重写时被"理解掉"。
+══ 下行：结果整合阶段 ════════════════════
+A0. finalReply 非空  → passthrough（原样转发 + stripThinking）
+A.  仅 subAgentResult → LLM compose 兜底（重写为自然语言）
 
-文件  src/graph/nodes/supervisor.ts`,
+为什么要分 A0 / A
+  子节点用 finalReply 显式声明"这是成稿"，Supervisor 不再 LLM 重写，
+  避免已渲染的表格 / 列表被改写时被"理解掉"。
+
+为什么要两阶段路由
+  老版本路由 LLM 看静态 SUB_AGENTS 表，会把任务派给 stub 节点，
+  也没法感知"哪些 integration 真的就绪"。两阶段后，工具路径才付
+  第二轮 LLM 代价，chat / list_capabilities 仍是单次 LLM。
+
+能力快照在 Supervisor 构造时算一次缓存住（闭包内），后续不重扫。
+
+文件  src/graph/nodes/supervisor.ts
+      src/graph/capabilities-snapshot.ts`,
   },
   {
     id: 'slack_reply',
@@ -130,13 +141,17 @@ SDK
     icon: () => <Search size={26} className="mb-1 opacity-90" />,
     prompt: `Web Search Agent（占位 stub）
 
-当前状态
-  节点已挂入 graph，可被 supervisor 路由到。
-  内部 tool 是占位实现，调用即返回"未接入"。
+路由可达性
+  节点已挂入 graph，但 Supervisor 的两阶段路由会因为
+  isStub=true 把它从第二轮候选集中过滤掉 —— 实际上
+  路由层永远不会把任务派给它。
+  （capabilities-snapshot.ts 中的 STUB_AGENTS 集合控制）
 
-输出
-  写入 subAgentResult（暂未走 finalReply 结构化通道）。
-  Supervisor 走 LLM compose 兜底路径生成回复。
+内部
+  tool 是占位实现，调用即返回"未接入"。
+
+接入后
+  从 STUB_AGENTS 移除即自动出现在路由候选集中。
 
 候选搜索 API
   · Tavily Search（LangChain 原生）
@@ -156,12 +171,13 @@ SDK
     icon: () => <Wrench size={26} className="mb-1 opacity-90" />,
     prompt: `MCP Tools Agent（占位 stub）
 
-当前状态
-  节点已挂入 graph，可被 supervisor 路由到。
-  内部 tool 是占位实现，调用即返回"未接入"。
+路由可达性
+  与 web agent 同：isStub=true 让两阶段路由
+  把它从第二轮候选集中过滤掉，永远不会被派到。
+  （capabilities-snapshot.ts 中的 STUB_AGENTS 集合控制）
 
-输出
-  写入 subAgentResult（暂未走 finalReply 结构化通道）。
+内部
+  tool 是占位实现，调用即返回"未接入"。
 
 候选 MCP Server
   · filesystem / github / notion
@@ -169,7 +185,8 @@ SDK
 
 接入方式
   @langchain/mcp-adapters
-  将 MCP server 工具转为 LangChain Tool。`,
+  将 MCP server 工具转为 LangChain Tool。
+  接入后从 STUB_AGENTS 移除即自动出现在路由候选集中。`,
   },
   {
     id: 'capabilities',
@@ -182,19 +199,27 @@ SDK
     prompt: `自省节点（非 ReAct，无 LLM 调用）
 
 触发
-  用户问"你能做什么 / 你有什么工具 / 列一下能力"
+  Supervisor 第一轮意图分类得到 list_capabilities 时被路由到。
+  用户语义：「你能做什么 / 列一下你的工具 / 支持哪些操作」。
 
 行为
-  · 读取 IntegrationRegistry 当前已声明 + 已就绪的集成
-  · 读取 ToolRegistry 当前已注册的工具列表
-  · 按集成分组渲染成 Markdown 报告
-  · 写入 subAgentResult，Supervisor LLM compose 输出给用户
+  · 读取 IntegrationRegistry / ToolRegistry 当前状态
+  · 构建结构化 CapabilitiesSnapshot
+    - 每个 agent 含 ready / isStub / tools 字段
+  · 渲染成 Markdown 报告写入 subAgentResult
+  · Supervisor compose 输出给用户
+
+snapshot 是单一事实源
+  同一个 buildCapabilitiesSnapshot() 在 Supervisor 启动时也算过
+  一次（缓存在闭包），用于"tool_routing"路径决定派给哪个 agent。
+  本节点的用户视图和 Supervisor 的路由视图永远一致。
 
 为什么不让 LLM 答
   避免 LLM 凭训练记忆"猜"能力清单，
   确保答案来自运行时真实状态。
 
-文件  src/graph/nodes/capabilities.ts`,
+文件  src/graph/nodes/capabilities.ts
+      src/graph/capabilities-snapshot.ts`,
   },
 
   // ── 工具层（各 Agent 下方）──
