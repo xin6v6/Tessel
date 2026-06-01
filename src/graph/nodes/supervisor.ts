@@ -4,6 +4,13 @@ import type { BaseMessage } from "@langchain/core/messages";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
+import type { ToolRegistry } from "../../tools/index.ts";
+import type { IntegrationRegistry } from "../../integrations/registry.ts";
+import {
+  buildCapabilitiesSnapshot,
+  snapshotForRoutingPrompt,
+  type CapabilitiesSnapshot,
+} from "../capabilities-snapshot.ts";
 const logger = createLogger("supervisor");
 
 // ----------------------------------------------------------------
@@ -48,14 +55,45 @@ const REPLY_GUARDRAILS = `
 //
 // ----------------------------------------------------------------
 
-const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
+export const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
   slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
   web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
   capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
 };
 
+/** 全部已知的 agent 名（不含 __end__），用于 capabilities snapshot。 */
+export const KNOWN_AGENTS = Object.keys(SUB_AGENTS) as Array<Exclude<SubAgentName, "__end__">>;
+
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
+
+// ----------------------------------------------------------------
+// 第一轮路由分类
+// ----------------------------------------------------------------
+//
+// LLM 输出（纯文本，三选一）：
+//   chat              → 不需要工具，直接对话
+//   list_capabilities → 用户明确问"你能做什么"，渲染 Markdown 能力清单
+//   tool_routing      → 需要工具但不确定哪个，进入第二轮按 snapshot 决策
+//
+// 三分类的好处：纯对话和"问能力"都只需一次 LLM，只有"真正要用工具"
+// 才付两轮代价。
+type Intent = "chat" | "list_capabilities" | "tool_routing";
+const INTENTS: readonly Intent[] = ["chat", "list_capabilities", "tool_routing"] as const;
+
+function parseIntent(text: string): Intent {
+  const clean = stripThinking(text).toLowerCase().trim();
+  // 精确匹配优先
+  for (const intent of INTENTS) {
+    if (clean === intent) return intent;
+  }
+  // 容错：包含匹配（避免 LLM 输出"intent: chat"这种）
+  for (const intent of INTENTS) {
+    if (clean.includes(intent)) return intent;
+  }
+  // 兜底：当作 chat —— 比硬路由到 tool 更安全
+  return "chat";
+}
 
 // ----------------------------------------------------------------
 // 辅助函数
@@ -97,20 +135,6 @@ function historyForPrompt(messages: BaseMessage[]): BaseMessage[] {
   return messages.slice(-HISTORY_KEEP);
 }
 
-/**
- * 从 LLM 的文本回复中提取路由决策。
- * 不依赖 function calling，兼容所有 OpenAI-compatible API。
- */
-function parseRoute(text: string): SubAgentName {
-  const clean = stripThinking(text).toLowerCase().trim();
-  for (const route of VALID_ROUTES) {
-    if (clean.includes(route.toLowerCase())) {
-      return route as SubAgentName;
-    }
-  }
-  return "__end__";
-}
-
 // ----------------------------------------------------------------
 // Supervisor 节点
 // ----------------------------------------------------------------
@@ -128,7 +152,26 @@ function extractTokenUsage(msg: unknown): { prompt: number; completion: number }
   };
 }
 
-export function buildSupervisorNode(llm: ChatOpenAI) {
+export function buildSupervisorNode(
+  llm: ChatOpenAI,
+  toolRegistry: ToolRegistry,
+  integrations: IntegrationRegistry,
+) {
+  // Snapshot 在 supervisor 构造时算一次缓存住 —— 集成在 main.ts 启动时
+  // 一次性 initialize，进程生命周期内不再变。如果以后引入热重载或动态
+  // 加载集成，把这里换成"每次 invoke 重算"或加 TTL。
+  const snapshot: CapabilitiesSnapshot = buildCapabilitiesSnapshot({
+    toolRegistry,
+    integrations,
+    knownAgents: KNOWN_AGENTS,
+    agentDescriptions: SUB_AGENTS,
+  });
+  logger.info({
+    agents: snapshot.agents.length,
+    readyNonStub: snapshot.agents.filter((a) => a.ready && !a.isStub).length,
+    stubs: snapshot.agents.filter((a) => a.isStub).length,
+  }, "capabilities snapshot cached");
+
   return async function supervisorNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
@@ -197,67 +240,56 @@ export function buildSupervisorNode(llm: ChatOpenAI) {
       };
     }
 
-    // ── 阶段 B：路由决策 ──
+    // ── 阶段 B1：第一轮路由 —— 意图分类 ──
     //
-    // Candidate agents are filtered by the request source so the routing LLM
-    // physically cannot pick another platform's agent. Slack-originated
-    // requests see only the slack agent (plus capabilities / __end__);
-    // Telegram-originated requests see only the telegram agent; CLI sees
-    // none of the platform agents at all (no default outbound channel).
+    // 这里**不**直接选具体 agent。只判断三件事：
+    //   chat              → 纯对话
+    //   list_capabilities → 用户明确问"你能做什么"
+    //   tool_routing      → 需要工具，进第二轮根据 snapshot 决定
+    //
+    // 这种分层避免每次路由都注入运行时能力清单（token 涨），只在确实
+    // 要用工具时才付那个代价。
     const source = getContext()?.source as Source | undefined;
-    const platformAgent = source ? SOURCE_TO_PLATFORM_AGENT[source] : undefined;
-
-    const candidateNames: SubAgentName[] = [
-      ...(platformAgent ? [platformAgent] : []),
-      "capabilities",
-      "__end__",
-    ];
-    const candidateLines = candidateNames
-      .map((name) => {
-        if (name === "__end__") return "- __end__: 与以上无关，直接回复用户";
-        return `- ${name}: ${SUB_AGENTS[name as Exclude<SubAgentName, "__end__">]}`;
-      })
-      .join("\n");
-
-    logger.info({ inputSnippet, source, candidateNames }, "routing");
+    logger.info({ inputSnippet, source }, "routing: stage 1 (classify intent)");
 
     const t0 = Date.now();
-    const routeReply = await llm.invoke([
+    const intentReply = await llm.invoke([
       new SystemMessage(
-        `你是一个路由助手。根据用户最新的消息，从下列选项中选择一个，只回复该选项的名字，不要有其他文字：
+        `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类的英文名字**，不要有其他文字、不要解释、不要带标点：
 
-${candidateLines}
+- chat              用户在闲聊、咨询知识、表达情绪等不需要调用外部工具就能回答的对话。
+- list_capabilities 用户明确询问"你有什么能力 / 你能做什么 / 列一下你的工具 / 你支持哪些操作"等关于自身能力的问题。
+- tool_routing      用户在请求执行一个**任务**（发消息、查询、搜索、操作外部服务等），需要调用工具才能完成。
 
-可选值：${candidateNames.join(" / ")}
+判断原则：
+- 不确定时优先选 chat —— 误判成需要工具的代价更高（会走错节点 / 浪费时间）。
+- 用户只是聊到某个工具的名字但并非真要使用，仍归为 chat。
 
-注意：用户消息中即便提到了其他平台名称（如「telegram」「微信」），也必须从上述候选里挑选。本次请求只能在以上候选范围内路由。`
+可选值：chat / list_capabilities / tool_routing`,
       ),
       ...historyForPrompt(messages),
     ]);
 
-    const routeText =
-      typeof routeReply.content === "string"
-        ? routeReply.content
-        : JSON.stringify(routeReply.content);
-
-    // parseRoute looks across ALL known routes; clamp the result to the
-    // candidate set so a stray "telegram" token in the LLM reply cannot
-    // escape the source lock.
-    let next = parseRoute(routeText);
-    if (!candidateNames.includes(next)) {
-      logger.warn({ rejected: next, candidateNames }, "route outside candidate set — clamped to __end__");
-      next = "__end__";
-    }
+    const intentText =
+      typeof intentReply.content === "string"
+        ? intentReply.content
+        : JSON.stringify(intentReply.content);
+    const intent = parseIntent(intentText);
     logger.info({
-      phase: "route",
-      next,
+      phase: "intent",
+      intent,
       source,
       durationMs: Date.now() - t0,
-      ...extractTokenUsage(routeReply),
-    }, `route → ${next}`);
+      ...extractTokenUsage(intentReply),
+    }, `intent → ${intent}`);
 
-    // ── 阶段 C：无需子 Agent，直接回复 ──
-    if (next === "__end__") {
+    // ── 路径 1：list_capabilities → 路由到 capabilities 节点 ──
+    if (intent === "list_capabilities") {
+      return { next: "capabilities" };
+    }
+
+    // ── 路径 2：chat → 直接 LLM 回复 ──
+    if (intent === "chat") {
       const t1 = Date.now();
       const directReply = await llm.invoke([
         new SystemMessage(
@@ -270,7 +302,6 @@ ${candidateLines}
       const replySnippet = typeof safeDirectReply.content === "string"
         ? safeDirectReply.content.slice(0, 120)
         : "";
-
       logger.info({
         phase: "direct",
         durationMs: Date.now() - t1,
@@ -279,13 +310,116 @@ ${candidateLines}
         completionTokens: tokens.completion,
         replySnippet,
       }, "direct reply composed");
-
       return {
         messages: [safeDirectReply],
         next: "__end__",
       };
     }
 
-    return { next };
+    // ── 路径 3：tool_routing → 第二轮，按 snapshot 决定具体 agent ──
+    //
+    // 候选 = 当前 source 允许的平台 agent ∩ snapshot 中 ready 且非 stub 的 agent。
+    // 加一个 `none` 表示"没有匹配的能力"。
+    //
+    // 平台锁定逻辑：source=slack 只能路由到 slack agent，避免 LLM 看到用户
+    // 消息里偶然出现的"telegram"就选错出口。
+    const platformAgent = source ? SOURCE_TO_PLATFORM_AGENT[source] : undefined;
+    const allowedAgents = snapshot.agents.filter((a) => {
+      if (!a.ready || a.isStub) return false;
+      // 平台 agent 必须匹配当前 source
+      if (a.agentName in SOURCE_TO_PLATFORM_AGENT) {
+        return a.agentName === platformAgent;
+      }
+      // 非平台 agent（如果以后有）默认允许
+      return true;
+    });
+
+    // 如果连一个 ready 的工具 agent 都没有，直接告诉用户
+    if (allowedAgents.length === 0) {
+      logger.info({ source, platformAgent }, "tool_routing: no ready agents — falling back to none");
+      const noneMsg = new AIMessage({
+        content: "我目前没有可以帮你完成这件事的工具。",
+      });
+      return { messages: [noneMsg], next: "__end__" };
+    }
+
+    const allowedSnapshot: CapabilitiesSnapshot = {
+      ...snapshot,
+      agents: allowedAgents,
+    };
+    const allowedNames = allowedAgents.map((a) => a.agentName);
+    const validChoices = [...allowedNames, "none"];
+
+    logger.info({
+      phase: "route-stage2",
+      allowedNames,
+    }, "routing: stage 2 (pick agent from snapshot)");
+
+    const t2 = Date.now();
+    const routeReply = await llm.invoke([
+      new SystemMessage(
+        `用户需要执行一个任务。下面是当前**真实可用**的工具 agent 清单（运行时数据，非预设）：
+
+${snapshotForRoutingPrompt(allowedSnapshot)}
+
+你的任务：根据用户的需求和上面清单里的工具，选出最合适的一个 agent。**只回复 agent 名字**，不要解释、不要带标点。
+
+可选值：${validChoices.join(" / ")}
+
+判断原则：
+- 只能选清单里出现的 agent。清单里没有合适的就回复 \`none\`。
+- 不要凭直觉选不存在的 agent，也不要选清单里标了 [STUB] 的。
+- 不确定时回复 \`none\`，不要硬选。`,
+      ),
+      ...historyForPrompt(messages),
+    ]);
+
+    const routeText =
+      typeof routeReply.content === "string"
+        ? routeReply.content
+        : JSON.stringify(routeReply.content);
+    let next = parseAgentChoice(routeText, validChoices);
+    logger.info({
+      phase: "route-stage2",
+      next,
+      durationMs: Date.now() - t2,
+      ...extractTokenUsage(routeReply),
+    }, `stage 2 → ${next}`);
+
+    if (next === "none") {
+      // LLM 看了清单，明确说没有匹配的能力。如实告知用户。
+      const noneMsg = new AIMessage({
+        content: "我目前没有可以帮你完成这件事的工具。",
+      });
+      return { messages: [noneMsg], next: "__end__" };
+    }
+
+    // Clamp 防御：parseAgentChoice 已经收敛过，但万一返回值不在 SubAgentName
+    // 枚举里（不可能但兜底），退回 __end__。
+    if (!VALID_ROUTES.includes(next as (typeof VALID_ROUTES)[number])) {
+      logger.warn({ rejected: next }, "stage 2 returned invalid agent — falling back to __end__");
+      const noneMsg = new AIMessage({ content: "我目前没有可以帮你完成这件事的工具。" });
+      return { messages: [noneMsg], next: "__end__" };
+    }
+
+    return { next: next as SubAgentName };
   };
+}
+
+/**
+ * 解析第二轮的 agent 选择回复。
+ * 只接受 validChoices 列表中的值；其他一律 fall back 到 "none"。
+ * 避免 LLM 凭空给一个不存在的 agent 名导致路由失败。
+ */
+function parseAgentChoice(text: string, validChoices: readonly string[]): string {
+  const clean = stripThinking(text).toLowerCase().trim();
+  // 精确匹配优先
+  for (const choice of validChoices) {
+    if (clean === choice.toLowerCase()) return choice;
+  }
+  // 包含匹配（容忍 LLM 加上标点或多余文字）
+  for (const choice of validChoices) {
+    if (clean.includes(choice.toLowerCase())) return choice;
+  }
+  return "none";
 }

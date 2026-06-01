@@ -20,11 +20,32 @@ Slack (@mention / DM)
  Tools  APIs Servers   元数据快照
 ```
 
-- **Supervisor**：分析用户意图，路由到对应子节点，整合结果后回复
+- **Supervisor**：**两阶段路由** + 结果整合（见下）
 - **Slack Agent**：执行所有 Slack 操作（发消息、查历史、搜索等）
 - **Web Agent**：实时网络搜索（占位 stub，未接入搜索 API）
 - **MCP Agent**：通过 MCP 协议接入外部服务（占位 stub）
 - **Capabilities**：自省节点，根据运行时已注册的 integrations/tools 生成能力清单
+
+### Supervisor 路由（两阶段）
+
+```
+用户消息
+  ↓ 第一轮 LLM：意图分类（纯文本三选一）
+  ├─ chat              → 直接 LLM 回复（一次 LLM）
+  ├─ list_capabilities → 路由到 Capabilities 节点（渲染 Markdown 给用户）
+  └─ tool_routing      → 第二轮：从能力快照中挑 agent
+                           ├─ 选具体 agent → 路由过去
+                           └─ none         → "我没有这个工具" 兜底
+```
+
+设计要点：
+- **能力快照在启动时算一次**缓存在 supervisor 闭包里。每次路由不重新扫描 IntegrationRegistry。
+- **第二轮的候选集只包含 ready 且非 stub 的 agent**。Stub 节点（web/mcp）在路由 prompt 里被打 `[STUB · 不要选]` 标记，LLM 物理上无法把任务派给它们。
+- **平台锁定保留**：source=slack 只能选 slack agent，避免用户消息里偶然出现"telegram"被路由错。
+- **none 兜底**：候选集空 / LLM 找不到合适 agent，supervisor 直接回复"我目前没有可以帮你完成这件事的工具",**不会**让 LLM 凭空假装能做。
+- **纯对话不付两轮代价**：只有 `tool_routing` 分类才走第二轮 LLM；`chat` 和 `list_capabilities` 各只一次。
+
+### 结果通道
 
 子节点通过两条 state 通道把结果交给 Supervisor：
 - `finalReply` —— 已成稿、可直接发给用户的回复（含表格、列表等）。Supervisor 看到后**原样转发**，不再 LLM 重写，避免子节点已渲染的结构化内容被改写。
