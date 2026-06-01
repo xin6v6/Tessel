@@ -11,6 +11,7 @@ import {
   snapshotForRoutingPrompt,
   type CapabilitiesSnapshot,
 } from "../capabilities-snapshot.ts";
+import { getSpeaker } from "../speaker.ts";
 const logger = createLogger("supervisor");
 
 // ----------------------------------------------------------------
@@ -135,6 +136,32 @@ function historyForPrompt(messages: BaseMessage[]): BaseMessage[] {
   return messages.slice(-HISTORY_KEEP);
 }
 
+/**
+ * 从消息历史里取出"当前对话者"的可读名,拼成一行注入 system prompt。
+ *
+ * 为什么不让模型自己从 HumanMessage.name 推断 —— 不同 provider 对 name
+ * 字段处理差异大,MiniMax 默认完全忽略。把"你正在跟 Xin Cheng 说话"
+ * 显式写进 system,模型百分百能用。
+ *
+ * 多人频道(channel 顶层)场景:取"最近一条" HumanMessage 的 speaker,
+ * 因为那就是这一轮在跟 bot 说话的人。历史里其他人的发言模型仍能在
+ * messages 数组里看到(他们各自的 name 字段),但"当前是谁"由这一行
+ * 锚定。
+ *
+ * 返回空字符串表示无 speaker 信息(早期消息可能没有 metadata)—— 调用方
+ * 直接拼空字符串到 prompt 不影响其他内容。
+ */
+function currentSpeakerLine(messages: BaseMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (!(m instanceof HumanMessage)) continue;
+    const speaker = getSpeaker(m);
+    if (!speaker?.speakerName) continue;
+    return `当前正在跟你对话的用户是「${speaker.speakerName}」。被问到"你知道我是谁"时,告知这个名字。\n`;
+  }
+  return "";
+}
+
 // ----------------------------------------------------------------
 // Supervisor 节点
 // ----------------------------------------------------------------
@@ -213,7 +240,7 @@ export function buildSupervisorNode(
       const t0 = Date.now();
       const finalReply = await llm.invoke([
         new SystemMessage(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
         new HumanMessage(`子 Agent 执行结果：\n${subAgentResult}`),
@@ -293,7 +320,7 @@ export function buildSupervisorNode(
       const t1 = Date.now();
       const directReply = await llm.invoke([
         new SystemMessage(
-          `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${REPLY_GUARDRAILS}`
+          `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`
         ),
         ...historyForPrompt(messages),
       ]);
