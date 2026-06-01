@@ -311,6 +311,17 @@ async function main() {
 }
 
 main().catch((err) => {
-  logger.error("Fatal:", err);
+  // logger.error(string, anything) 的第二参不是 fields，会被吞掉。
+  // err 必须放进 fields 里，并把它各种属性铺平，否则 Error.toString() 在
+  // JSON 输出里也只是 "{}"。
+  const e = err instanceof Error ? err : new Error(String(err));
+  logger.error(
+    {
+      errMessage: e.message,
+      errName: e.name,
+      errStack: e.stack,
+    },
+    "fatal: main() rejected"
+  );
   process.exit(1);
 });
