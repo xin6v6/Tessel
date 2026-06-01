@@ -3,7 +3,7 @@ import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { ChatOpenAI } from "@langchain/openai";
 import { GraphState } from "./state.ts";
 import { buildCheckpointer } from "./checkpointer.ts";
-import { buildSupervisorNode } from "./nodes/supervisor.ts";
+import { buildSupervisorNode, KNOWN_AGENTS, SUB_AGENTS } from "./nodes/supervisor.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
@@ -61,11 +61,16 @@ export function buildGraph(params: {
   });
 
   // 构建各节点
-  const supervisorNode    = buildSupervisorNode(llm);
+  const supervisorNode    = buildSupervisorNode(llm, params.toolRegistry, params.integrations);
   const slackAgentNode    = buildSlackAgentNode(llm, params.toolRegistry);
   const webAgentNode      = buildWebAgentNode(llm);
   const mcpAgentNode      = buildMcpAgentNode(llm);
-  const capabilitiesNode  = buildCapabilitiesNode(params.toolRegistry, params.integrations);
+  const capabilitiesNode  = buildCapabilitiesNode(
+    params.toolRegistry,
+    params.integrations,
+    KNOWN_AGENTS,
+    SUB_AGENTS,
+  );
 
   const graph = new StateGraph(GraphState)
     // 注册节点
