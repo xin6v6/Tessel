@@ -111,4 +111,10 @@ services:
 #   docker compose exec tessel bun run contacts list
 volumes:
   synod-data:
+    # external: true 告诉 compose"这个 volume 不归我管,只是引用它"。
+    # 不加这一行时,compose 看到 volume 实际名 (synod_synod-data) 不带
+    # 当前 project 前缀 (tessel_),每次启动都会刷一条 WARN:
+    #   "volume already exists but was created for project synod (expected tessel)"
+    # 行为上不影响(volume 仍然挂上),但日志噪音让真正的错被淹没。
+    external: true
     name: synod_synod-data
