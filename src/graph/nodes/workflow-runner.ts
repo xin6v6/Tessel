@@ -1,6 +1,6 @@
-import { HumanMessage } from "@langchain/core/messages";
-import { interrupt } from "@langchain/langgraph";
+import { isHuman } from "../../llm/messages.ts";
 import type { GraphStateType, WorkflowProgress } from "../state.ts";
+import type { NodeOutput } from "../runtime.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext } from "../../observability/context.ts";
 import { recipeByTag, recordStageRun } from "../../workflows/recipe-store.ts";
@@ -52,7 +52,7 @@ function allowlist(): Set<string> {
 function lastRequirement(state: GraphStateType): string {
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i]!;
-    if (m instanceof HumanMessage && typeof m.content === "string") return m.content;
+    if (isHuman(m)) return m.content;
   }
   return "";
 }
@@ -240,7 +240,8 @@ export function buildWorkflowRunnerNode() {
 export function buildWorkflowApprovalNode() {
   return async function workflowApprovalNode(
     state: GraphStateType,
-  ): Promise<Partial<GraphStateType>> {
+    resume?: unknown,
+  ): Promise<NodeOutput> {
     const wf = state.workflowProgress;
     if (!wf) {
       // 不该发生：没有进度却进了审批节点。回 supervisor 兜底。
@@ -248,20 +249,27 @@ export function buildWorkflowApprovalNode() {
       return { next: "supervisor" };
     }
 
-    const recipe = recipeByTag(wf.recipe);
-    const stage = recipe?.stages.find((s) => s.id === wf.pendingStageId);
-    const label = stage?.label ?? wf.pendingStageId ?? "计划";
+    // 首次进入（无 resume 值）：请求中断，由 run loop 落盘 + 停机 + 透出审批提示。
+    // 本节点不做任何昂贵操作，重入只是再请求一次中断，无副作用。
+    if (resume === undefined) {
+      const recipe = recipeByTag(wf.recipe);
+      const stage = recipe?.stages.find((s) => s.id === wf.pendingStageId);
+      const label = stage?.label ?? wf.pendingStageId ?? "计划";
+      return {
+        __interrupt__: [{
+          value: {
+            kind: "workflow-approval",
+            recipe: wf.recipe,
+            stage: wf.pendingStageId,
+            summary: wf.plan ?? wf.lastStageOutput ?? "",
+            prompt: `请确认「${label}」结果是否正确。回复「同意」继续，回复其他则放弃。`,
+          },
+        }],
+      };
+    }
 
-    // interrupt：第一次抛出暂停；resume 时返回 Command 里的 resume 值。
-    // 本节点【不做任何昂贵操作】，重入只是再 interrupt 一次，无副作用。
-    const decision = interrupt({
-      kind: "workflow-approval",
-      recipe: wf.recipe,
-      stage: wf.pendingStageId,
-      summary: wf.plan ?? wf.lastStageOutput ?? "",
-      prompt: `请确认「${label}」结果是否正确。回复「同意」继续，回复其他则放弃。`,
-    }) as { approved?: boolean } | undefined;
-
+    // 续跑：消费审批决定，写回 phase，路由回 workflow（workflow 凭 outputs 跳过已完成 stage）。
+    const decision = resume as { approved?: boolean } | undefined;
     const phase: WorkflowProgress["phase"] = decision?.approved ? "running_after_approval" : "aborted";
     logger.info({ stage: wf.pendingStageId, approved: Boolean(decision?.approved) }, "approval decided");
     return {

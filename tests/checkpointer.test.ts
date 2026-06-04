@@ -8,7 +8,14 @@ import {
   threadIdForSlackDm,
   threadIdForSlackMention,
 } from "../src/graph/thread-id.ts";
-import { humanMessageWithSpeaker, getSpeaker } from "../src/graph/speaker.ts";
+import { getSpeaker } from "../src/graph/speaker.ts";
+
+// 本测试验证 BunSqliteSaver（仍是 LangGraph 协议，PR6 才删/重写），整体用
+// langchain 消息。speaker 消息直接用 langchain HumanMessage 构造（不用已原生化的
+// humanMessageWithSpeaker），与本文件的 langgraph echo graph 自洽。
+function lcHumanWithSpeaker(content: string, speaker: Record<string, unknown>): HumanMessage {
+  return new HumanMessage({ content, additional_kwargs: { speaker } });
+}
 
 /**
  * 这些测试不依赖真实 LLM。构造一个最小的 echo graph：
@@ -80,7 +87,7 @@ describe("checkpointer: per-thread conversation memory", () => {
     await graph.invoke(
       {
         messages: [
-          humanMessageWithSpeaker("hi", { speakerId: "U001", source: "slack", speakerName: "Alice" }),
+          lcHumanWithSpeaker("hi", { speakerId: "U001", source: "slack", speakerName: "Alice" }),
         ],
       },
       config

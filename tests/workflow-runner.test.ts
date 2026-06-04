@@ -32,26 +32,19 @@ mock.module("../src/workflows/coding/git.ts", () => ({
   currentBranch: async () => "main",
 }));
 
-// interrupt 的行为由测试控制：直接返回 resume 值（模拟已恢复）。
-// 注意：只覆盖 interrupt，其余 langgraph 导出（StateGraph / messagesStateReducer 等）
-// 必须保留，否则会污染其他测试文件。
+// 审批决定由测试编排（不再 mock langgraph —— interrupt 已改成 resume 参数协议）。
 const interruptResume: { value: unknown } = { value: { approved: true } };
-const realLanggraph = await import("@langchain/langgraph");
-mock.module("@langchain/langgraph", () => ({
-  ...realLanggraph,
-  interrupt: () => interruptResume.value,
-}));
 
 const { buildWorkflowRunnerNode, buildWorkflowApprovalNode } = await import("../src/graph/nodes/workflow-runner.ts");
 const { recipeByTag, workflowAgentDescription } = await import("../src/workflows/recipe-store.ts");
 
-import { HumanMessage } from "@langchain/core/messages";
+import { humanMsg } from "../src/llm/messages.ts";
 import { runWithContext } from "../src/observability/context.ts";
 import type { GraphStateType } from "../src/graph/state.ts";
 
 function freshState(text: string): GraphStateType {
   return {
-    messages: [new HumanMessage(text)],
+    messages: [humanMsg(text)],
     next: "workflow",
     intent: "workflow",
     subAgentResult: "",
@@ -60,9 +53,9 @@ function freshState(text: string): GraphStateType {
   };
 }
 
-// 驱动两节点循环（模拟 graph 的 workflow⇄workflow_approval 边）：
-// 反复调 workflow；遇 next==="workflow_approval" 就过 approval 节点（interrupt 已 mock），
-// 把更新后的 workflowProgress 喂回 workflow，直到回 supervisor。
+// 驱动两节点循环（模拟 runtime 的 workflow⇄workflow_approval 边 + interrupt/resume）：
+// 反复调 workflow；遇 next==="workflow_approval" 时 approval 节点首次返回 __interrupt__
+// （断言"暂停"），再用 interruptResume.value 注入决定续跑，把结果喂回 workflow。
 async function drive(initial: GraphStateType) {
   const wfNode = buildWorkflowRunnerNode();
   const apNode = buildWorkflowApprovalNode();
@@ -72,7 +65,11 @@ async function drive(initial: GraphStateType) {
     out = await wfNode(state);
     state = { ...state, ...out };
     if (out.next === "workflow_approval") {
-      const apOut = await apNode(state);
+      const ask = await apNode(state);                       // 首次：应返回 __interrupt__（暂停）
+      if (!(ask as { __interrupt__?: unknown }).__interrupt__) {
+        throw new Error("approval 节点首次进入应返回 __interrupt__");
+      }
+      const apOut = await apNode(state, interruptResume.value); // 注入决定续跑
       state = { ...state, ...apOut };
       continue;
     }

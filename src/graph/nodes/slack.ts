@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, systemMsg, isHuman, isTool, fromLangChain, type Message } from "../../llm/messages.ts";
+import { humanMsg, systemMsg, isHuman, isTool, type Message } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
@@ -72,9 +72,7 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry) 
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
 
-    // 迁移期：state.messages 仍是 langchain BaseMessage，转原生再用。
-    const native = state.messages.map((m) => fromLangChain(m as object));
-    const lastUserMsg = [...native].reverse().find(isHuman);
+    const lastUserMsg = [...state.messages].reverse().find(isHuman);
 
     if (!lastUserMsg) {
       logger.warn("no human message found, skipping");

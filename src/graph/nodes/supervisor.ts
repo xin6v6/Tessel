@@ -1,7 +1,8 @@
-import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
-import type { BaseMessage } from "@langchain/core/messages";
 import type { LLMClient } from "../../llm/client.ts";
-import { fromLangChainMany } from "../../llm/messages.ts";
+import {
+  aiMsg, humanMsg, systemMsg, isHuman, stripName,
+  type Message, type AIMsg,
+} from "../../llm/messages.ts";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
@@ -132,17 +133,14 @@ function stripThinking(text: string): string {
   return text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
 }
 
-/** 对 AIMessage 的 content 进行 <think> 标签清理（如有），返回新的 AIMessage */
-function sanitizeReply(msg: AIMessage): AIMessage {
-  if (typeof msg.content !== "string") return msg;
+/** 对 AIMsg 的 content 做 <think> 清理（如有），返回新的 AIMsg。 */
+function sanitizeReply(msg: AIMsg): AIMsg {
   const cleaned = stripThinking(msg.content);
   if (cleaned === msg.content) return msg;
-  return new AIMessage({
-    content: cleaned,
+  return aiMsg(cleaned, {
     additional_kwargs: msg.additional_kwargs,
     response_metadata: msg.response_metadata,
     usage_metadata: msg.usage_metadata,
-    id: msg.id,
     name: msg.name,
   });
 }
@@ -158,33 +156,16 @@ function sanitizeReply(msg: AIMessage): AIMessage {
 const HISTORY_TRIM_AT = 30;
 const HISTORY_KEEP    = 20;
 
-function historyForPrompt(messages: BaseMessage[]): BaseMessage[] {
+function historyForPrompt(messages: Message[]): Message[] {
   const windowed =
     messages.length <= HISTORY_TRIM_AT ? messages : messages.slice(-HISTORY_KEEP);
   // 发给 LLM 前统一剥掉 message.name —— OpenAI-compatible provider（含
   // MiniMax）对 `name` 有格式 / 一致性校验，人名值会触发
-  // `400 ... user name must be consistent (2013)`。即使当前代码不再写入
-  // name，checkpointer 里仍可能存有历史脏数据（早期版本写入的 name），
-  // 每次从 checkpoint 加载后照样会送给 provider。这里是发往 provider 的
-  // 唯一收口，统一兜底剥离最稳妥。speaker 信息仍由 additional_kwargs +
-  // currentSpeakerLine() 注入 system prompt 承载，不受影响。
-  return windowed.map((m) => (m.name ? stripName(m) : m));
-}
-
-/** 返回去掉 name 字段的 message 副本（不修改原 message / state / checkpointer）。 */
-function stripName(m: BaseMessage): BaseMessage {
-  const fields = {
-    content: m.content,
-    additional_kwargs: m.additional_kwargs,
-    response_metadata: m.response_metadata,
-    id: m.id,
-  };
-  if (m instanceof HumanMessage) return new HumanMessage(fields);
-  if (m instanceof SystemMessage) return new SystemMessage(fields);
-  if (m instanceof AIMessage) {
-    return new AIMessage({ ...fields, usage_metadata: (m as AIMessage).usage_metadata });
-  }
-  return m;
+  // `400 ... user name must be consistent (2013)`。历史里可能存有早期写入的
+  // name 脏数据，这里是发往 provider 的唯一收口，统一兜底剥离。speaker 信息
+  // 仍由 additional_kwargs + currentSpeakerLine() 注入 system prompt 承载。
+  // （stripName 来自 llm/messages：无 name 时原样返回同一引用，零拷贝。）
+  return windowed.map(stripName);
 }
 
 /**
@@ -202,10 +183,10 @@ function stripName(m: BaseMessage): BaseMessage {
  * 返回空字符串表示无 speaker 信息(早期消息可能没有 metadata)—— 调用方
  * 直接拼空字符串到 prompt 不影响其他内容。
  */
-function currentSpeakerLine(messages: BaseMessage[]): string {
+function currentSpeakerLine(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (!(m instanceof HumanMessage)) continue;
+    if (!isHuman(m)) continue;
     const speaker = getSpeaker(m);
     if (!speaker?.speakerName) continue;
     return `当前正在跟你对话的用户是「${speaker.speakerName}」。被问到"你知道我是谁"时,告知这个名字。\n`;
@@ -228,20 +209,6 @@ function extractTokenUsage(msg: unknown): { prompt: number; completion: number }
     prompt:     (usage["input_tokens"]   ?? usage["promptTokens"]     ?? 0) as number,
     completion: (usage["output_tokens"]  ?? usage["completionTokens"] ?? 0) as number,
   };
-}
-
-/**
- * 迁移期适配：把 langchain BaseMessage[] 转原生喂 LLMClient，结果包回 langchain
- * AIMessage（让下游 sanitizeReply / extractTokenUsage / state 写入零改动）。
- * LLMClient 已把 token usage 同时填进 usage_metadata 和 response_metadata.tokenUsage。
- */
-async function invokeLC(llm: LLMClient, messages: BaseMessage[]): Promise<AIMessage> {
-  const reply = await llm.invoke(fromLangChainMany(messages));
-  return new AIMessage({
-    content: reply.content,
-    usage_metadata: reply.usage_metadata as AIMessage["usage_metadata"],
-    response_metadata: reply.response_metadata,
-  });
 }
 
 export function buildSupervisorNode(
@@ -271,7 +238,7 @@ export function buildSupervisorNode(
     const { messages, subAgentResult, finalReply } = state;
 
     // 取最后一条用户消息用于日志（截断避免刷屏）
-    const lastHuman = [...messages].reverse().find((m) => m instanceof HumanMessage);
+    const lastHuman = [...messages].reverse().find((m) => isHuman(m));
     const inputSnippet = typeof lastHuman?.content === "string"
       ? lastHuman.content.slice(0, 120)
       : "";
@@ -283,7 +250,7 @@ export function buildSupervisorNode(
     // 「理解掉」（LLM 看到 prompt 里有表格，误以为表格已展示过，只补结尾）。
     if (finalReply && finalReply.trim()) {
       const cleaned = stripThinking(finalReply);
-      const replyMsg = new AIMessage({ content: cleaned });
+      const replyMsg = aiMsg(cleaned);
       logger.info({
         phase: "compose",
         mode: "passthrough",
@@ -303,14 +270,14 @@ export function buildSupervisorNode(
       logger.debug({ subAgentResultSnippet: subAgentResult.slice(0, 120) }, "composing final reply");
 
       const t0 = Date.now();
-      const finalReply = await invokeLC(llm, [
-        new SystemMessage(
+      const finalReply = await llm.invoke([
+        systemMsg(
           `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
-        new HumanMessage(`子 Agent 执行结果：\n${subAgentResult}`),
+        humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
       ]);
-      const safeFinalReply = sanitizeReply(finalReply as AIMessage);
+      const safeFinalReply = sanitizeReply(finalReply);
       const tokens = extractTokenUsage(safeFinalReply);
       const replySnippet = typeof safeFinalReply.content === "string"
         ? safeFinalReply.content.slice(0, 120)
@@ -387,8 +354,8 @@ export function buildSupervisorNode(
     } else {
       // routerIntent === "unknown"：回退自带分类器（含 list_capabilities 识别）。
       const t0 = Date.now();
-      const intentReply = await invokeLC(llm, [
-        new SystemMessage(
+      const intentReply = await llm.invoke([
+        systemMsg(
           `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类的英文名字**，不要有其他文字、不要解释、不要带标点：
 
 - chat              用户在闲聊、咨询知识、表达情绪等不需要调用外部工具就能回答的对话。
@@ -427,13 +394,13 @@ export function buildSupervisorNode(
     // ── 路径 2：chat → 直接 LLM 回复 ──
     if (intent === "chat") {
       const t1 = Date.now();
-      const directReply = await invokeLC(llm, [
-        new SystemMessage(
+      const directReply = await llm.invoke([
+        systemMsg(
           `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`
         ),
         ...historyForPrompt(messages),
       ]);
-      const safeDirectReply = sanitizeReply(directReply as AIMessage);
+      const safeDirectReply = sanitizeReply(directReply);
       const tokens = extractTokenUsage(safeDirectReply);
       const replySnippet = typeof safeDirectReply.content === "string"
         ? safeDirectReply.content.slice(0, 120)
@@ -474,9 +441,7 @@ export function buildSupervisorNode(
     // 如果连一个 ready 的工具 agent 都没有，直接告诉用户
     if (allowedAgents.length === 0) {
       logger.info({ source, platformAgent }, "tool_routing: no ready agents — falling back to none");
-      const noneMsg = new AIMessage({
-        content: "我目前没有可以帮你完成这件事的工具。",
-      });
+      const noneMsg = aiMsg("我目前没有可以帮你完成这件事的工具。");
       return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
@@ -493,8 +458,8 @@ export function buildSupervisorNode(
     }, "routing: stage 2 (pick agent from snapshot)");
 
     const t2 = Date.now();
-    const routeReply = await invokeLC(llm, [
-      new SystemMessage(
+    const routeReply = await llm.invoke([
+      systemMsg(
         `用户需要执行一个任务。下面是当前**真实可用**的工具 agent 清单（运行时数据，非预设）：
 
 ${snapshotForRoutingPrompt(allowedSnapshot)}
@@ -525,9 +490,7 @@ ${snapshotForRoutingPrompt(allowedSnapshot)}
 
     if (next === "none") {
       // LLM 看了清单，明确说没有匹配的能力。如实告知用户。
-      const noneMsg = new AIMessage({
-        content: "我目前没有可以帮你完成这件事的工具。",
-      });
+      const noneMsg = aiMsg("我目前没有可以帮你完成这件事的工具。");
       return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
@@ -535,7 +498,7 @@ ${snapshotForRoutingPrompt(allowedSnapshot)}
     // 枚举里（不可能但兜底），退回 __end__。
     if (!VALID_ROUTES.includes(next as (typeof VALID_ROUTES)[number])) {
       logger.warn({ rejected: next }, "stage 2 returned invalid agent — falling back to __end__");
-      const noneMsg = new AIMessage({ content: "我目前没有可以帮你完成这件事的工具。" });
+      const noneMsg = aiMsg("我目前没有可以帮你完成这件事的工具。");
       return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
