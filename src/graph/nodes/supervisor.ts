@@ -34,6 +34,23 @@ const SOURCE_TO_PLATFORM_AGENT: Partial<Record<Source, Exclude<SubAgentName, "__
 };
 
 // ----------------------------------------------------------------
+// workflow 白名单（纵深防御）
+// ----------------------------------------------------------------
+//
+// 与 router.ts / workflow-runner.ts 同源：只有 CODING_ALLOWLIST 里的 userId
+// 能路由到 workflow。supervisor 不无条件信任 router 给的 workflow 意图 ——
+// router 的 LLM 分类不受白名单约束，这里是第二道校验。
+function workflowAllowed(userId: string): boolean {
+  const allow = new Set(
+    (process.env.CODING_ALLOWLIST ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  return allow.has(userId);
+}
+
+// ----------------------------------------------------------------
 // 通用回复护栏：约束模型只依据已知证据回答，不编造细节
 // ----------------------------------------------------------------
 const REPLY_GUARDRAILS = `
@@ -295,22 +312,64 @@ export function buildSupervisorNode(
       };
     }
 
-    // ── 阶段 B1：第一轮路由 —— 意图分类 ──
+    // ── 阶段 B1：意图分类 ──
     //
-    // 这里**不**直接选具体 agent。只判断三件事：
-    //   chat              → 纯对话
-    //   list_capabilities → 用户明确问"你能做什么"
-    //   tool_routing      → 需要工具，进第二轮根据 snapshot 决定
+    // 分类结论优先来自前置 router 节点（state.intent）。router 用更快的小模型
+    // + 零成本规则定案，supervisor 直接消费，省掉自己这一轮 LLM 往返。
     //
-    // 这种分层避免每次路由都注入运行时能力清单（token 涨），只在确实
-    // 要用工具时才付那个代价。
+    // 映射：
+    //   router "chat"         → 纯对话，直接回复
+    //   router "workflow"     → 直奔 workflow runner（跳过下面的 B2 snapshot 选择）
+    //   router "capabilities" → 直奔 capabilities 节点（列真实能力清单）
+    //   router "tool"         → 进 B2，按 snapshot 选具体 agent
+    //   router "unknown"      → router 被绕过 / 出错，回退到 supervisor 自带的
+    //                           分类 LLM（保证 supervisor 不依赖 router 也能独立工作）。
     const source = getContext()?.source as Source | undefined;
-    logger.info({ inputSnippet, source }, "routing: stage 1 (classify intent)");
+    let routerIntent = state.intent;
+    logger.info({ inputSnippet, source, routerIntent }, "routing: stage 1 (intent)");
 
-    const t0 = Date.now();
-    const intentReply = await llm.invoke([
-      new SystemMessage(
-        `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类的英文名字**，不要有其他文字、不要解释、不要带标点：
+    // ── router 已定案 workflow → 直奔 workflow runner，跳过 B2 ──
+    // 消费掉 intent（重置 "unknown"），避免下一轮（子 agent 回来 compose 时）误读。
+    //
+    // 纵深防御：不无条件信任 routerIntent。router 的 Tier 1 LLM 不受白名单
+    // 约束、理论上仍可能吐出 workflow（router 已加出口兜底，这里再校验一次
+    // 是第二道防线）。非白名单用户的 workflow 在这里降级 —— 不路由到
+    // workflow 节点，改当作普通 tool_routing 往下走 B2。workflow runner 内部
+    // 也有白名单校验，三层一致。
+    if (routerIntent === "workflow") {
+      const userId = getContext()?.userId ?? "";
+      if (workflowAllowed(userId)) {
+        logger.info({ phase: "intent", intent: "workflow", source }, "intent → workflow (from router)");
+        return { next: "workflow", intent: "unknown" };
+      }
+      logger.warn(
+        { phase: "intent", source, userId },
+        "router said workflow but user not in allowlist — downgrading to tool_routing",
+      );
+      routerIntent = "tool";
+    }
+
+    // ── router 已定案 capabilities → 直奔 capabilities 节点（列真实能力清单）──
+    // 没有这一支时，router 会把"问能力"判成 chat、supervisor 直接闲聊式回复，
+    // 绕过 capabilities 节点 → 给不出真实工具清单。这里显式接住。
+    if (routerIntent === "capabilities") {
+      logger.info({ phase: "intent", intent: "capabilities", source }, "intent → capabilities (from router)");
+      return { next: "capabilities", intent: "unknown" };
+    }
+
+    // ── 判定本轮 supervisor 要走的意图 ──
+    // router 给了 chat/tool 就直接采用；unknown 才付费跑自带的三分类 LLM。
+    let intent: Intent;
+    if (routerIntent === "chat") {
+      intent = "chat";
+    } else if (routerIntent === "tool") {
+      intent = "tool_routing";
+    } else {
+      // routerIntent === "unknown"：回退自带分类器（含 list_capabilities 识别）。
+      const t0 = Date.now();
+      const intentReply = await llm.invoke([
+        new SystemMessage(
+          `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类的英文名字**，不要有其他文字、不要解释、不要带标点：
 
 - chat              用户在闲聊、咨询知识、表达情绪等不需要调用外部工具就能回答的对话。
 - list_capabilities 用户明确询问"你有什么能力 / 你能做什么 / 列一下你的工具 / 你支持哪些操作"等关于自身能力的问题。
@@ -321,26 +380,28 @@ export function buildSupervisorNode(
 - 用户只是聊到某个工具的名字但并非真要使用，仍归为 chat。
 
 可选值：chat / list_capabilities / tool_routing`,
-      ),
-      ...historyForPrompt(messages),
-    ]);
+        ),
+        ...historyForPrompt(messages),
+      ]);
 
-    const intentText =
-      typeof intentReply.content === "string"
-        ? intentReply.content
-        : JSON.stringify(intentReply.content);
-    const intent = parseIntent(intentText);
-    logger.info({
-      phase: "intent",
-      intent,
-      source,
-      durationMs: Date.now() - t0,
-      ...extractTokenUsage(intentReply),
-    }, `intent → ${intent}`);
+      const intentText =
+        typeof intentReply.content === "string"
+          ? intentReply.content
+          : JSON.stringify(intentReply.content);
+      intent = parseIntent(intentText);
+      logger.info({
+        phase: "intent",
+        intent,
+        source,
+        fallback: true,
+        durationMs: Date.now() - t0,
+        ...extractTokenUsage(intentReply),
+      }, `intent → ${intent} (supervisor fallback)`);
+    }
 
     // ── 路径 1：list_capabilities → 路由到 capabilities 节点 ──
     if (intent === "list_capabilities") {
-      return { next: "capabilities" };
+      return { next: "capabilities", intent: "unknown" };
     }
 
     // ── 路径 2：chat → 直接 LLM 回复 ──
@@ -368,6 +429,7 @@ export function buildSupervisorNode(
       return {
         messages: [safeDirectReply],
         next: "__end__",
+        intent: "unknown",
       };
     }
 
@@ -395,7 +457,7 @@ export function buildSupervisorNode(
       const noneMsg = new AIMessage({
         content: "我目前没有可以帮你完成这件事的工具。",
       });
-      return { messages: [noneMsg], next: "__end__" };
+      return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
     const allowedSnapshot: CapabilitiesSnapshot = {
@@ -446,7 +508,7 @@ ${snapshotForRoutingPrompt(allowedSnapshot)}
       const noneMsg = new AIMessage({
         content: "我目前没有可以帮你完成这件事的工具。",
       });
-      return { messages: [noneMsg], next: "__end__" };
+      return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
     // Clamp 防御：parseAgentChoice 已经收敛过，但万一返回值不在 SubAgentName
@@ -454,10 +516,10 @@ ${snapshotForRoutingPrompt(allowedSnapshot)}
     if (!VALID_ROUTES.includes(next as (typeof VALID_ROUTES)[number])) {
       logger.warn({ rejected: next }, "stage 2 returned invalid agent — falling back to __end__");
       const noneMsg = new AIMessage({ content: "我目前没有可以帮你完成这件事的工具。" });
-      return { messages: [noneMsg], next: "__end__" };
+      return { messages: [noneMsg], next: "__end__", intent: "unknown" };
     }
 
-    return { next: next as SubAgentName };
+    return { next: next as SubAgentName, intent: "unknown" };
   };
 }
 

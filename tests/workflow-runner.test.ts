@@ -52,6 +52,7 @@ function freshState(text: string) {
   return {
     messages: [new HumanMessage(text)],
     next: "workflow" as const,
+    intent: "workflow" as const,
     subAgentResult: "",
     finalReply: "",
     workflowProgress: null,
