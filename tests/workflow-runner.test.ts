@@ -59,7 +59,7 @@ function freshState(text: string) {
   };
 }
 
-const ctx = { sessionId: "s", source: "cli" as const, externalId: "tester", userId: "cli:tester" };
+const ctx = { sessionId: "s", source: "cli" as const, externalId: "tester", userId: "cli:tester", channel: "Ctest" };
 
 beforeEach(() => {
   for (const k of Object.keys(stageOutputs)) delete stageOutputs[k];
@@ -67,7 +67,8 @@ beforeEach(() => {
   finalizeCalled = false;
   abortCalled = false;
   interruptResume.value = { approved: true };
-  process.env.CODING_REPO_PATH = "/tmp/fake-repo";
+  // runner 严格按频道映射选 repo（不回退默认）。把 ctx.channel=Ctest 映射到 fake repo。
+  process.env.CODING_REPOS = "Ctest:/tmp/fake-repo";
   process.env.CODING_ALLOWLIST = "cli:tester";
 });
 

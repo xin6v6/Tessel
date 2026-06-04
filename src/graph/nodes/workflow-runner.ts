@@ -81,13 +81,16 @@ export function buildWorkflowRunnerNode() {
       return { subAgentResult: "⚠️ 没有匹配的流程配方。", workflowProgress: null };
     }
 
-    // 目标仓库：优先按来源频道查映射（CODING_REPOS，一频道一项目），
-    // 查不到回退到 recipe.cwdEnv（单一 CODING_REPO_PATH，向后兼容）。
-    const cwd = repoForChannel(ctx?.channel) ?? process.env[recipe.cwdEnv];
+    // 目标仓库：严格按来源频道查映射（CODING_REPOS，一频道一项目）。
+    // 【不回退】到单一默认仓库 —— 未映射的频道（含 DM）一律拒绝，避免在
+    // 错误的频道误改某个仓库。要让某频道能跑 workflow，必须在 CODING_REPOS
+    // 里显式映射。
+    const cwd = repoForChannel(ctx?.channel);
     if (!cwd) {
+      logger.warn({ channel: ctx?.channel }, "workflow denied: channel has no repo mapping");
       return {
         subAgentResult:
-          `⚠️ 当前频道未配置目标仓库（CODING_REPOS），也未配置默认 ${recipe.cwdEnv}，无法执行该任务。`,
+          "⚠️ 当前频道没有配置可操作的目标仓库，无法执行开发任务。请在已配置的项目频道里触发。",
         workflowProgress: null,
       };
     }
