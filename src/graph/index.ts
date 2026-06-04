@@ -9,7 +9,7 @@ import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
-import { buildWorkflowRunnerNode } from "./nodes/workflow-runner.ts";
+import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/workflow-runner.ts";
 import type { ToolRegistry } from "../tools/index.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 
@@ -105,17 +105,19 @@ export function buildGraph(params: {
     KNOWN_AGENTS,
     SUB_AGENTS,
   );
-  const workflowNode      = buildWorkflowRunnerNode();
+  const workflowNode         = buildWorkflowRunnerNode();
+  const workflowApprovalNode = buildWorkflowApprovalNode();
 
   const graph = new StateGraph(GraphState)
     // 注册节点
-    .addNode("router",       routerNode)
-    .addNode("supervisor",   supervisorNode)
-    .addNode("slack",        slackAgentNode)
-    .addNode("web",          webAgentNode)
-    .addNode("mcp",          mcpAgentNode)
-    .addNode("capabilities", capabilitiesNode)
-    .addNode("workflow",     workflowNode)
+    .addNode("router",            routerNode)
+    .addNode("supervisor",        supervisorNode)
+    .addNode("slack",             slackAgentNode)
+    .addNode("web",               webAgentNode)
+    .addNode("mcp",               mcpAgentNode)
+    .addNode("capabilities",      capabilitiesNode)
+    .addNode("workflow",          workflowNode)
+    .addNode("workflow_approval", workflowApprovalNode)
 
     // 入口：先过 router 快速分类，再进 supervisor。
     // 子 agent 完成后回到 supervisor（不是 router）—— 不重复分类。
@@ -141,7 +143,18 @@ export function buildGraph(params: {
     .addEdge("web",          "supervisor")
     .addEdge("mcp",          "supervisor")
     .addEdge("capabilities", "supervisor")
-    .addEdge("workflow",     "supervisor");
+
+    // workflow 动态出边：遇审批点 → workflow_approval；否则（完成/放弃）→ supervisor。
+    .addConditionalEdges(
+      "workflow",
+      (state) => state.next,
+      {
+        workflow_approval: "workflow_approval",
+        supervisor:        "supervisor",
+      }
+    )
+    // 审批节点（interrupt 后）总是路由回 workflow 续跑 / 收尾放弃。
+    .addEdge("workflow_approval", "workflow");
 
   const checkpointer = params.checkpointer ?? buildCheckpointer();
   return graph.compile({ checkpointer });

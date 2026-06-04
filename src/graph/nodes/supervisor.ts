@@ -74,7 +74,12 @@ const REPLY_GUARDRAILS = `
 //
 // ----------------------------------------------------------------
 
-export const SUB_AGENTS: Record<Exclude<SubAgentName, "__end__">, string> = {
+// SUB_AGENTS 只列 supervisor 可【选择】的子 agent：排除 __end__、内部循环节点
+// workflow_approval、以及 supervisor 自身（workflow 完成后回 supervisor 的路由值）。
+export const SUB_AGENTS: Record<
+  Exclude<SubAgentName, "__end__" | "workflow_approval" | "supervisor">,
+  string
+> = {
   slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
   web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",

@@ -10,12 +10,15 @@ import type { BaseMessage } from "@langchain/core/messages";
  * 新增 Agent 时在这里添加对应名称，并在 graph/index.ts 注册节点。
  */
 export type SubAgentName =
-  | "slack"        // Slack ReAct Agent
-  | "web"          // Web Search ReAct Agent（待接入）
-  | "mcp"          // MCP Tools ReAct Agent（待接入）
-  | "capabilities" // 自省节点：列出当前真实可用的能力（tools + integrations）
-  | "workflow"     // 通用多阶段工作流调度器（按 recipe 跑 stage + 人工审批）
-  | "__end__";     // 直接回复，无需子 Agent
+  | "slack"            // Slack ReAct Agent
+  | "web"              // Web Search ReAct Agent（待接入）
+  | "mcp"              // MCP Tools ReAct Agent（待接入）
+  | "capabilities"     // 自省节点：列出当前真实可用的能力（tools + integrations）
+  | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
+  | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
+                       // 让 interrupt 前的 stage 产出已落盘、resume 不重跑）
+  | "supervisor"       // workflow 完成/放弃后回 supervisor 整合结果（workflow 出边用）
+  | "__end__";         // 直接回复，无需子 Agent
 
 /**
  * 路由意图 —— router 节点（在 supervisor 之前）的产出。
@@ -38,9 +41,11 @@ export type RouteIntent = "chat" | "tool" | "workflow" | "capabilities" | "unkno
  */
 export interface WorkflowProgress {
   recipe: string;          // 用的 recipe 名
-  phase: "running" | "awaiting_approval" | "running_after_approval" | "done" | "aborted";
+  phase: "awaiting_approval" | "running_after_approval" | "aborted";
   requirement: string;     // 用户原始需求
+  cwd: string;             // 目标仓库（按频道解析一次，落盘；approval 节点 abort 时复用，不重算）
   plan?: string;           // isPlan stage 的产出（已确认的计划）
+  pendingStageId?: string; // 正等待审批的 stage id（approval 节点据此构造提示）
   lastStageOutput?: string;// 最近一个 stage 的输出
   snapshot?: string;       // 最近一次 workspace 快照（如 git diff）
   outputs: Record<string, string>; // 各 stage 的输出累积（stageId → output）

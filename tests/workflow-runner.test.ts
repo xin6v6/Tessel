@@ -42,21 +42,43 @@ mock.module("@langchain/langgraph", () => ({
   interrupt: () => interruptResume.value,
 }));
 
-const { buildWorkflowRunnerNode } = await import("../src/graph/nodes/workflow-runner.ts");
+const { buildWorkflowRunnerNode, buildWorkflowApprovalNode } = await import("../src/graph/nodes/workflow-runner.ts");
 const { recipeByTag, workflowAgentDescription } = await import("../src/workflows/recipe-store.ts");
 
 import { HumanMessage } from "@langchain/core/messages";
 import { runWithContext } from "../src/observability/context.ts";
+import type { GraphStateType } from "../src/graph/state.ts";
 
-function freshState(text: string) {
+function freshState(text: string): GraphStateType {
   return {
     messages: [new HumanMessage(text)],
-    next: "workflow" as const,
-    intent: "workflow" as const,
+    next: "workflow",
+    intent: "workflow",
     subAgentResult: "",
     finalReply: "",
     workflowProgress: null,
   };
+}
+
+// 驱动两节点循环（模拟 graph 的 workflow⇄workflow_approval 边）：
+// 反复调 workflow；遇 next==="workflow_approval" 就过 approval 节点（interrupt 已 mock），
+// 把更新后的 workflowProgress 喂回 workflow，直到回 supervisor。
+async function drive(initial: GraphStateType) {
+  const wfNode = buildWorkflowRunnerNode();
+  const apNode = buildWorkflowApprovalNode();
+  let state = initial;
+  let out: Partial<GraphStateType> = {};
+  for (let i = 0; i < 20; i++) {
+    out = await wfNode(state);
+    state = { ...state, ...out };
+    if (out.next === "workflow_approval") {
+      const apOut = await apNode(state);
+      state = { ...state, ...apOut };
+      continue;
+    }
+    break; // next === "supervisor"（完成/放弃）
+  }
+  return out;
 }
 
 const ctx = { sessionId: "s", source: "cli" as const, externalId: "tester", userId: "cli:tester", channel: "Ctest" };
@@ -101,8 +123,7 @@ describe("workflow runner — happy path", () => {
     enqueue("review", "RESULT: PASS");
     interruptResume.value = { approved: true };
 
-    const node = buildWorkflowRunnerNode();
-    const out = await runWithContext(ctx, () => node(freshState("改个 bug")));
+    const out = await runWithContext(ctx, () => drive(freshState("改个 bug")));
 
     const order = stageCalls.map((c) => c.stage);
     expect(order).toEqual(["requirement", "code", "test", "review"]);
@@ -110,12 +131,24 @@ describe("workflow runner — happy path", () => {
     expect(out.subAgentResult).toContain("已推送");
   });
 
+  it("requirement 不因审批 resume 而重跑（只跑一次）", async () => {
+    // 回归：拆节点前，interrupt resume 会重入 workflow 节点、重跑 requirement。
+    enqueue("requirement", "计划：改 foo");
+    enqueue("test", "RESULT: PASS");
+    enqueue("review", "RESULT: PASS");
+    interruptResume.value = { approved: true };
+
+    await runWithContext(ctx, () => drive(freshState("改个 bug")));
+
+    const reqRuns = stageCalls.filter((c) => c.stage === "requirement").length;
+    expect(reqRuns).toBe(1); // 关键：只跑一次
+  });
+
   it("aborts when user rejects at approval", async () => {
     enqueue("requirement", "计划：改 foo");
     interruptResume.value = { approved: false };
 
-    const node = buildWorkflowRunnerNode();
-    const out = await runWithContext(ctx, () => node(freshState("改个 bug")));
+    const out = await runWithContext(ctx, () => drive(freshState("改个 bug")));
 
     expect(stageCalls.map((c) => c.stage)).toEqual(["requirement"]);
     expect(abortCalled).toBe(true);
@@ -131,8 +164,7 @@ describe("workflow runner — retry on test fail", () => {
     enqueue("review", "RESULT: PASS");
     interruptResume.value = { approved: true };
 
-    const node = buildWorkflowRunnerNode();
-    const out = await runWithContext(ctx, () => node(freshState("改个 bug")));
+    const out = await runWithContext(ctx, () => drive(freshState("改个 bug")));
 
     const order = stageCalls.map((c) => c.stage);
     // 期望：requirement, code, test(fail), code(retry), test(pass), review
