@@ -18,6 +18,20 @@ export type SubAgentName =
   | "__end__";     // 直接回复，无需子 Agent
 
 /**
+ * 路由意图 —— router 节点（在 supervisor 之前）的产出。
+ *
+ *   chat     纯对话，不需要工具 → supervisor 直接回复
+ *   tool     需要调用某个工具 agent → supervisor 走 snapshot 选具体 agent
+ *   workflow 多阶段任务（含审批）→ supervisor 直奔 workflow runner
+ *   unknown  router 未给出结论（被绕过 / 出错）→ supervisor 回退自带的意图分类
+ *
+ * 把"分类"从 supervisor 拆到前置 router：router 可用更快的小模型 +
+ * 零成本规则快路径，supervisor 只负责"读结论 + 整合子 agent 输出"。
+ * 加 `unknown` 兜底 = router 即便失效，supervisor 仍能独立工作。
+ */
+export type RouteIntent = "chat" | "tool" | "workflow" | "unknown";
+
+/**
  * Workflow Runner 的进度快照（落进 GraphState，随 checkpointer 持久化）。
  * 用于 interrupt 审批后恢复时跳过已完成的 stage —— 不重跑需求分析等昂贵步骤。
  */
@@ -56,6 +70,13 @@ export const GraphState = Annotation.Root({
   next: Annotation<SubAgentName>({
     reducer: (_, next) => next,
     default: () => "__end__",
+  }),
+
+  // 前置 router 的分类结论（supervisor 读后消费、重置回 "unknown"）。
+  // "unknown" = router 未定案，supervisor 回退自带意图分类。
+  intent: Annotation<RouteIntent>({
+    reducer: (_, intent) => intent,
+    default: () => "unknown",
   }),
 
   subAgentResult: Annotation<string>({
