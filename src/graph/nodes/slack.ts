@@ -1,8 +1,7 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
-import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import type { LLMClient } from "../../llm/client.ts";
+import { humanMsg, systemMsg, isHuman, isTool, fromLangChain, type Message } from "../../llm/messages.ts";
+import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
 import { createLogger } from "../../observability/logger.ts";
@@ -23,117 +22,102 @@ const FinalAnswerSchema = z.object({
     ),
 });
 
+// FinalAnswerSchema 对应的 JSON Schema（function calling 的 parameters）。
+// 与上面 zod schema 手工对齐 —— zod 负责校验返回，这份负责告诉模型结构。
+const FINAL_ANSWER_PARAMS = {
+  type: "object",
+  properties: {
+    displayMessage: { type: "string", description: "给用户的最终回复，支持 Slack mrkdwn / 表格 / 列表。不含内部推理 / <think>。" },
+    status: { type: "string", enum: ["ok", "error", "needs_clarification"], description: "ok=成功；error=失败；needs_clarification=信息不全。" },
+  },
+  required: ["displayMessage", "status"],
+};
+
 // ----------------------------------------------------------------
 // Slack 子 Agent 节点
 // ----------------------------------------------------------------
 
 /**
- * 将 ToolRegistry 中的 Slack 工具转换为 LangChain Tool 格式，
- * 然后用 createReactAgent 构建一个独立的 ReAct Agent。
+ * 把 ToolRegistry 中的 Slack 工具转成 ReactTool，用 runReactAgent 跑 ReAct 循环。
  *
  * 节点行为：
  * 1. 从 state.messages 取出最新的用户意图
- * 2. 用 ReAct 循环调用 Slack 工具完成任务
- * 3. 把执行结果写入 state.subAgentResult，交还给 supervisor
+ * 2. ReAct 循环调用 Slack 工具完成任务
+ * 3. 第二阶段把输出收敛成结构化成稿（invokeStructured），写 finalReply
  */
-export function buildSlackAgentNode(llm: ChatOpenAI, toolRegistry: ToolRegistry) {
-  // 把 ToolRegistry 里的 Slack 工具转成 LangChain tool() 格式
-  const langchainTools = toolRegistry
+export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry) {
+  // ToolRegistry 的 slack_* 工具 → ReactTool（直接用 JSON Schema，不再过 zod）
+  const tools: ReactTool[] = toolRegistry
     .definitions()
     .filter((def) => def.name.startsWith("slack_"))
-    .map((def) =>
-      tool(
-        async (input: Record<string, unknown>) => {
-          const results = await toolRegistry.execute([
-            { toolCallId: crypto.randomUUID(), name: def.name, input },
-          ]);
-          return results[0]?.output ?? "";
-        },
-        {
-          name: def.name,
-          description: def.description,
-          schema: z.object(
-            buildZodSchema(def.parameters as unknown as ParameterSchema)
-          ),
-        }
-      )
-    );
+    .map((def) => ({
+      name: def.name,
+      description: def.description,
+      parameters: def.parameters,
+      handler: async (input: Record<string, unknown>) => {
+        const results = await toolRegistry.execute([
+          { toolCallId: crypto.randomUUID(), name: def.name, input },
+        ]);
+        return results[0]?.output ?? "";
+      },
+    }));
 
-  // 用 LangGraph prebuilt ReAct Agent 构建子 Agent
-  const slackAgent = createReactAgent({
-    llm,
-    tools: langchainTools,
-    prompt:
-      "你是一个 Slack 专项助手。你只负责执行 Slack 相关操作。" +
-      "根据用户的需求，使用可用的 Slack 工具完成任务。" +
-      "完成后，用简洁的中文总结你做了什么以及结果。",
-  });
-
-  // 第二阶段：把 ReAct 输出收敛成结构化「成稿回复」。
-  // supervisor 看到 finalReply 非空时会直接转发，不再 LLM 重写——
-  // 因此 displayMessage 必须就是最终给用户看的那段文本。
-  const finalizer = llm.withStructuredOutput(FinalAnswerSchema, {
-    name: "submit_final_answer",
-  });
+  const SYSTEM_PROMPT =
+    "你是一个 Slack 专项助手。你只负责执行 Slack 相关操作。" +
+    "根据用户的需求，使用可用的 Slack 工具完成任务。" +
+    "完成后，用简洁的中文总结你做了什么以及结果。";
 
   return async function slackAgentNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
 
-    const lastUserMsg = [...state.messages]
-      .reverse()
-      .find((m) => m instanceof HumanMessage);
+    // 迁移期：state.messages 仍是 langchain BaseMessage，转原生再用。
+    const native = state.messages.map((m) => fromLangChain(m as object));
+    const lastUserMsg = [...native].reverse().find(isHuman);
 
     if (!lastUserMsg) {
       logger.warn("no human message found, skipping");
       return { subAgentResult: "未找到用户消息，无法执行 Slack 操作。" };
     }
 
-    const inputSnippet = typeof lastUserMsg.content === "string"
-      ? lastUserMsg.content.slice(0, 120)
-      : "";
-
+    const userInputText = lastUserMsg.content;
+    const inputSnippet = userInputText.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
     try {
-      const result = await slackAgent.invoke({
-        messages: [lastUserMsg],
+      const result = await runReactAgent({
+        llm,
+        tools,
+        systemPrompt: SYSTEM_PROMPT,
+        messages: [humanMsg(userInputText)],
       });
 
       const lastMsg = result.messages.at(-1);
-      const reactOutput =
-        typeof lastMsg?.content === "string"
-          ? lastMsg.content
-          : JSON.stringify(lastMsg?.content ?? "");
+      const reactOutput = lastMsg?.content ?? "";
+      const toolCallCount = result.messages.filter(isTool).length;
 
-      // 统计本次 ReAct 循环中工具调用次数
-      const toolCallCount = result.messages.filter(
-        (m) => m instanceof ToolMessage
-      ).length;
-
-      // 收敛阶段：让 LLM 把 ReAct 自由文本 + 工具结果，整理成一段
-      // 「直接发给用户」的成稿。Schema 强制输出 displayMessage，避免
-      // <think>/内部推理混入。
-      const userInputText = typeof lastUserMsg.content === "string"
-        ? lastUserMsg.content
-        : JSON.stringify(lastUserMsg.content);
-
+      // 收敛阶段：把 ReAct 草稿整理成「直接发给用户」的成稿。function calling
+      // 强制输出 displayMessage，避免 <think>/内部推理混入。
       let finalReply = "";
       let status: "ok" | "error" | "needs_clarification" = "ok";
 
       try {
-        const finalized = await finalizer.invoke([
-          new SystemMessage(
+        const finalizeMessages: Message[] = [
+          systemMsg(
             "你正在为一个 Slack 专项子 Agent 输出最终回复。" +
             "下面会给你：1) 用户的原始问题；2) ReAct 阶段产生的草稿/工具执行总结。" +
             "请基于这些信息，写一段直接发给用户的中文回复（可含表格 / 列表 / Slack mrkdwn）。" +
             "硬性要求：不要包含 <think>、<thinking> 等内部推理标签；不要解释你内部用了哪个工具；不要编造草稿里没有的事实。",
           ),
-          new HumanMessage(
+          humanMsg(
             `用户原始问题：\n${userInputText}\n\nReAct 阶段草稿（含工具执行总结）：\n${reactOutput}`,
           ),
-        ]);
+        ];
+        const finalized = await llm.invokeStructured(finalizeMessages, FinalAnswerSchema, {
+          name: "submit_final_answer",
+          parameters: FINAL_ANSWER_PARAMS,
+        });
         finalReply = finalized.displayMessage;
         status = finalized.status;
       } catch (err) {
@@ -160,42 +144,4 @@ export function buildSlackAgentNode(llm: ChatOpenAI, toolRegistry: ToolRegistry)
       return { subAgentResult: `Slack 操作失败：${msg}`, finalReply: "" };
     }
   };
-}
-
-// ----------------------------------------------------------------
-// 工具函数：JSON Schema → Zod Schema（仅支持常见类型）
-// ----------------------------------------------------------------
-
-interface ParameterSchema {
-  type: string;
-  properties?: Record<string, { type: string; description?: string }>;
-  required?: string[];
-}
-
-function buildZodSchema(
-  params: ParameterSchema
-): Record<string, z.ZodTypeAny> {
-  const shape: Record<string, z.ZodTypeAny> = {};
-  const props = params.properties ?? {};
-  const required = new Set(params.required ?? []);
-
-  for (const [key, prop] of Object.entries(props)) {
-    let fieldSchema: z.ZodTypeAny;
-    switch (prop.type) {
-      case "number":
-        fieldSchema = z.number();
-        break;
-      case "boolean":
-        fieldSchema = z.boolean();
-        break;
-      default:
-        fieldSchema = z.string();
-    }
-    if (prop.description) {
-      fieldSchema = fieldSchema.describe(prop.description);
-    }
-    shape[key] = required.has(key) ? fieldSchema : fieldSchema.optional();
-  }
-
-  return shape;
 }

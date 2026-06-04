@@ -1,8 +1,6 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { HumanMessage, ToolMessage } from "@langchain/core/messages";
-import { tool } from "@langchain/core/tools";
-import { z } from "zod";
+import type { LLMClient } from "../../llm/client.ts";
+import { humanMsg, isHuman, isTool, fromLangChain } from "../../llm/messages.ts";
+import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("web-agent");
@@ -20,60 +18,50 @@ const logger = createLogger("web-agent");
 // ----------------------------------------------------------------
 
 /** 占位工具 —— 提示用户该能力尚未接入 */
-const stubSearchTool = tool(
-  async ({ query }: { query: string }) => {
-    logger.warn(`[web-agent] Web Search 尚未接入，查询被忽略: "${query}"`);
+const stubSearchTool: ReactTool = {
+  name: "web_search",
+  description: "搜索互联网获取实时信息",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "搜索关键词" } },
+    required: ["query"],
+  },
+  handler: async (input) => {
+    logger.warn(`[web-agent] Web Search 尚未接入，查询被忽略: "${String(input.query)}"`);
     return "Web Search 功能尚未接入，请联系管理员配置。";
   },
-  {
-    name: "web_search",
-    description: "搜索互联网获取实时信息",
-    schema: z.object({
-      query: z.string().describe("搜索关键词"),
-    }),
-  }
-);
+};
 
-export function buildWebAgentNode(llm: ChatOpenAI) {
-  const webAgent = createReactAgent({
-    llm,
-    tools: [stubSearchTool],
-    prompt:
-      "你是一个 Web 搜索助手。根据用户需求执行网络搜索，" +
-      "总结搜索结果并给出清晰的回答。",
-  });
+export function buildWebAgentNode(llm: LLMClient) {
+  const SYSTEM_PROMPT =
+    "你是一个 Web 搜索助手。根据用户需求执行网络搜索，" +
+    "总结搜索结果并给出清晰的回答。";
 
   return async function webAgentNode(
     state: GraphStateType
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
 
-    const lastUserMsg = [...state.messages]
-      .reverse()
-      .find((m) => m instanceof HumanMessage);
+    const native = state.messages.map((m) => fromLangChain(m as object));
+    const lastUserMsg = [...native].reverse().find(isHuman);
 
     if (!lastUserMsg) {
       logger.warn("no human message found, skipping");
       return { subAgentResult: "未找到用户消息，无法执行搜索。" };
     }
 
-    const inputSnippet = typeof lastUserMsg.content === "string"
-      ? lastUserMsg.content.slice(0, 120)
-      : "";
-
+    const inputSnippet = lastUserMsg.content.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
     try {
-      const result = await webAgent.invoke({ messages: [lastUserMsg] });
-      const lastMsg = result.messages.at(-1);
-      const output =
-        typeof lastMsg?.content === "string"
-          ? lastMsg.content
-          : JSON.stringify(lastMsg?.content ?? "");
-
-      const toolCallCount = result.messages.filter(
-        (m) => m instanceof ToolMessage
-      ).length;
+      const result = await runReactAgent({
+        llm,
+        tools: [stubSearchTool],
+        systemPrompt: SYSTEM_PROMPT,
+        messages: [humanMsg(lastUserMsg.content)],
+      });
+      const output = result.messages.at(-1)?.content ?? "";
+      const toolCallCount = result.messages.filter(isTool).length;
 
       logger.info({
         durationMs: Date.now() - nodeStart,

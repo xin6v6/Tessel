@@ -1,6 +1,5 @@
 import { StateGraph, END, START } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
-import { ChatOpenAI } from "@langchain/openai";
 import { LLMClient } from "../llm/client.ts";
 import { GraphState } from "./state.ts";
 import { buildCheckpointer } from "./checkpointer.ts";
@@ -58,17 +57,7 @@ export function buildGraph(params: {
   const mainModel = params.model ?? process.env.LLM_MODEL ?? "gpt-4o";
   const mainTimeout = Number(process.env.LLM_TIMEOUT_MS ?? 60000);
 
-  // 仍给未迁移的子 agent（slack/web/mcp，PR3 处理）用的 ChatOpenAI。
-  const llm = new ChatOpenAI({
-    model: mainModel,
-    apiKey,
-    configuration: { baseURL },
-    temperature: 0.3,
-    timeout: mainTimeout,
-    maxRetries: 1,
-  });
-
-  // 已迁移到原生 LLMClient 的节点（supervisor）用的主模型 client。
+  // 主模型 client —— supervisor + slack/web/mcp 子 agent 共用。
   const mainClient = new LLMClient({
     model: mainModel,
     apiKey,
@@ -111,9 +100,9 @@ export function buildGraph(params: {
   // 构建各节点
   const routerNode        = buildRouterNode({ routerLLM });
   const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations);
-  const slackAgentNode    = buildSlackAgentNode(llm, params.toolRegistry);
-  const webAgentNode      = buildWebAgentNode(llm);
-  const mcpAgentNode      = buildMcpAgentNode(llm);
+  const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry);
+  const webAgentNode      = buildWebAgentNode(mainClient);
+  const mcpAgentNode      = buildMcpAgentNode(mainClient);
   const capabilitiesNode  = buildCapabilitiesNode(
     params.toolRegistry,
     params.integrations,
