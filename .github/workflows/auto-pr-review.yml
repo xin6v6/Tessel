@@ -100,12 +100,27 @@ jobs:
               ]
             }')
 
-          response=$(curl -s https://api.deepseek.com/chat/completions \
+          # curl 加重试 + 超时：DeepSeek API 偶发网络抖动（实测 exit 56 = 接收失败）
+          # 会让整个 job 在 set -e 下直接挂、PR 卡 BLOCKED。这里：
+          #   --retry 3 + --retry-all-errors：瞬时故障自动重试（指数退避）
+          #   --max-time 120：单次封顶，避免挂死
+          #   || true + 显式判空：curl 仍失败时不让 set -e 杀掉 step，走降级分支
+          response=$(curl -sS --max-time 120 --retry 3 --retry-delay 2 --retry-all-errors \
+            https://api.deepseek.com/chat/completions \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$payload")
+            -d "$payload") || response=""
 
           echo "DeepSeek response: $response"
+
+          # API 不可用（重试后仍空）→ 降级：标记 unavailable，不自动合并、也不
+          # 误判为 REQUEST_CHANGES（那会卡死 PR）。由 Post review 提示人工处理。
+          if [[ -z "$response" ]] || ! echo "$response" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+            echo "⚠️ DeepSeek API 不可用（重试后仍失败）——跳过自动审查，需人工处理。"
+            echo "approved=false" >> $GITHUB_OUTPUT
+            echo "unavailable=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           summary=$(echo "$response" | python3 -c "
           import sys, json
@@ -146,7 +161,23 @@ jobs:
           APPROVED: ${{ steps.review.outputs.approved }}
           TOO_LARGE: ${{ steps.diff.outputs.too_large }}
           DIFF_SIZE: ${{ steps.diff.outputs.diff_size }}
+          UNAVAILABLE: ${{ steps.review.outputs.unavailable }}
         run: |
+          if [[ "$UNAVAILABLE" == "true" ]]; then
+            # DeepSeek API 重试后仍不可用：发评论提示人工，不 request-changes
+            # （避免把"服务抖动"误记成"代码有问题"卡死 PR）。
+            body="## ⚠️ DeepSeek 代码审查 — 暂不可用
+
+          调用 DeepSeek API 失败（重试后仍未成功，通常是网络/服务抖动），**本次未做自动审查、不会自动合并**。
+
+          可重跑此 workflow（push 一个空 commit 或在 Actions 里 re-run），或请人工审核后手动合并。
+
+          ---
+          *🤖 自动审查容错：服务不可用不阻塞，但也不放行*"
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"
+            exit 0
+          fi
+
           if [[ "$TOO_LARGE" == "true" ]]; then
             # diff 过大：跳过了审查，明确不自动合并，提示拆分 / 人工审。
             body="## ⚠️ DeepSeek 代码审查 — 已跳过
