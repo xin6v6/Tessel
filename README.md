@@ -8,48 +8,82 @@
 Slack (@mention / DM)
         │
         ▼
-   Supervisor Agent              ← 路由决策 + 结果整合
+     Router                       ← 前置快速分类（chat / tool / workflow / capabilities）
         │
-   ┌────┼────┬─────────────┐
-   ▼    ▼    ▼             ▼
- Slack  Web  MCP       Capabilities  ← 子节点（ReAct or 自省）
- Agent Agent Agent
-   │    │    │             │
-   ▼    ▼    ▼             ▼
- Slack Search MCP      运行时工具
- Tools  APIs Servers   元数据快照
+        ▼
+   Supervisor                     ← 消费 intent + 选 agent + 结果整合
+        │
+   ┌────┼────┬─────────────┬──────────────┐
+   ▼    ▼    ▼             ▼              ▼
+ Slack  Web  MCP       Capabilities    Workflow ⇄ Workflow
+ Agent Agent Agent      (自省)          (跑 stage)  Approval (审批 interrupt)
+   │    │    │             │              │
+   ▼    ▼    ▼             ▼              ▼
+ Slack Search MCP      运行时工具     coding recipe
+ Tools  APIs Servers   元数据快照     （需求→编程→测试→审核→提交）
 ```
 
-- **Supervisor**：**两阶段路由** + 结果整合（见下）
+- **Router**：前置快速分类节点，把消息判成 `chat / tool / workflow / capabilities` 写进 `state.intent`，让 supervisor 跳过自己那一轮意图分类。可配独立的快模型（`ROUTER_MODEL`）提速，见下。
+- **Supervisor**：消费 router 的 intent + 选具体 agent + 结果整合（见下）
 - **Slack Agent**：执行所有 Slack 操作（发消息、查历史、搜索等）
 - **Web Agent**：实时网络搜索（占位 stub，未接入搜索 API）
 - **MCP Agent**：通过 MCP 协议接入外部服务（占位 stub）
 - **Capabilities**：自省节点，根据运行时已注册的 integrations/tools 生成能力清单
+- **Workflow / Workflow Approval**：多阶段任务调度（按 recipe 跑 stage + 人工审批）。拆成两个节点——`workflow` 跑 stage、遇审批点落盘后交给 `workflow_approval` 做 interrupt，避免审批 resume 时重跑昂贵 stage（见下）。
 
-### Supervisor 路由（两阶段）
+### 路由（Router 前置分类 + Supervisor 选 agent）
+
+入口是 `START → router → supervisor`。分类由前置的 **Router** 节点负责，Supervisor 只消费结论 + 选具体 agent + 整合结果。
 
 ```
 用户消息
-  ↓ 第一轮 LLM：意图分类（纯文本三选一）
-  ├─ chat              → 直接 LLM 回复（一次 LLM）
-  ├─ list_capabilities → 路由到 Capabilities 节点（渲染 Markdown 给用户）
-  └─ tool_routing      → 第二轮：从能力快照中挑 agent
-                           ├─ 选具体 agent → 路由过去
-                           └─ none         → "我没有这个工具" 兜底
+  ↓ Router：三层分类，写 state.intent
+  │   Tier 0  零成本规则（不调 LLM）：命中 recipe tag / workflow 动词 + 白名单 → workflow
+  │   Tier 1  一次 LLM 分类：chat / tool / workflow / capabilities（temperature:0 + 短超时）
+  │   兜底     LLM 出错/超时 → chat（最安全）
+  ↓ Supervisor 消费 intent
+  ├─ chat         → 直接 LLM 回复
+  ├─ capabilities → 路由到 Capabilities 节点（渲染真实能力清单）
+  ├─ workflow     → 白名单校验 → 直奔 Workflow 节点（非白名单降级为 tool）
+  ├─ tool         → 从能力快照中挑具体 agent
+  │                   ├─ 选中 → 路由过去
+  │                   └─ none → "我没有这个工具" 兜底
+  └─ unknown      → router 被绕过/出错时，回退到 supervisor 自带的意图分类
 ```
 
 设计要点：
+- **分类前置到 Router**：router 可配一个比主模型更快的小模型（`ROUTER_MODEL` / `ROUTER_BASE_URL` / `ROUTER_API_KEY`），默认还会注入"关思考"参数提速（`ROUTER_THINKING=off`）。不配则回退主模型，功能不变。
+- **Router 的 Tier 0 零成本规则**：命中 recipe tag 或强 workflow 动词（"改代码 / 提 PR / 部署"等）且用户在白名单 → 直接判 `workflow`，0 延迟、不调 LLM。
+- **Supervisor 不依赖 Router 也能工作**：router intent 为 `unknown`（被绕过或出错）时，supervisor 回退到自带的意图分类 LLM。
 - **能力快照在启动时算一次**缓存在 supervisor 闭包里。每次路由不重新扫描 IntegrationRegistry。
-- **第二轮的候选集只包含 ready 且非 stub 的 agent**。Stub 节点（web/mcp）在路由 prompt 里被打 `[STUB · 不要选]` 标记，LLM 物理上无法把任务派给它们。
+- **tool 路由的候选集只包含 ready 且非 stub 的 agent**。Stub 节点（web/mcp）在路由 prompt 里被打 `[STUB · 不要选]` 标记，LLM 物理上无法把任务派给它们。
 - **平台锁定保留**：source=slack 只能选 slack agent，避免用户消息里偶然出现"telegram"被路由错。
-- **none 兜底**：候选集空 / LLM 找不到合适 agent，supervisor 直接回复"我目前没有可以帮你完成这件事的工具",**不会**让 LLM 凭空假装能做。
-- **纯对话不付两轮代价**：只有 `tool_routing` 分类才走第二轮 LLM；`chat` 和 `list_capabilities` 各只一次。
+- **workflow 白名单纵深防御**：router 出口降级 + supervisor 二次校验 + workflow runner 内部校验，三层一致，非白名单用户到不了 workflow。
+- **none 兜底**：候选集空 / LLM 找不到合适 agent，supervisor 直接回复"我目前没有可以帮你完成这件事的工具"，**不会**让 LLM 凭空假装能做。
 
 ### 结果通道
 
 子节点通过两条 state 通道把结果交给 Supervisor：
 - `finalReply` —— 已成稿、可直接发给用户的回复（含表格、列表等）。Supervisor 看到后**原样转发**，不再 LLM 重写，避免子节点已渲染的结构化内容被改写。
 - `subAgentResult` —— ReAct 原始输出。仅当 `finalReply` 为空时，Supervisor 会用一次 LLM 整合成自然语言回复（兜底路径）。
+
+### Workflow（多阶段任务 + 人工审批）
+
+`workflow` 节点按 **recipe** 跑多阶段开发任务（当前内置 `coding`：需求分析 → 编程 → 测试 → 审核 → 提交 PR），在需求阶段后停下来等人工审批。
+
+```
+workflow            跑 recipe.stages；遇审批 plan stage → 进度落盘 state.workflowProgress
+                    → 路由到 workflow_approval（此时 plan 产出已持久化）
+workflow_approval   只做 interrupt 等人工确认 → 把 approved 写回 phase → 路由回 workflow
+workflow（重入）     从 workflowProgress 恢复，已完成 stage 已在 outputs 里 → 跳过，续跑 / 放弃
+```
+
+设计要点：
+- **按频道选目标仓库**：在哪个 Slack 频道 @bot，就操作哪个仓库。映射由 `CODING_REPOS="<channelId>:<repoPath>,..."` 配置；`RequestContext.channel` 带着频道 id，runner 用 `repoForChannel(channel)` 选仓库。**没映射的频道（含 DM）直接拒绝，不回退默认仓库** —— 避免在错频道误改。
+- **拆成两个节点避免重跑**：LangGraph 的 `interrupt()` 靠抛异常暂停，节点中途的 state 不落盘、resume 时节点从头重跑。若在同一节点里"跑需求分析 → interrupt"，审批后会**重跑需求分析**（实测 ~$0.5-0.8、2-3 分钟）。拆开后 `workflow` 跑完正常 return 落盘，`workflow_approval` 只 interrupt，resume 不重跑。
+- **审批跨消息恢复**：interrupt 暂停时进度落进 checkpointer。下一条用户消息进来，`main.ts` 判定该 thread 有挂起的审批中断 → 用 `Command({ resume })` 恢复（"同意"则继续，否则放弃）。
+- **白名单**：仅 `CODING_ALLOWLIST` 里的 userId 可触发。
+- **失败重试 / 收尾**：stage 失败按 `recipe.retryTo` + `maxRetries` 回退重跑；全通过调 `recipe.finalize`（coding = git commit+push）；放弃 / 失败调 `recipe.onAbort`（coding = `git reset --hard` 清理工作区，**注意别让它指向你正在手改的仓库**）。
 
 ## 快速开始
 

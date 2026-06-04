@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import {
   X, User, Bot, BrainCircuit, MessageSquare, Search, Wrench, Settings2,
   Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck, ThumbsUp,
-  GitBranch, Database, ScrollText, ChevronRight, Code2,
+  GitBranch, Database, ScrollText, ChevronRight, Code2, Split,
 } from 'lucide-react';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ import {
 
 type NodeType =
   | 'entry' | 'exit' | 'supervisor' | 'agent' | 'tool' | 'state'
-  | 'runner' | 'stage' | 'approval';
+  | 'runner' | 'stage' | 'approval' | 'router';
 
 interface GNode {
   id: string;
@@ -82,20 +82,43 @@ Checkpointer（data/checkpoints.db）
 
 文件  src/graph/state.ts、src/graph/checkpointer.ts` },
 
+  // L1 — Router（前置快速分类）
+  { id: 'router', type: 'router', label: 'Router', sub: '前置快速分类',
+    layer: 1, col: 2, Icon: Split,
+    prompt:
+`前置快速分类节点（supervisor 之前）
+
+只做一件事：把消息判成 chat / tool / workflow / capabilities，
+写进 state.intent，让 supervisor 跳过自己那一轮意图分类。
+
+三层（最快的先跑）
+  Tier 0  零成本规则（不调 LLM）：命中 recipe tag / 强 workflow 动词
+          + 用户在白名单 → workflow，0 延迟。
+  Tier 1  一次 LLM 分类：chat / tool / workflow / capabilities
+          temperature:0 + 短超时；出错/超时 → chat（最安全）。
+
+提速
+  可配独立的快小模型 ROUTER_MODEL（不配回退主模型），默认注入
+  thinking:{disabled} 关思考。实测 DeepSeek v4-flash 关思考 ~0.9s。
+
+文件  src/graph/nodes/router.ts` },
+
   // L2 — Supervisor
-  { id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '对话 / 路由 / 整合',
+  { id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '消费 intent / 选 agent / 整合',
     layer: 2, col: 4, Icon: BrainCircuit,
     prompt:
 `核心调度 Agent —— 保持纯粹
 
-职责（只这三件，不掺业务细节）
-  · 意图分类（chat / list_capabilities / tool_routing）
-  · 第二轮按能力快照选 sub-agent
+职责
+  · 消费 Router 写的 state.intent：
+      chat → 直接回复 | capabilities → 自省节点
+      workflow → 白名单校验后直奔 workflow | tool → 按快照选 agent
+  · intent=unknown（router 被绕过/出错）时回退自带意图分类
   · 整合子节点结果 → 最终回复
 
 刻意不做
-  多阶段任务的"分任务 / 判断结果 / 重试"不在这里 ——
-  那是 Workflow Runner 的职责，避免 Supervisor 被污染。
+  分类前置到了 Router；多阶段任务的"分任务 / 判断结果 / 重试"
+  在 Workflow Runner —— 都不在这里，避免 Supervisor 被污染。
 
 文件  src/graph/nodes/supervisor.ts` },
 
@@ -156,12 +179,22 @@ recipe = 一份可复用、可进化的流程配方
 触发
   Supervisor 路由 next = workflow；仅白名单用户放行。
 
+目标仓库 = 按频道选（一频道一项目）
+  CODING_REPOS="<channelId>:<repoPath>,…"，runner 用
+  repoForChannel(ctx.channel) 选仓库。没映射的频道（含 DM）
+  直接拒绝、不回退默认 —— 避免在错频道误改。
+
+拆成两个节点（避免审批 resume 重跑）
+  本节点跑 stage，遇审批 plan stage 就落盘 workflowProgress 并
+  return，交给 workflow_approval 做 interrupt。LangGraph interrupt
+  会让节点 resume 时从头重跑，拆开后 plan 产出已落盘 → 不重跑。
+
 跨后端
   stage sub-agent 底层用 Claude Agent SDK（headless）。
   本地真 Claude；生产 DeepSeek（ANTHROPIC_BASE_URL 切换）。
 
 文件  src/graph/nodes/workflow-runner.ts
-      src/workflows/recipe-store.ts` },
+      src/workflows/recipe-store.ts、src/workflows/repo-map.ts` },
   { id: 'recipes', type: 'state', label: 'Recipe 库', sub: '流程配方 · 可复用',
     layer: 2, col: 6.6, Icon: ClipboardList,
     prompt:
@@ -225,7 +258,7 @@ allowedTools  Read / Glob / Grep
 `Stage · 编程（真实改文件）
 
 allowedTools  Read / Edit / Write / Bash / Glob / Grep
-cwd  CODING_REPO_PATH（锁死）
+cwd  按触发频道选（CODING_REPOS 映射，落盘 workflowProgress.cwd）
 护栏  屏蔽 rm -rf / dd / git push（push 受控自跑，不交 SDK）
 
 产出  codeResult → 回 Runner
@@ -252,20 +285,27 @@ allowedTools  Read / Bash / Glob / Grep
   不过 & retry<2 → 回编程；通过 → 提交（不再二次审批）` },
 
   // L5 — 审批 + 提交
-  { id: 'wf_approval', type: 'approval', label: '需求审批', sub: 'interrupt · 等你确认',
+  { id: 'wf_approval', type: 'approval', label: 'workflow_approval', sub: '独立节点 · interrupt',
     layer: 5, col: 3.4, Icon: ThumbsUp,
     prompt:
-`需求审批（唯一人工审批点 · interrupt）
+`审批节点（唯一人工审批点）—— 独立的 graph 节点
+
+为什么独立成节点（不在 workflow 里 interrupt）
+  LangGraph 的 interrupt() 抛异常暂停，节点中途的 state 不落盘、
+  resume 时节点从头重跑。若在 workflow 节点里"跑需求→interrupt"，
+  审批后会重跑需求分析（~$0.5-0.8）。拆出本节点：workflow 跑完
+  落盘后交给它，它只做 interrupt（无昂贵操作，重入无副作用）。
 
 机制
-  需求 stage 后 Runner interrupt()，图暂停并落盘 checkpointer，
-  plan 经 Supervisor 发回 Slack。
+  workflow 落盘 workflowProgress(phase=awaiting_approval) → 本节点
+  interrupt()，图暂停、plan 经 Supervisor 发回 Slack。
 
 恢复（跨两条 Slack 消息）
-  你下一条消息：含"同意/确认/yes" → resume(approved) → 进编程；
-  否则 → resume(rejected) → 放弃任务。
+  你下一条消息：含"同意/确认/yes" → resume(approved) → 路由回
+  workflow 续跑（已完成 stage 跳过）；否则 → aborted → 放弃。
 
-文件  src/main.ts（审批恢复）+ workflow-runner.ts（interrupt）` },
+文件  src/graph/nodes/workflow-runner.ts（buildWorkflowApprovalNode）
+      src/main.ts（审批恢复）` },
   { id: 'wf_commit', type: 'stage', label: '提交推送', sub: 'branch + push',
     layer: 5, col: 7.3, Icon: GitBranch,
     prompt:
@@ -283,8 +323,9 @@ allowedTools  Read / Bash / Glob / Grep
 // ─── 边 ──────────────────────────────────────────────────────────────────────
 
 const EDGES: GEdge[] = [
-  // 主流程纵向
-  { from: 'slack_in',   to: 'supervisor', kind: 'flow',   label: 'invoke' },
+  // 主流程纵向：入口先过 router 快速分类，再进 supervisor
+  { from: 'slack_in',   to: 'router',     kind: 'flow',   label: 'invoke' },
+  { from: 'router',     to: 'supervisor', kind: 'flow',   label: 'intent' },
   { from: 'supervisor', to: 'slack_out',  kind: 'flow',   label: 'next=__end__' },
   { from: 'state',      to: 'supervisor', kind: 'aux',    label: '读写 State' },
 
@@ -308,8 +349,10 @@ const EDGES: GEdge[] = [
   { from: 'workflow', to: 'wf_test',        kind: 'route', label: '③' },
   { from: 'workflow', to: 'wf_review',      kind: 'route', label: '④' },
 
-  // 需求审批 + 提交
-  { from: 'wf_requirement', to: 'wf_approval', kind: 'approval', label: 'interrupt' },
+  // 需求审批：workflow 落盘后交给 workflow_approval（独立节点）interrupt，
+  // 审批通过后路由回 workflow 续跑（已完成 stage 跳过、不重跑）。
+  { from: 'wf_requirement', to: 'wf_approval', kind: 'approval', label: '落盘→审批' },
+  { from: 'wf_approval',    to: 'workflow',    kind: 'return',   label: '同意↩ 续跑' },
   { from: 'wf_review',      to: 'wf_commit',   kind: 'flow',     label: '通过' },
   { from: 'wf_test',        to: 'wf_code',     kind: 'retry',    label: '失败↺' },
   { from: 'wf_review',      to: 'wf_code',     kind: 'retry',    label: '不过↺' },
@@ -328,7 +371,7 @@ function nodeXY(n: GNode): { x: number; y: number } {
 
 const NODE_R: Record<NodeType, number> = {
   entry: 38, exit: 38, supervisor: 54, agent: 44, tool: 36, state: 40,
-  runner: 54, stage: 44, approval: 38,
+  runner: 54, stage: 44, approval: 38, router: 44,
 };
 
 // ─── 配色（扁平、克制）────────────────────────────────────────────────────────
@@ -343,6 +386,7 @@ const FILL: Record<NodeType, string> = {
   runner:     '#0ea5e9',  // sky — 通用调度器
   stage:      '#3b82f6',  // blue — workflow stage
   approval:   '#ec4899',  // pink — 人工
+  router:     '#a855f7',  // purple — 前置分类
 };
 
 const EDGE_COLOR: Record<GEdge['kind'], string> = {
@@ -358,6 +402,7 @@ const EDGE_DASH: Record<GEdge['kind'], string> = {
 };
 
 const LEGEND_NODES = [
+  { c: FILL.router,     t: 'Router（前置分类）' },
   { c: FILL.supervisor, t: 'Supervisor' },
   { c: FILL.agent,      t: 'Sub-Agent' },
   { c: FILL.runner,     t: 'Workflow Runner（通用）' },
@@ -377,6 +422,7 @@ const TYPE_LABEL: Record<NodeType, string> = {
   entry: 'Graph Entry', exit: 'Graph Exit', supervisor: 'Orchestrator',
   agent: 'Sub-Agent', tool: 'Tool', state: 'State / Memory',
   runner: 'Workflow Runner', stage: 'Workflow Stage', approval: 'Human Approval',
+  router: 'Router',
 };
 
 // ─── 正交折线 ─────────────────────────────────────────────────────────────────
