@@ -117,10 +117,16 @@ jobs:
               print('No choices in response. Raw: ' + str(data))
           " 2>/dev/null || echo "Failed to parse response")
 
-          # 取最后一个非空行做精确判定（prompt 要求报告最后一行是 VERDICT）。
-          # 避免松散 grep 命中正文里偶然出现的 "VERDICT: APPROVE" 字样。
-          verdict_line=$(echo "$summary" | grep -E '^\s*VERDICT:' | tail -n1 | tr -d '[:space:]')
-          if [[ "$verdict_line" == "VERDICT:APPROVE" ]]; then
+          # 取最后一行 VERDICT 做判定（prompt 要求报告末行是 VERDICT）。
+          # 注意：模型常给 VERDICT 行套 Markdown 粗体（**VERDICT: APPROVE**）或
+          # 前导空白，所以【不能】锚定行首为 VERDICT/空白——那会漏掉 ** 包裹的行
+          # （历史 bug：APPROVE 被误判成 REQUEST_CHANGES，PR 卡 BLOCKED）。
+          # 这里匹配含 VERDICT: 的行，剥掉所有非字母字符再判，对 **、空格、
+          # 大小写都鲁棒。grep -i + 不锚行首；用 VERDICT 关键词避免误命中正文。
+          verdict_line=$(echo "$summary" | grep -iE 'VERDICT:[[:space:]*]*APPROVE|VERDICT:[[:space:]*]*REQUEST_CHANGES' | tail -n1)
+          verdict_norm=$(echo "$verdict_line" | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z_')
+          # verdict_norm 形如 VERDICTAPPROVE / VERDICTREQUESTCHANGES（已去掉 **、空格、冒号）
+          if [[ "$verdict_norm" == *"APPROVE"* && "$verdict_norm" != *"REQUESTCHANGES"* ]]; then
             echo "approved=true" >> $GITHUB_OUTPUT
           else
             echo "approved=false" >> $GITHUB_OUTPUT
