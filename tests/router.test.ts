@@ -89,6 +89,15 @@ describe("router — Tier 1 LLM classify", () => {
     const out = await runWithContext(allowedCtx, () => node(stateOf("随便聊聊")));
     expect(out.intent).toBe("chat");
   });
+
+  it("'你有什么能力' → capabilities (not chat)", async () => {
+    // 回归：router 以前只分 chat/tool/workflow，"问能力"被判成 chat、
+    // 绕过 capabilities 节点。现在 router 直接产出 capabilities。
+    const { llm } = fakeLLM({ reply: "capabilities" });
+    const node = buildRouterNode({ routerLLM: llm });
+    const out = await runWithContext(allowedCtx, () => node(stateOf("你有什么能力")));
+    expect(out.intent).toBe("capabilities");
+  });
 });
 
 describe("router — failure fallback", () => {

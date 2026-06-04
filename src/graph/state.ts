@@ -20,16 +20,17 @@ export type SubAgentName =
 /**
  * 路由意图 —— router 节点（在 supervisor 之前）的产出。
  *
- *   chat     纯对话，不需要工具 → supervisor 直接回复
- *   tool     需要调用某个工具 agent → supervisor 走 snapshot 选具体 agent
- *   workflow 多阶段任务（含审批）→ supervisor 直奔 workflow runner
- *   unknown  router 未给出结论（被绕过 / 出错）→ supervisor 回退自带的意图分类
+ *   chat         纯对话，不需要工具 → supervisor 直接回复
+ *   tool         需要调用某个工具 agent → supervisor 走 snapshot 选具体 agent
+ *   workflow     多阶段任务（含审批）→ supervisor 直奔 workflow runner
+ *   capabilities 用户问"你能做什么 / 有什么能力" → supervisor 直奔 capabilities 节点
+ *   unknown      router 未给出结论（被绕过 / 出错）→ supervisor 回退自带的意图分类
  *
  * 把"分类"从 supervisor 拆到前置 router：router 可用更快的小模型 +
  * 零成本规则快路径，supervisor 只负责"读结论 + 整合子 agent 输出"。
  * 加 `unknown` 兜底 = router 即便失效，supervisor 仍能独立工作。
  */
-export type RouteIntent = "chat" | "tool" | "workflow" | "unknown";
+export type RouteIntent = "chat" | "tool" | "workflow" | "capabilities" | "unknown";
 
 /**
  * Workflow Runner 的进度快照（落进 GraphState，随 checkpointer 持久化）。

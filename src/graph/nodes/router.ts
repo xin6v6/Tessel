@@ -11,8 +11,8 @@ const logger = createLogger("router");
 // ────────────────────────────────────────────────────────────────────────────
 // Router —— supervisor 之前的【快速】前置分类节点。
 //
-// 只做一件事：把这一轮判成 chat / tool / workflow，写进 state.intent，
-// 让 supervisor 跳过自己那一轮意图分类。
+// 只做一件事：把这一轮判成 chat / tool / workflow / capabilities，写进
+// state.intent，让 supervisor 跳过自己那一轮意图分类。
 //
 // 为什么单独成节点（而不是塞进 supervisor）：
 //   · 职责单一、可单独测试 / 复用。
@@ -28,7 +28,7 @@ const logger = createLogger("router");
 // 把"帮我发条消息"误判成 chat 的代价 < 把闲聊误判成 workflow 的代价。
 // ────────────────────────────────────────────────────────────────────────────
 
-const INTENTS: readonly RouteIntent[] = ["chat", "tool", "workflow"] as const;
+const INTENTS: readonly RouteIntent[] = ["chat", "tool", "workflow", "capabilities"] as const;
 
 /** 去掉推理模型输出的 <think>...</think>，与 supervisor 保持一致。 */
 function stripThinking(text: string): string {
@@ -128,17 +128,19 @@ export function buildRouterNode({ routerLLM }: RouterDeps) {
       const reply = await routerLLM.invoke(
         [
           new SystemMessage(
-            `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类英文名**，不要解释、不要标点：
+            `你是一个意图分类器。根据用户最新消息和对话历史，从下列四类中选一个，**只回复该类英文名**，不要解释、不要标点：
 
-- chat     闲聊、咨询知识、表达情绪等不需要外部工具就能回答的对话。
-- tool     请求执行一个动作（发消息、查询、搜索、操作外部服务等），需要工具完成。
-- workflow 需要多步骤、可能要人工审批的复杂任务（如改代码并提 PR、跑一条多阶段流程）。
+- chat         闲聊、咨询知识、表达情绪等不需要外部工具就能回答的对话。
+- tool         请求执行一个动作（发消息、查询、搜索、操作外部服务等），需要工具完成。
+- workflow     需要多步骤、可能要人工审批的复杂任务（如改代码并提 PR、跑一条多阶段流程）。
+- capabilities 用户问"你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具"等关于你自身能力的问题。
 
 判断原则：
 - 不确定时优先 chat —— 误判成工具/流程的代价更高。
 - 只是聊到某个工具名字、并非真要用，归 chat。
+- 问"你能做什么"这类要列能力清单的，归 capabilities，不要归 chat。
 
-可选值：chat / tool / workflow`,
+可选值：chat / tool / workflow / capabilities`,
           ),
           // 只喂最后一条用户消息即可——分类不需要全量历史，省 token 省延迟。
           new HumanMessage(text),

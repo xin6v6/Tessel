@@ -300,16 +300,13 @@ export function buildSupervisorNode(
     // 分类结论优先来自前置 router 节点（state.intent）。router 用更快的小模型
     // + 零成本规则定案，supervisor 直接消费，省掉自己这一轮 LLM 往返。
     //
-    // 三类映射：
-    //   router "chat"     → 纯对话，直接回复
-    //   router "workflow" → 直奔 workflow runner（跳过下面的 B2 snapshot 选择）
-    //   router "tool"     → 进 B2，按 snapshot 选具体 agent
-    //   router "unknown"  → router 被绕过 / 出错，回退到 supervisor 自带的
-    //                       三分类 LLM（保证 supervisor 不依赖 router 也能独立工作）。
-    //
-    // 注意：list_capabilities 不在 router 的职责里（router 只分 chat/tool/workflow），
-    // 由下面 unknown 回退分支里的自带分类器识别；router 把"问能力"判成 chat，
-    // supervisor 直接回复也能给出合理答复，不算错路由。
+    // 映射：
+    //   router "chat"         → 纯对话，直接回复
+    //   router "workflow"     → 直奔 workflow runner（跳过下面的 B2 snapshot 选择）
+    //   router "capabilities" → 直奔 capabilities 节点（列真实能力清单）
+    //   router "tool"         → 进 B2，按 snapshot 选具体 agent
+    //   router "unknown"      → router 被绕过 / 出错，回退到 supervisor 自带的
+    //                           分类 LLM（保证 supervisor 不依赖 router 也能独立工作）。
     const source = getContext()?.source as Source | undefined;
     const routerIntent = state.intent;
     logger.info({ inputSnippet, source, routerIntent }, "routing: stage 1 (intent)");
@@ -319,6 +316,14 @@ export function buildSupervisorNode(
     if (routerIntent === "workflow") {
       logger.info({ phase: "intent", intent: "workflow", source }, "intent → workflow (from router)");
       return { next: "workflow", intent: "unknown" };
+    }
+
+    // ── router 已定案 capabilities → 直奔 capabilities 节点（列真实能力清单）──
+    // 没有这一支时，router 会把"问能力"判成 chat、supervisor 直接闲聊式回复，
+    // 绕过 capabilities 节点 → 给不出真实工具清单。这里显式接住。
+    if (routerIntent === "capabilities") {
+      logger.info({ phase: "intent", intent: "capabilities", source }, "intent → capabilities (from router)");
+      return { next: "capabilities", intent: "unknown" };
     }
 
     // ── 判定本轮 supervisor 要走的意图 ──
