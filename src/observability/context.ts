@@ -25,6 +25,7 @@ export interface RequestContext {
   source: Source;          // platform the request came from
   externalId?: string;     // platform-native id (slack U…, telegram numeric, …)
   userId?: string;         // composite: `<source>:<externalId>`
+  channel?: string;        // 来源频道 id（Slack channel/DM id）。coding workflow 据此选目标仓库。
   agentName?: string;      // current agent handling request
 }
 

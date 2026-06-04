@@ -25,12 +25,40 @@ function stripThinking(text: string): string {
 function extractReply(
   result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
 ): string {
+  // workflow interrupt（审批中断）：graph 暂停、没生成 AIMessage，审批提示在
+  // result.__interrupt__[0].value 里。必须优先取它 —— 否则会 fall through 到
+  // messages.at(-1)（=用户刚发的 HumanMessage），把用户原话复读回去。
+  const interruptReply = extractInterruptPrompt(result);
+  if (interruptReply) return interruptReply;
+
   const last = result.messages.at(-1);
   const raw =
     typeof last?.content === "string"
       ? last.content
       : JSON.stringify(last?.content ?? "");
   return stripThinking(raw) || "（无回复）";
+}
+
+/**
+ * 若 graph 因 workflow 审批而中断，拼出发给用户的审批提示（计划摘要 + 确认指引）。
+ * 返回 undefined 表示本次不是中断（走正常 message 提取）。
+ *
+ * interrupt 的 value 是 workflow-runner 传给 interrupt({...}) 的对象：
+ *   { kind: "workflow-approval", summary, prompt, ... }
+ * 形态依 LangGraph v1：result.__interrupt__[0].value（见官方 isInterrupted 用法）。
+ */
+function extractInterruptPrompt(
+  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>,
+): string | undefined {
+  const interrupts = (result as unknown as Record<string, unknown>)["__interrupt__"];
+  if (!Array.isArray(interrupts) || interrupts.length === 0) return undefined;
+  const value = (interrupts[0] as { value?: unknown })?.value as
+    | { summary?: string; prompt?: string }
+    | undefined;
+  if (!value) return undefined;
+  const summary = value.summary ? stripThinking(value.summary).trim() : "";
+  const prompt = value.prompt?.trim() || "请回复「同意」继续，回复其他则放弃。";
+  return summary ? `${summary}\n\n---\n${prompt}` : prompt;
 }
 
 /** Extract token counts from the last AIMessage in a graph result */
@@ -125,7 +153,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               // 路由和 trace。
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
               logger.info({ text: textClean, threadId, speakerName }, "slack:mention received");
-              return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
                 try {
                   const result = await invokeOrResume(
                     graph!,
@@ -171,7 +199,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                 }
               });
             },
-            onMessage: async ({ text, user }) => {
+            onMessage: async ({ text, user, channel }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
@@ -179,7 +207,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               const threadId = threadIdForSlackDm({ userId: user });
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
               logger.info({ text, threadId, speakerName }, "slack:dm received");
-              return runWithContext({ sessionId, source: "slack", externalId: user, userId }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
                 try {
                   const controller = new AbortController();
                   // 普通对话 120s 超时;但开发类 workflow 可能跑很久,这里放宽到 30 分钟。

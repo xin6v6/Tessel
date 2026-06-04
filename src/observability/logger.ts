@@ -136,6 +136,7 @@ interface LogEntry {
   userId?: string;        // composite: `<source>:<externalId>`
   externalId?: string;    // platform-native id, e.g. slack U…, telegram numeric
   source?: string;
+  channel?: string;       // 来源频道 id（Slack channel/DM id）
   agentName?: string;
   message: string;
   file?: string;
@@ -159,6 +160,7 @@ function buildEntry(
     ...(ctx?.userId     ? { userId: ctx.userId }          : {}),
     ...(ctx?.externalId ? { externalId: ctx.externalId }  : {}),
     ...(ctx?.source     ? { source: ctx.source }          : {}),
+    ...(ctx?.channel    ? { channel: ctx.channel }        : {}),
     ...(ctx?.agentName  ? { agentName: ctx.agentName }    : {}),
     ...mergedFields,
     ...extraFields,
@@ -202,7 +204,12 @@ function writeLog(
       const extras = Object.entries(extraFields).length > 0
         ? " " + JSON.stringify(extraFields)
         : "";
-      const ctxPart = entry.sessionId ? ` (${entry.sessionId})` : "";
+      // 终端把 sessionId + channel 拼进括号，实时盯屏即可看出"哪个会话/哪个频道"。
+      // 完整 context（userId/source 等）仍只在文件日志 JSON 里。
+      const ctxBits = [entry.sessionId, entry.channel ? `ch=${entry.channel}` : ""]
+        .filter(Boolean)
+        .join(" ");
+      const ctxPart = ctxBits ? ` (${ctxBits})` : "";
       const loc = (entry.file && entry.line) ? ` ${entry.file}:${entry.line}` : "";
       const formatted = `${color}${label}${ctxPart} ${message}${extras}${loc}${RESET}`;
       if (level === "error" || level === "fatal" || level === "warn") {
