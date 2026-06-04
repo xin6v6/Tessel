@@ -1,6 +1,7 @@
-import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
+import type { LLMClient } from "../../llm/client.ts";
+import { fromLangChainMany } from "../../llm/messages.ts";
 import type { GraphStateType, SubAgentName } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
@@ -229,8 +230,22 @@ function extractTokenUsage(msg: unknown): { prompt: number; completion: number }
   };
 }
 
+/**
+ * 迁移期适配：把 langchain BaseMessage[] 转原生喂 LLMClient，结果包回 langchain
+ * AIMessage（让下游 sanitizeReply / extractTokenUsage / state 写入零改动）。
+ * LLMClient 已把 token usage 同时填进 usage_metadata 和 response_metadata.tokenUsage。
+ */
+async function invokeLC(llm: LLMClient, messages: BaseMessage[]): Promise<AIMessage> {
+  const reply = await llm.invoke(fromLangChainMany(messages));
+  return new AIMessage({
+    content: reply.content,
+    usage_metadata: reply.usage_metadata as AIMessage["usage_metadata"],
+    response_metadata: reply.response_metadata,
+  });
+}
+
 export function buildSupervisorNode(
-  llm: ChatOpenAI,
+  llm: LLMClient,
   toolRegistry: ToolRegistry,
   integrations: IntegrationRegistry,
 ) {
@@ -288,7 +303,7 @@ export function buildSupervisorNode(
       logger.debug({ subAgentResultSnippet: subAgentResult.slice(0, 120) }, "composing final reply");
 
       const t0 = Date.now();
-      const finalReply = await llm.invoke([
+      const finalReply = await invokeLC(llm, [
         new SystemMessage(
           `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
@@ -372,7 +387,7 @@ export function buildSupervisorNode(
     } else {
       // routerIntent === "unknown"：回退自带分类器（含 list_capabilities 识别）。
       const t0 = Date.now();
-      const intentReply = await llm.invoke([
+      const intentReply = await invokeLC(llm, [
         new SystemMessage(
           `你是一个意图分类器。根据用户最新消息和对话历史，从下列三类中选一个，**只回复该类的英文名字**，不要有其他文字、不要解释、不要带标点：
 
@@ -412,7 +427,7 @@ export function buildSupervisorNode(
     // ── 路径 2：chat → 直接 LLM 回复 ──
     if (intent === "chat") {
       const t1 = Date.now();
-      const directReply = await llm.invoke([
+      const directReply = await invokeLC(llm, [
         new SystemMessage(
           `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`
         ),
@@ -478,7 +493,7 @@ export function buildSupervisorNode(
     }, "routing: stage 2 (pick agent from snapshot)");
 
     const t2 = Date.now();
-    const routeReply = await llm.invoke([
+    const routeReply = await invokeLC(llm, [
       new SystemMessage(
         `用户需要执行一个任务。下面是当前**真实可用**的工具 agent 清单（运行时数据，非预设）：
 

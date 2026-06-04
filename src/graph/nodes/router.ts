@@ -1,6 +1,5 @@
-import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import type { BaseMessage } from "@langchain/core/messages";
+import type { LLMClient } from "../../llm/client.ts";
+import { humanMsg, systemMsg, isHuman, fromLangChain } from "../../llm/messages.ts";
 import type { GraphStateType, RouteIntent } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext } from "../../observability/context.ts";
@@ -35,10 +34,10 @@ function stripThinking(text: string): string {
   return text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "").trim();
 }
 
-function lastHumanText(messages: BaseMessage[]): string {
+function lastHumanText(messages: GraphStateType["messages"]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m instanceof HumanMessage && typeof m.content === "string") return m.content;
+    const m = fromLangChain(messages[i] as object);
+    if (isHuman(m) && m.content) return m.content;
   }
   return "";
 }
@@ -106,7 +105,7 @@ function parseIntent(text: string): RouteIntent {
 
 export interface RouterDeps {
   /** 专用于分类的 LLM（建议是比主模型更快的小模型）。 */
-  routerLLM: ChatOpenAI;
+  routerLLM: LLMClient;
 }
 
 export function buildRouterNode({ routerLLM }: RouterDeps) {
@@ -131,7 +130,7 @@ export function buildRouterNode({ routerLLM }: RouterDeps) {
     try {
       const reply = await routerLLM.invoke(
         [
-          new SystemMessage(
+          systemMsg(
             `你是一个意图分类器。根据用户最新消息和对话历史，从下列四类中选一个，**只回复该类英文名**，不要解释、不要标点：
 
 - chat         闲聊、咨询知识、表达情绪等不需要外部工具就能回答的对话。
@@ -147,7 +146,7 @@ export function buildRouterNode({ routerLLM }: RouterDeps) {
 可选值：chat / tool / workflow / capabilities`,
           ),
           // 只喂最后一条用户消息即可——分类不需要全量历史，省 token 省延迟。
-          new HumanMessage(text),
+          humanMsg(text),
         ],
         // 独立短超时：分类卡住就回退，不拖累主链路。
         { timeout: Number(process.env.ROUTER_TIMEOUT_MS ?? 8000) },

@@ -1,6 +1,7 @@
 import { StateGraph, END, START } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { ChatOpenAI } from "@langchain/openai";
+import { LLMClient } from "../llm/client.ts";
 import { GraphState } from "./state.ts";
 import { buildCheckpointer } from "./checkpointer.ts";
 import { buildSupervisorNode, KNOWN_AGENTS, SUB_AGENTS } from "./nodes/supervisor.ts";
@@ -54,12 +55,26 @@ export function buildGraph(params: {
   const apiKey  = params.apiKey ?? process.env.OPENAI_API_KEY ?? "";
   const baseURL = params.baseURL ?? process.env.LLM_BASE_URL;
 
+  const mainModel = params.model ?? process.env.LLM_MODEL ?? "gpt-4o";
+  const mainTimeout = Number(process.env.LLM_TIMEOUT_MS ?? 60000);
+
+  // 仍给未迁移的子 agent（slack/web/mcp，PR3 处理）用的 ChatOpenAI。
   const llm = new ChatOpenAI({
-    model: params.model ?? process.env.LLM_MODEL ?? "gpt-4o",
+    model: mainModel,
     apiKey,
     configuration: { baseURL },
     temperature: 0.3,
-    timeout: Number(process.env.LLM_TIMEOUT_MS ?? 60000),
+    timeout: mainTimeout,
+    maxRetries: 1,
+  });
+
+  // 已迁移到原生 LLMClient 的节点（supervisor）用的主模型 client。
+  const mainClient = new LLMClient({
+    model: mainModel,
+    apiKey,
+    baseURL,
+    temperature: 0.3,
+    timeoutMs: mainTimeout,
     maxRetries: 1,
   });
 
@@ -79,23 +94,23 @@ export function buildGraph(params: {
   // 再由 router 的 stripThinking 剥掉。两种模型都安全。
   const routerModel = process.env.ROUTER_MODEL;
   const routerThinkingOff = (process.env.ROUTER_THINKING ?? "off").toLowerCase() !== "on";
-  const routerLLM = routerModel
-    ? new ChatOpenAI({
+  const routerLLM: LLMClient = routerModel
+    ? new LLMClient({
         model: routerModel,
         apiKey: process.env.ROUTER_API_KEY ?? apiKey,
-        configuration: { baseURL: process.env.ROUTER_BASE_URL ?? baseURL },
+        baseURL: process.env.ROUTER_BASE_URL ?? baseURL,
         temperature: 0,
         maxTokens: Number(process.env.ROUTER_MAX_TOKENS ?? 256),
-        timeout: Number(process.env.ROUTER_TIMEOUT_MS ?? 8000),
+        timeoutMs: Number(process.env.ROUTER_TIMEOUT_MS ?? 8000),
         maxRetries: 0,
         // 默认关思考（提速关键）；ROUTER_THINKING=on 则不注入，走模型默认行为。
         ...(routerThinkingOff ? { modelKwargs: { thinking: { type: "disabled" } } } : {}),
       })
-    : llm;
+    : mainClient;
 
   // 构建各节点
   const routerNode        = buildRouterNode({ routerLLM });
-  const supervisorNode    = buildSupervisorNode(llm, params.toolRegistry, params.integrations);
+  const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations);
   const slackAgentNode    = buildSlackAgentNode(llm, params.toolRegistry);
   const webAgentNode      = buildWebAgentNode(llm);
   const mcpAgentNode      = buildMcpAgentNode(llm);
