@@ -52,6 +52,11 @@ function allowlist(): Set<string> {
   );
 }
 
+/** 该 userId 是否在 workflow 白名单内（CODING_ALLOWLIST）。 */
+function inAllowlist(userId: string): boolean {
+  return allowlist().has(userId);
+}
+
 /**
  * 强 workflow 信号词。命中其一 + 用户在白名单 → 直接 workflow，跳过 LLM。
  * 这些词单独出现就强烈指向"跑一个多阶段开发任务"，误判率低。
@@ -74,7 +79,6 @@ const WORKFLOW_VERBS = [
  */
 function tier0Rules(text: string, userId: string): RouteIntent | null {
   const lower = text.toLowerCase();
-  const inAllowlist = allowlist().has(userId);
 
   // 命中 workflow 信号？
   const tags = recipeChoices().map((c) => c.tag.toLowerCase());
@@ -85,7 +89,7 @@ function tier0Rules(text: string, userId: string): RouteIntent | null {
   if (hitWorkflowSignal) {
     // 有 workflow 意图但没权限：不在这里定 workflow（会被 runner 拒），
     // 也不武断定 chat/tool —— fall through 让 LLM 在 chat/tool 间判。
-    return inAllowlist ? "workflow" : null;
+    return inAllowlist(userId) ? "workflow" : null;
   }
 
   // 无 workflow 信号 → 这一轮一定不是 workflow，但 chat vs tool 仍需 LLM。
@@ -149,7 +153,20 @@ export function buildRouterNode({ routerLLM }: RouterDeps) {
         { timeout: Number(process.env.ROUTER_TIMEOUT_MS ?? 8000) },
       );
       const raw = typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content);
-      const intent = parseIntent(raw);
+      let intent = parseIntent(raw);
+
+      // 权限兜底：LLM 不受白名单约束，可能把非白名单用户的请求判成 workflow，
+      // 绕过 Tier 0 的权限拦截。这里统一收口——非白名单用户的 workflow 一律
+      // 降级为 tool（让 supervisor 走 snapshot 选 agent，而不是直奔 runner）。
+      // 与 tier0Rules 同源：那里非白名单命中 workflow 信号也是不放行。
+      if (intent === "workflow" && !inAllowlist(userId)) {
+        logger.info(
+          { userId, snippet: text.slice(0, 80) },
+          "router: LLM said workflow but user not in allowlist — downgrading to tool",
+        );
+        intent = "tool";
+      }
+
       logger.info(
         { intent, tier: 1, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
         `router → ${intent} (llm)`,

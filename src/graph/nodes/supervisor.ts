@@ -34,6 +34,23 @@ const SOURCE_TO_PLATFORM_AGENT: Partial<Record<Source, Exclude<SubAgentName, "__
 };
 
 // ----------------------------------------------------------------
+// workflow 白名单（纵深防御）
+// ----------------------------------------------------------------
+//
+// 与 router.ts / workflow-runner.ts 同源：只有 CODING_ALLOWLIST 里的 userId
+// 能路由到 workflow。supervisor 不无条件信任 router 给的 workflow 意图 ——
+// router 的 LLM 分类不受白名单约束，这里是第二道校验。
+function workflowAllowed(userId: string): boolean {
+  const allow = new Set(
+    (process.env.CODING_ALLOWLIST ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  return allow.has(userId);
+}
+
+// ----------------------------------------------------------------
 // 通用回复护栏：约束模型只依据已知证据回答，不编造细节
 // ----------------------------------------------------------------
 const REPLY_GUARDRAILS = `
@@ -308,14 +325,28 @@ export function buildSupervisorNode(
     //   router "unknown"      → router 被绕过 / 出错，回退到 supervisor 自带的
     //                           分类 LLM（保证 supervisor 不依赖 router 也能独立工作）。
     const source = getContext()?.source as Source | undefined;
-    const routerIntent = state.intent;
+    let routerIntent = state.intent;
     logger.info({ inputSnippet, source, routerIntent }, "routing: stage 1 (intent)");
 
     // ── router 已定案 workflow → 直奔 workflow runner，跳过 B2 ──
     // 消费掉 intent（重置 "unknown"），避免下一轮（子 agent 回来 compose 时）误读。
+    //
+    // 纵深防御：不无条件信任 routerIntent。router 的 Tier 1 LLM 不受白名单
+    // 约束、理论上仍可能吐出 workflow（router 已加出口兜底，这里再校验一次
+    // 是第二道防线）。非白名单用户的 workflow 在这里降级 —— 不路由到
+    // workflow 节点，改当作普通 tool_routing 往下走 B2。workflow runner 内部
+    // 也有白名单校验，三层一致。
     if (routerIntent === "workflow") {
-      logger.info({ phase: "intent", intent: "workflow", source }, "intent → workflow (from router)");
-      return { next: "workflow", intent: "unknown" };
+      const userId = getContext()?.userId ?? "";
+      if (workflowAllowed(userId)) {
+        logger.info({ phase: "intent", intent: "workflow", source }, "intent → workflow (from router)");
+        return { next: "workflow", intent: "unknown" };
+      }
+      logger.warn(
+        { phase: "intent", source, userId },
+        "router said workflow but user not in allowlist — downgrading to tool_routing",
+      );
+      routerIntent = "tool";
     }
 
     // ── router 已定案 capabilities → 直奔 capabilities 节点（列真实能力清单）──

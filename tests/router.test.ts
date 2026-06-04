@@ -100,6 +100,25 @@ describe("router — Tier 1 LLM classify", () => {
   });
 });
 
+describe("router — workflow permission (security)", () => {
+  it("allowlisted user + LLM says workflow → workflow", async () => {
+    const { llm } = fakeLLM({ reply: "workflow" });
+    const node = buildRouterNode({ routerLLM: llm });
+    // 不含 workflow 信号词，绕过 Tier 0，纯靠 LLM 判 workflow。
+    const out = await runWithContext(allowedCtx, () => node(stateOf("处理一下那个多阶段任务")));
+    expect(out.intent).toBe("workflow");
+  });
+
+  it("non-allowlisted user + LLM says workflow → downgraded to tool", async () => {
+    // 安全回归：Tier 1 LLM 不受白名单约束、可能吐 workflow。非白名单用户
+    // 必须被降级，不能绕过权限路由到 workflow runner。
+    const { llm } = fakeLLM({ reply: "workflow" });
+    const node = buildRouterNode({ routerLLM: llm });
+    const out = await runWithContext(deniedCtx, () => node(stateOf("处理一下那个多阶段任务")));
+    expect(out.intent).toBe("tool");
+  });
+});
+
 describe("router — failure fallback", () => {
   it("LLM throws → falls back to chat (safe default)", async () => {
     const { llm } = fakeLLM({ throws: true });
