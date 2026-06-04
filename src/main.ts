@@ -1,5 +1,4 @@
-import { Command } from "@langchain/langgraph";
-import type { HumanMessage } from "@langchain/core/messages";
+import type { HumanMsg } from "./llm/messages.ts";
 import { buildGraph } from "./graph/index.ts";
 import { humanMessageWithSpeaker } from "./graph/speaker.ts";
 import {
@@ -105,15 +104,14 @@ function isApproval(text: string): boolean {
 async function invokeOrResume(
   g: NonNullable<typeof graph>,
   threadId: string,
-  message: HumanMessage,
+  message: HumanMsg,
   rawText: string,
   signal?: AbortSignal,
 ): Promise<Awaited<ReturnType<typeof g.invoke>>> {
-  const config = { configurable: { thread_id: threadId }, ...(signal ? { signal } : {}) };
+  const config = { threadId, ...(signal ? { signal } : {}) };
   let pending = false;
   try {
-    const snap = await g.getState({ configurable: { thread_id: threadId } });
-    pending = Array.isArray(snap?.tasks) && snap.tasks.some((t) => (t.interrupts?.length ?? 0) > 0);
+    pending = (await g.getState(threadId)).pending;
   } catch {
     pending = false; // 无 state / 读取失败 → 当作新对话
   }
@@ -121,7 +119,7 @@ async function invokeOrResume(
   if (pending) {
     const approved = isApproval(rawText);
     logger.info({ threadId, approved }, "workflow: resuming from approval interrupt");
-    return g.invoke(new Command({ resume: { approved } }), config);
+    return g.invoke({ resume: { approved } }, config);
   }
   return g.invoke({ messages: [message] }, config);
 }

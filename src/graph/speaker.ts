@@ -1,4 +1,4 @@
-import { HumanMessage } from "@langchain/core/messages";
+import { humanMsg, type HumanMsg } from "../llm/messages.ts";
 
 /**
  * 在 HumanMessage 上挂 speaker 元数据（写入 additional_kwargs，
@@ -34,11 +34,8 @@ export interface SpeakerMeta {
  * `400 invalid params, user name must be consistent (2013)`。LLM 想知道
  * "当前是谁"完全由 supervisor 的 system prompt 锚定，不依赖此字段。
  */
-export function humanMessageWithSpeaker(content: string, speaker: SpeakerMeta): HumanMessage {
-  return new HumanMessage({
-    content,
-    additional_kwargs: { speaker },
-  });
+export function humanMessageWithSpeaker(content: string, speaker: SpeakerMeta): HumanMsg {
+  return humanMsg(content, { additional_kwargs: { speaker } });
 }
 
 export function getSpeaker(msg: { additional_kwargs?: Record<string, unknown> }): SpeakerMeta | undefined {

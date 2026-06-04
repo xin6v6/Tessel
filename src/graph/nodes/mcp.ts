@@ -1,5 +1,5 @@
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, isHuman, isTool, fromLangChain } from "../../llm/messages.ts";
+import { humanMsg, isHuman, isTool } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
@@ -45,8 +45,7 @@ export function buildMcpAgentNode(llm: LLMClient) {
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
 
-    const native = state.messages.map((m) => fromLangChain(m as object));
-    const lastUserMsg = [...native].reverse().find(isHuman);
+    const lastUserMsg = [...state.messages].reverse().find(isHuman);
 
     if (!lastUserMsg) {
       logger.warn("no human message found, skipping");

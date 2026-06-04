@@ -1,8 +1,6 @@
-import { StateGraph, END, START } from "@langchain/langgraph";
-import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { LLMClient } from "../llm/client.ts";
-import { GraphState } from "./state.ts";
-import { buildCheckpointer } from "./checkpointer.ts";
+import { compileGraph, type NodeMap } from "./runtime.ts";
+import { buildGraphStore, type GraphStore } from "./store.ts";
 import { buildSupervisorNode, KNOWN_AGENTS, SUB_AGENTS } from "./nodes/supervisor.ts";
 import { buildRouterNode } from "./nodes/router.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
@@ -13,7 +11,6 @@ import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/work
 import type { ToolRegistry } from "../tools/index.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 
-export { GraphState } from "./state.ts";
 export type { GraphStateType } from "./state.ts";
 
 // ----------------------------------------------------------------
@@ -47,9 +44,9 @@ export function buildGraph(params: {
   model?: string;
   toolRegistry: ToolRegistry;
   integrations: IntegrationRegistry;
-  /** 显式注入 checkpointer。测试时传 SqliteSaver.fromConnString(":memory:")；
-   *  不传则使用默认的 data/checkpoints.db。 */
-  checkpointer?: BaseCheckpointSaver;
+  /** 显式注入 GraphStore。测试传 :memory 的 SqliteGraphStore；
+   *  不传则用默认的 data/graph-runs.db。 */
+  store?: GraphStore;
 }) {
   const apiKey  = params.apiKey ?? process.env.OPENAI_API_KEY ?? "";
   const baseURL = params.baseURL ?? process.env.LLM_BASE_URL;
@@ -112,56 +109,25 @@ export function buildGraph(params: {
   const workflowNode         = buildWorkflowRunnerNode();
   const workflowApprovalNode = buildWorkflowApprovalNode();
 
-  const graph = new StateGraph(GraphState)
-    // 注册节点
-    .addNode("router",            routerNode)
-    .addNode("supervisor",        supervisorNode)
-    .addNode("slack",             slackAgentNode)
-    .addNode("web",               webAgentNode)
-    .addNode("mcp",               mcpAgentNode)
-    .addNode("capabilities",      capabilitiesNode)
-    .addNode("workflow",          workflowNode)
-    .addNode("workflow_approval", workflowApprovalNode)
+  // 节点表 —— 拓扑（边）写死在 runtime.ts 的 routeFrom：
+  //   START → router → supervisor
+  //   supervisor --next--> slack/web/mcp/capabilities/workflow/__end__
+  //   slack/web/mcp/capabilities → supervisor
+  //   workflow --next--> workflow_approval | supervisor
+  //   workflow_approval → workflow
+  const nodes: NodeMap = {
+    router:            routerNode,
+    supervisor:        supervisorNode,
+    slack:             slackAgentNode,
+    web:               webAgentNode,
+    mcp:               mcpAgentNode,
+    capabilities:      capabilitiesNode,
+    workflow:          workflowNode,
+    workflow_approval: workflowApprovalNode,
+  };
 
-    // 入口：先过 router 快速分类，再进 supervisor。
-    // 子 agent 完成后回到 supervisor（不是 router）—— 不重复分类。
-    .addEdge(START, "router")
-    .addEdge("router", "supervisor")
-
-    // Supervisor 动态路由
-    .addConditionalEdges(
-      "supervisor",
-      (state) => state.next,
-      {
-        slack:        "slack",
-        web:          "web",
-        mcp:          "mcp",
-        capabilities: "capabilities",
-        workflow:     "workflow",
-        __end__:      END,
-      }
-    )
-
-    // 子 Agent 完成 → 回到 supervisor 整合结果
-    .addEdge("slack",        "supervisor")
-    .addEdge("web",          "supervisor")
-    .addEdge("mcp",          "supervisor")
-    .addEdge("capabilities", "supervisor")
-
-    // workflow 动态出边：遇审批点 → workflow_approval；否则（完成/放弃）→ supervisor。
-    .addConditionalEdges(
-      "workflow",
-      (state) => state.next,
-      {
-        workflow_approval: "workflow_approval",
-        supervisor:        "supervisor",
-      }
-    )
-    // 审批节点（interrupt 后）总是路由回 workflow 续跑 / 收尾放弃。
-    .addEdge("workflow_approval", "workflow");
-
-  const checkpointer = params.checkpointer ?? buildCheckpointer();
-  return graph.compile({ checkpointer });
+  const store = params.store ?? buildGraphStore();
+  return compileGraph(nodes, store);
 }
 
 export type CompiledGraph = ReturnType<typeof buildGraph>;

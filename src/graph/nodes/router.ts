@@ -1,5 +1,5 @@
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, systemMsg, isHuman, fromLangChain } from "../../llm/messages.ts";
+import { humanMsg, systemMsg, isHuman } from "../../llm/messages.ts";
 import type { GraphStateType, RouteIntent } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext } from "../../observability/context.ts";
@@ -36,7 +36,7 @@ function stripThinking(text: string): string {
 
 function lastHumanText(messages: GraphStateType["messages"]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = fromLangChain(messages[i] as object);
+    const m = messages[i]!;
     if (isHuman(m) && m.content) return m.content;
   }
   return "";

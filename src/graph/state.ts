@@ -1,5 +1,4 @@
-import { Annotation, messagesStateReducer } from "@langchain/langgraph";
-import type { BaseMessage } from "@langchain/core/messages";
+import type { Message } from "../llm/messages.ts";
 
 // ----------------------------------------------------------------
 // 子 Agent 路由名称
@@ -67,40 +66,53 @@ export interface WorkflowProgress {
  *                  非空时会跳过 LLM 重写、原样转发（仅做 sanitize），避免成稿
  *                  内容（表格 / 列表等）被 LLM 二次改写后丢失。
  */
-export const GraphState = Annotation.Root({
-  messages: Annotation<BaseMessage[]>({
-    reducer: messagesStateReducer,
-    default: () => [],
-  }),
+export interface GraphState {
+  /** 完整对话历史（humanMsg / aiMsg / toolMsg）。 */
+  messages: Message[];
+  /** 下一个目标节点。 */
+  next: SubAgentName;
+  /** 前置 router 的分类结论（supervisor 读后消费、重置回 "unknown"）。 */
+  intent: RouteIntent;
+  /** 子 Agent 的原始/未成稿输出。finalReply 为空时 supervisor 用它走 LLM compose。 */
+  subAgentResult: string;
+  /** 子 Agent 已成稿、可直接发用户的回复。非空时 supervisor 原样转发。 */
+  finalReply: string;
+  /** Workflow Runner 进度快照（null = 没有进行中的 workflow）。 */
+  workflowProgress: WorkflowProgress | null;
+}
 
-  next: Annotation<SubAgentName>({
-    reducer: (_, next) => next,
-    default: () => "__end__",
-  }),
+/** 兼容别名：下游大量 import GraphStateType。 */
+export type GraphStateType = GraphState;
 
-  // 前置 router 的分类结论（supervisor 读后消费、重置回 "unknown"）。
-  // "unknown" = router 未定案，supervisor 回退自带意图分类。
-  intent: Annotation<RouteIntent>({
-    reducer: (_, intent) => intent,
-    default: () => "unknown",
-  }),
+/** 初始 state（替代各 Annotation 的 default）。 */
+export function defaultState(): GraphState {
+  return {
+    messages: [],
+    next: "__end__",
+    intent: "unknown",
+    subAgentResult: "",
+    finalReply: "",
+    workflowProgress: null,
+  };
+}
 
-  subAgentResult: Annotation<string>({
-    reducer: (_, result) => result,
-    default: () => "",
-  }),
-
-  finalReply: Annotation<string>({
-    reducer: (_, reply) => reply,
-    default: () => "",
-  }),
-
-  // Workflow Runner 进度快照（null = 没有进行中的 workflow）
-  // 注意：字段名不能叫 "workflow" —— 会和同名的 graph 节点冲突（LangGraph 限制）。
-  workflowProgress: Annotation<WorkflowProgress | null>({
-    reducer: (_, w) => w,
-    default: () => null,
-  }),
-});
-
-export type GraphStateType = typeof GraphState.State;
+/**
+ * 把节点返回的 Partial 合并进 state（替代 Annotation 的 reducer）。语义 1:1：
+ *   · messages —— append（原 messagesStateReducer 的 append 语义）。
+ *   · next/intent/subAgentResult/finalReply —— replace；Partial 里【没出现】该字段
+ *     时保持旧值（LangGraph 里节点不返回某字段就不触发其 reducer）。空串 "" 是合法
+ *     的清空值（supervisor 收尾就写 ""），用 ?? 对空串安全（"" ?? x === ""）。
+ *   · workflowProgress —— replace，但 null 是合法清空值，必须用 "in" 判键存在而非 ??。
+ */
+export function mergeState(prev: GraphState, partial: Partial<GraphState>): GraphState {
+  return {
+    messages: partial.messages ? [...prev.messages, ...partial.messages] : prev.messages,
+    next:           partial.next           ?? prev.next,
+    intent:         partial.intent         ?? prev.intent,
+    subAgentResult: partial.subAgentResult ?? prev.subAgentResult,
+    finalReply:     partial.finalReply     ?? prev.finalReply,
+    workflowProgress: "workflowProgress" in partial
+      ? (partial.workflowProgress ?? null)
+      : prev.workflowProgress,
+  };
+}
