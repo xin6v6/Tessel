@@ -51,15 +51,25 @@ export function buildCapabilitiesNode(
   };
 }
 
+// 纯内部节点：不是用户视角的"能力"，不在能力清单里展示。
+// capabilities 节点本身就是"列能力"的那个节点 —— 它没有 integration、
+// 没有注册工具、也不是 stub，会被 snapshot 判成 !ready 而误标"初始化失败"。
+// 它根本不该出现在给用户的清单里，这里直接过滤掉。
+const INTERNAL_AGENTS = new Set<string>(["capabilities"]);
+
 /**
  * 给用户看的 Markdown 报告。与 snapshotForRoutingPrompt 不同 —— 这里
  * 要展示 stub agent（用户问"你能做什么"时应该如实告知"这个还未接入"），
  * 而路由 prompt 里 stub 是要被绕开的。
+ *
+ * 纯内部节点（INTERNAL_AGENTS）不展示 —— 它们不是用户视角的能力。
  */
-function renderSnapshotForUser(snapshot: CapabilitiesSnapshot): string {
+export function renderSnapshotForUser(snapshot: CapabilitiesSnapshot): string {
   const sections: string[] = [];
 
   for (const agent of snapshot.agents) {
+    if (INTERNAL_AGENTS.has(agent.agentName)) continue;
+
     let status: string;
     if (agent.isStub) status = "占位 stub · 未接入";
     else if (!agent.ready) status = "未启用 / 初始化失败";
