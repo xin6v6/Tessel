@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "dev": "bun --watch src/main.ts",
+    "acceptance": "bun run scripts/acceptance.ts",
     "daemon": "bash scripts/start.sh --daemon",
     "stop": "bash scripts/start.sh --stop",
     "status": "bash scripts/start.sh --status",
