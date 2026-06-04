@@ -1,25 +1,28 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { HumanMessage, AIMessage } from "@langchain/core/messages";
 import { buildRouterNode } from "../src/graph/nodes/router.ts";
 import { runWithContext, type RequestContext } from "../src/observability/context.ts";
+import { humanMsg, aiMsg } from "../src/llm/messages.ts";
+import type { LLMClient } from "../src/llm/client.ts";
 
 // ── 假 routerLLM：可编排返回值 / 抛错，断言它是否被调用 ──────────────────────
-// 只实现 router 用到的 .invoke()；用 any 绕过 ChatOpenAI 的庞大类型。
+// 只实现 router 用到的 .invoke()，返回原生 AIMsg。
 function fakeLLM(behavior: { reply?: string; throws?: boolean }) {
   let invoked = false;
   const llm = {
     invoke: async () => {
       invoked = true;
       if (behavior.throws) throw new Error("boom");
-      return new AIMessage({ content: behavior.reply ?? "chat" });
+      return aiMsg(behavior.reply ?? "chat");
     },
-  };
-  return { llm: llm as any, wasInvoked: () => invoked };
+  } as unknown as LLMClient;
+  return { llm, wasInvoked: () => invoked };
 }
 
 function stateOf(text: string) {
   return {
-    messages: [new HumanMessage(text)],
+    // 迁移期：state.messages 仍是 BaseMessage[] 类型；router 内部用 fromLangChain
+    // 兼容读取，原生 humanMsg 也能被正确识别。测试里用 any 跨过类型差异。
+    messages: [humanMsg(text)] as any,
     next: "__end__" as const,
     intent: "unknown" as const,
     subAgentResult: "",
