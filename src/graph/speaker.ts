@@ -2,7 +2,7 @@ import { humanMsg, type HumanMsg } from "../llm/messages.ts";
 
 /**
  * 在 HumanMessage 上挂 speaker 元数据（写入 additional_kwargs，
- * LangChain 标准的"自定义元数据通道"，序列化、checkpointer 兼容）。
+ * 自定义元数据通道，随消息一起序列化进 store）。
  *
  * 当前阶段（Step 1.0）只忠实记录"是谁说的"。下一阶段（Step 1.1）会基于
  * 这些元数据，在 supervisor 入口做加权截断：自己（当前 user 的历史 +
@@ -23,8 +23,8 @@ export interface SpeakerMeta {
  * 构造带 speaker 元数据的 HumanMessage。
  *
  * speaker 信息（speakerId / speakerName / source）全部只放在
- * additional_kwargs.speaker 里。LangChain 默认不会把 additional_kwargs
- * 写进发给 LLM 的请求 body，所以它仅用于：内部 thread 路由、trace、
+ * additional_kwargs.speaker 里。additional_kwargs 是本地元数据，不会写进
+ * 发给 LLM 的请求 body，所以它仅用于：内部 thread 路由、trace、
  * supervisor 入口的 currentSpeakerLine() 注入（把人名写进 system prompt），
  * 以及后续 Step 1.1 的加权裁剪。
  *

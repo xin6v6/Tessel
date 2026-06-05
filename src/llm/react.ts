@@ -3,7 +3,7 @@ import type { Message } from "./messages.ts";
 import { systemMsg, toolMsg } from "./messages.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
-// runReactAgent —— 替代 @langchain/langgraph/prebuilt 的 createReactAgent。
+// runReactAgent —— 原生 ReAct tool-call 循环。
 //
 // 标准 ReAct 循环：
 //   1. [system, ...messages] → llm.invoke(msgs, {tools})

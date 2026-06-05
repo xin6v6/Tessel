@@ -35,7 +35,7 @@ export type SubAgentName =
 export type RouteIntent = "chat" | "tool" | "workflow" | "capabilities" | "unknown";
 
 /**
- * Workflow Runner 的进度快照（落进 GraphState，随 checkpointer 持久化）。
+ * Workflow Runner 的进度快照（落进 GraphState，随 graph store 持久化）。
  * 用于 interrupt 审批后恢复时跳过已完成的 stage —— 不重跑需求分析等昂贵步骤。
  */
 export interface WorkflowProgress {
@@ -97,10 +97,10 @@ export function defaultState(): GraphState {
 }
 
 /**
- * 把节点返回的 Partial 合并进 state（替代 Annotation 的 reducer）。语义 1:1：
- *   · messages —— append（原 messagesStateReducer 的 append 语义）。
+ * 把节点返回的 Partial 合并进 state：
+ *   · messages —— append。
  *   · next/intent/subAgentResult/finalReply —— replace；Partial 里【没出现】该字段
- *     时保持旧值（LangGraph 里节点不返回某字段就不触发其 reducer）。空串 "" 是合法
+ *     时保持旧值（节点不返回某字段即不改动该字段）。空串 "" 是合法
  *     的清空值（supervisor 收尾就写 ""），用 ?? 对空串安全（"" ?? x === ""）。
  *   · workflowProgress —— replace，但 null 是合法清空值，必须用 "in" 判键存在而非 ??。
  */

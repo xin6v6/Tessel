@@ -68,19 +68,19 @@ const NODES: GNode[] = [
 文件  src/integrations/slack/*` },
 
   // L1 — 状态
-  { id: 'state', type: 'state', label: 'Graph State', sub: 'Annotation + Checkpointer',
+  { id: 'state', type: 'state', label: 'Graph State', sub: 'Graph State + Store',
     layer: 1, col: 6.4, Icon: Database,
     prompt:
-`LangGraph 全局状态 + 持久化
+`全局状态 + 持久化
 
 State 字段
   messages / next / subAgentResult / finalReply
 
-Checkpointer（data/checkpoints.db）
+Graph Store（data/graph-runs.db）
   按 thread_id 持久化，支持多轮历史与 interrupt 跨消息恢复。
   Workflow 的人工审批就靠它跨 Slack 消息暂停 / 恢复。
 
-文件  src/graph/state.ts、src/graph/checkpointer.ts` },
+文件  src/graph/state.ts、src/graph/store.ts` },
 
   // L1 — Router（前置快速分类）
   { id: 'router', type: 'router', label: 'Router', sub: '前置快速分类',
@@ -146,7 +146,7 @@ Checkpointer（data/checkpoints.db）
     prompt:
 `MCP Tools Agent（stub）
 
-  同 web：isStub 过滤。接入 @langchain/mcp-adapters 后启用。
+  同 web：isStub 过滤。接入 MCP adapter 后启用。
 
 文件  src/graph/nodes/mcp.ts` },
   { id: 'capabilities', type: 'agent', label: 'Capabilities', sub: '自省节点',
@@ -186,8 +186,8 @@ recipe = 一份可复用、可进化的流程配方
 
 拆成两个节点（避免审批 resume 重跑）
   本节点跑 stage，遇审批 plan stage 就落盘 workflowProgress 并
-  return，交给 workflow_approval 做 interrupt。LangGraph interrupt
-  会让节点 resume 时从头重跑，拆开后 plan 产出已落盘 → 不重跑。
+  return，交给 workflow_approval 做 interrupt。中途暂停的节点
+  resume 时会从头重跑，拆开后 plan 产出已落盘 → 不重跑。
 
 跨后端
   stage sub-agent 底层用 Claude Agent SDK（headless）。
@@ -291,8 +291,8 @@ allowedTools  Read / Bash / Glob / Grep
 `审批节点（唯一人工审批点）—— 独立的 graph 节点
 
 为什么独立成节点（不在 workflow 里 interrupt）
-  LangGraph 的 interrupt() 抛异常暂停，节点中途的 state 不落盘、
-  resume 时节点从头重跑。若在 workflow 节点里"跑需求→interrupt"，
+  节点中途暂停时 state 不落盘、resume 时节点从头重跑。
+  若在 workflow 节点里"跑需求→interrupt"，
   审批后会重跑需求分析（~$0.5-0.8）。拆出本节点：workflow 跑完
   落盘后交给它，它只做 interrupt（无昂贵操作，重入无副作用）。
 

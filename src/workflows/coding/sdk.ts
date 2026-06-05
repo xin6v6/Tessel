@@ -7,8 +7,7 @@ const logger = createLogger("coding-sdk");
 // Claude Agent SDK 封装（headless）
 //
 // 每个 workflow stage 通过 runStageTask() 在指定仓库里跑一次 agentic 任务
-// （真实读写文件 / 跑命令）。SDK 自己是 agentic loop，所以这里是薄封装 ——
-// 不再套 LangChain ReAct。
+// （真实读写文件 / 跑命令）。SDK 自己是 agentic loop，所以这里是薄封装。
 //
 // 跨后端（同一份代码，靠 env 切换，不在代码里写 base URL）：
 //   · 本地：claude 已登录态 或 ANTHROPIC_API_KEY → 真 Claude

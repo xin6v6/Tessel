@@ -27,7 +27,7 @@ export interface TraceEntry {
     agentMs?: number;       // time in sub-agent node
   };
   route: string;         // which sub-agent was selected (or "__end__")
-  threadId?: string;     // checkpointer thread id (memory scope)
+  threadId?: string;     // graph store thread id (memory scope)
   error?: string;        // if the run failed
 }
 

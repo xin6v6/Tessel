@@ -22,7 +22,7 @@ FROM oven/bun:1.3.11-alpine AS runner
 WORKDIR /app
 
 # 以 root 创建运行时目录并授权给 bun 用户，再切换用户。
-# /app/data 是 checkpointer (data/checkpoints.db) 等运行时文件的存储位置；
+# /app/data 是 graph store (data/graph-runs.db) 等运行时文件的存储位置；
 # docker-compose 会把它挂为 named volume，但首次创建时挂载点的 owner 是
 # root —— 必须在 image 里预先创建并 chown，否则 bun 用户 mkdir / sqlite
 # open 都会因 permission denied 启动失败。

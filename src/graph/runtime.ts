@@ -7,16 +7,16 @@ import { createLogger } from "../observability/logger.ts";
 const logger = createLogger("runtime");
 
 // ────────────────────────────────────────────────────────────────────────────
-// 自建 graph run loop —— 替代 LangGraph 的 StateGraph。
+// 自建 graph run loop。
 //
-// 拓扑（与原 LangGraph index.ts 一一对应）：
+// 拓扑：
 //   START → router → supervisor
 //   supervisor --next--> slack/web/mcp/capabilities/workflow/__end__
 //   slack/web/mcp/capabilities → supervisor（固定边）
 //   workflow --next--> workflow_approval | supervisor
 //   workflow_approval → workflow（固定边）
 //
-// interrupt/resume（比 LangGraph 更直观，不抛异常、不整节点重跑）：
+// interrupt/resume（不抛异常、不整节点重跑）：
 //   · workflow_approval 节点首次进入返回 { __interrupt__ }；run loop 据此停机、
 //     落盘 {state, pendingNode:"workflow_approval", interrupt}，透出 __interrupt__。
 //   · resume 时从 workflow_approval 节点续跑（注入 resume 值），workflow 节点凭
@@ -30,7 +30,7 @@ export type NodeName =
   | "router" | "supervisor" | "slack" | "web" | "mcp"
   | "capabilities" | "workflow" | "workflow_approval";
 
-/** 中断信息（透出给 main，复刻 LangGraph __interrupt__[].value）。 */
+/** 中断信息（透出给 main，形如 __interrupt__[].value）。 */
 export interface InterruptValue {
   kind: string;
   recipe?: string;

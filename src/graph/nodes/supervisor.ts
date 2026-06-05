@@ -150,7 +150,7 @@ function sanitizeReply(msg: AIMsg): AIMsg {
 // ----------------------------------------------------------------
 //
 // 第一版策略：超过 HISTORY_TRIM_AT 条时，只把最近 HISTORY_KEEP 条传给 LLM。
-// 不修改 state.messages —— checkpointer 仍保留全部历史，方便后续 Step 1.1
+// 不修改 state.messages —— graph store 仍保留全部历史，方便后续 Step 1.1
 // 引入"按 speaker 加权"的更复杂裁剪。SQLite 中单 thread 的体积通常很小，
 // 等观察到真实膨胀再加清理。
 const HISTORY_TRIM_AT = 30;

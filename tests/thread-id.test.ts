@@ -7,7 +7,7 @@ import { humanMsg } from "../src/llm/messages.ts";
 import { getSpeaker } from "../src/graph/speaker.ts";
 import { humanMessageWithSpeaker } from "../src/graph/speaker.ts";
 
-// thread_id 拼装规则（原 checkpointer.test 的这组用例迁来这里，不依赖 langchain）。
+// thread_id 拼装规则的单元测试。
 describe("thread_id helpers", () => {
   it("DM uses user id", () => {
     expect(threadIdForSlackDm({ userId: "U001" })).toBe("slack:dm:U001");
@@ -27,7 +27,7 @@ describe("thread_id helpers", () => {
   });
 });
 
-// SqliteGraphStore 承接原 checkpointer 的「按 thread 持久化对话记忆」职责。
+// SqliteGraphStore 负责「按 thread 持久化对话记忆」。
 // （跨 invoke 的记忆累积由 runtime.test 的 run loop 用例覆盖；这里测 store 本体。）
 describe("SqliteGraphStore", () => {
   function store() {

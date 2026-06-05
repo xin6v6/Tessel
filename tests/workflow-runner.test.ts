@@ -32,7 +32,7 @@ mock.module("../src/workflows/coding/git.ts", () => ({
   currentBranch: async () => "main",
 }));
 
-// 审批决定由测试编排（不再 mock langgraph —— interrupt 已改成 resume 参数协议）。
+// 审批决定由测试编排（审批通过 resume 参数协议注入）。
 const interruptResume: { value: unknown } = { value: { approved: true } };
 
 const { buildWorkflowRunnerNode, buildWorkflowApprovalNode } = await import("../src/graph/nodes/workflow-runner.ts");

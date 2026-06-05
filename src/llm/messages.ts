@@ -1,12 +1,11 @@
 // ────────────────────────────────────────────────────────────────────────────
-// 原生消息类型 —— 替代 @langchain/core/messages 的 HumanMessage/AIMessage/...
+// 消息类型 —— HumanMsg / AIMsg / SystemMsg / ToolMsg。
 //
 // 用 discriminated union（role 判别）而非 class：
-//   · instanceof 检查 → m.role === "..." / isHuman(m) 类型守卫
-//   · 天然是 plain object，序列化进 SQLite checkpointer 无需任何序列化协议
+//   · m.role === "..." / isHuman(m) 类型守卫
+//   · 天然是 plain object，序列化进 SQLite store 无需任何序列化协议
 //
-// content 在本项目里实际只用 string 分支（LangChain 的 content 可以是数组，
-// 但 Tessel 从未用到），所以这里直接定为 string，简化下游。
+// content 在本项目里始终是 string，所以这里直接定为 string，简化下游。
 // ────────────────────────────────────────────────────────────────────────────
 
 export type Role = "human" | "ai" | "system" | "tool";
