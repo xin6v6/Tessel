@@ -36,7 +36,7 @@ services:
       # trace 文件等都跨部署保留。用 docker named volume 是因为
       # actions/checkout 会清理 GitHub Actions workspace 里的未追踪
       # 文件 (data/ 被 .gitignore 忽略)，曾经因此在部署时丢日志。
-      - synod-data:/app/data
+      - tessel-data:/app/data
 
     # Slack Socket Mode 是纯出站 WebSocket，无需暴露端口
     # ports:
@@ -80,7 +80,7 @@ services:
 
     volumes:
       # UI 共享同一个 data volume，只读读取日志即可
-      - synod-data:/app/data:ro
+      - tessel-data:/app/data:ro
 
     depends_on:
       - tessel
@@ -100,21 +100,10 @@ services:
 # ── Named volumes ─────────────────────────────────────────────────
 # 包含 logs/、contacts.db、traces.jsonl 等所有跨部署需要保留的数据。
 # `docker compose down` 不会删除它；显式删除用
-# `docker volume rm synod_synod-data`。
-#
-# 注意：`name: synod_synod-data` 显式锁定卷名，绕过 compose 自动加的
-# project 前缀。这样 2026-05 项目从 Synod 改名为 Tessel 时旧 volume
-# 仍能被复用，已存的日志和通讯录不丢。
+# `docker volume rm tessel_tessel-data`。
 #
 # 编辑通讯录（在宿主机上跑）：
 #   docker compose exec tessel bun run contacts add me slack U0B5YPFSG5C --kind=user
 #   docker compose exec tessel bun run contacts list
 volumes:
-  synod-data:
-    # external: true 告诉 compose"这个 volume 不归我管,只是引用它"。
-    # 不加这一行时,compose 看到 volume 实际名 (synod_synod-data) 不带
-    # 当前 project 前缀 (tessel_),每次启动都会刷一条 WARN:
-    #   "volume already exists but was created for project synod (expected tessel)"
-    # 行为上不影响(volume 仍然挂上),但日志噪音让真正的错被淹没。
-    external: true
-    name: synod_synod-data
+  tessel-data:
