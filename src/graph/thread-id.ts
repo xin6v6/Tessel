@@ -1,5 +1,5 @@
 /**
- * thread_id 拼装规则（决定 checkpointer 把对话分到哪个会话）：
+ * thread_id 拼装规则（决定 graph store 把对话分到哪个会话）：
  *
  *   DM(channel_type=im)           → slack:dm:{userId}
  *   公开/私有频道顶层 @mention      → slack:channel:{channel}

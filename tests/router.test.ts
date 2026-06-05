@@ -20,8 +20,7 @@ function fakeLLM(behavior: { reply?: string; throws?: boolean }) {
 
 function stateOf(text: string) {
   return {
-    // 迁移期：state.messages 仍是 BaseMessage[] 类型；router 内部用 fromLangChain
-    // 兼容读取，原生 humanMsg 也能被正确识别。测试里用 any 跨过类型差异。
+    // state.messages 用原生 humanMsg；测试里用 any 跨过类型差异。
     messages: [humanMsg(text)] as any,
     next: "__end__" as const,
     intent: "unknown" as const,

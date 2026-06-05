@@ -545,7 +545,7 @@ SDK   @slack/web-api
   不跨对话持久化（持久化由 Memory Store 负责）。
 
 实现
-  LangGraph Annotation（src/graph/state.ts）`,
+  Graph State（src/graph/state.ts）`,
   },
   {
     id: 'memory',
@@ -587,7 +587,7 @@ SDK   @slack/web-api
 `工具  Web Search（待接入）
 
 候选方案
-  Tavily Search API   — LangChain 原生
+  Tavily Search API   — 托管搜索
   Brave Search API    — 隐私友好
   SerpAPI             — Google 结果
 
@@ -610,7 +610,7 @@ SDK   @slack/web-api
   postgres     — 数据库查询
 
 接入方式
-  @langchain/mcp-adapters 转为 LangChain Tool`,
+  MCP adapter 转为 ToolRegistry 工具`,
   },
 ];
 

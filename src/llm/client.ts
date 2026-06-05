@@ -1,9 +1,9 @@
 import type { Message, AIMsg, ToolCall } from "./messages.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
-// LLMClient —— 替代 @langchain/openai 的 ChatOpenAI。
+// LLMClient —— OpenAI-compatible chat client。
 //
-// 直调 OpenAI-compatible 的 POST /chat/completions，承接 ChatOpenAI 的现用契约：
+// 直调 OpenAI-compatible 的 POST /chat/completions，契约：
 //   · invoke(messages, opts) → AIMsg（含 content / tool_calls / usage）
 //   · invokeStructured(messages, schema, {name}) → 强制 function calling 拿结构化输出
 //
@@ -11,7 +11,7 @@ import type { Message, AIMsg, ToolCall } from "./messages.ts";
 //   · token usage 同时填 usage_metadata 和 response_metadata.tokenUsage 两套字段
 //     —— supervisor/main 里那套"多 provider 字段兼容"读取逻辑一字不用改。
 //   · modelKwargs 展开到 body 顶层（如 thinking:{type:"disabled"} 透传给 DeepSeek）。
-//   · name 不发给 provider（与 LangChain 把 additional_kwargs 留在本地一致）。
+//   · name 不发给 provider（仅本地元数据）。
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface LLMConfig {

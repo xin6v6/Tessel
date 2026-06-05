@@ -44,7 +44,7 @@ function extractReply(
  *
  * interrupt 的 value 是 workflow-runner 传给 interrupt({...}) 的对象：
  *   { kind: "workflow-approval", summary, prompt, ... }
- * 形态依 LangGraph v1：result.__interrupt__[0].value（见官方 isInterrupted 用法）。
+ * run loop 的中断形态：result.__interrupt__[0].value。
  */
 function extractInterruptPrompt(
   result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>,
@@ -67,7 +67,7 @@ function extractTokens(
   const last = result.messages.at(-1);
   if (!last) return { prompt: 0, completion: 0, total: 0 };
 
-  // LangChain AIMessage exposes usage_metadata
+  // AIMsg carries usage_metadata
   const meta = (last as unknown as Record<string, unknown>);
   const usage = meta["usage_metadata"] as Record<string, number> | undefined
     ?? (meta["response_metadata"] as Record<string, unknown> | undefined)?.["tokenUsage"] as Record<string, number> | undefined;
@@ -97,7 +97,8 @@ function isApproval(text: string): boolean {
  * 调度图：若该 thread 有挂起的 workflow-approval 中断，则把本次消息当作审批
  * 回复用 Command 恢复；否则正常发起新一轮 invoke。
  *
- * Workflow Runner 用 interrupt() 暂停后，状态落进 checkpointer。下一条用户
+ * Workflow Runner 用 interrupt() 暂停后，状态落进 graph store（持久化层叫
+ * SqliteGraphStore）。下一条用户
  * 消息进来时在这里判定 —— "同意"则 resume({approved:true}) 让它继续编程/提交，
  * 否则 resume({approved:false}) 放弃。
  */
@@ -270,7 +271,7 @@ async function main() {
   // 1. 初始化集成层
   const toolRegistry = await integrations.initialize();
 
-  // 2. 构建 LangGraph
+  // 2. 构建 graph
   graph = buildGraph({
     baseURL:      process.env.LLM_BASE_URL,
     apiKey:       process.env.OPENAI_API_KEY,

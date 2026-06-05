@@ -4,7 +4,7 @@
 
 // ---- Tool 相关 ----
 
-/** JSON Schema 工具定义，传给 LangChain / LLM */
+/** JSON Schema 工具定义，传给 LLM */
 export interface ToolDefinition {
   name: string;
   description: string;

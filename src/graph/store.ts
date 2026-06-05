@@ -8,14 +8,13 @@ import type { InterruptEnvelope } from "./runtime.ts";
 const logger = createLogger("graph-store");
 
 // ────────────────────────────────────────────────────────────────────────────
-// GraphStore —— 自建 run loop 的持久化（替代 LangGraph 的 checkpointer）。
+// GraphStore —— 自建 run loop 的持久化层。
 //
-// 自建 run loop 没有 LangGraph 的 checkpoint / channel-version 概念，只需要
-// 「按 threadId 存取一份运行快照」。原生 Message 是 plain object，JSON.stringify
+// 只需要「按 threadId 存取一份运行快照」。原生 Message 是 plain object，JSON.stringify
 // 直接可序列化（这正是把消息原生化的设计目的），无需任何序列化协议。
 //
 // 用途：
-//   · 跨 Slack 消息保留对话历史（state.messages）—— 复刻原 checkpointer 记忆。
+//   · 跨 Slack 消息保留对话历史（state.messages）—— 保留对话历史。
 //   · 跨消息恢复 workflow 审批中断（pendingNode + interrupt）。
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -24,7 +23,7 @@ export interface SavedRun {
   state: GraphState;
   /** 因审批挂起停在哪个节点；null = 正常终止、无挂起中断。 */
   pendingNode: "workflow_approval" | null;
-  /** 挂起时透出的中断信息（复刻 LangGraph __interrupt__ 形态）。 */
+  /** 挂起时透出的中断信息（__interrupt__ 形态）。 */
   interrupt: InterruptEnvelope[] | null;
 }
 
@@ -72,7 +71,7 @@ export class SqliteGraphStore implements GraphStore {
 
 /**
  * 构建 GraphStore。路径优先级：参数 > GRAPH_STORE_DB env > data/graph-runs.db。
- * 目录创建 / sqlite open 失败的诊断逻辑沿用 checkpointer 的硬经验（容器挂卷等）。
+ * 目录创建 / sqlite open 失败的诊断逻辑应对容器挂卷等路径/权限问题。
  */
 export function buildGraphStore(dbPath?: string): GraphStore {
   const path = dbPath ?? process.env.GRAPH_STORE_DB ?? "data/graph-runs.db";

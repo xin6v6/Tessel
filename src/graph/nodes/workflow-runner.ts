@@ -23,11 +23,10 @@ const logger = createLogger("workflow-runner");
 //   workflow（重入）   从 state.workflowProgress 恢复，plan 已在 outputs 里 → 跳过，
 //                     从审批点之后继续（或按 aborted 收尾）。
 //
-// 为什么拆：LangGraph 的 interrupt() 靠抛 GraphInterrupt 暂停，节点中途的 state
-// 变更不落盘；resume 时节点【从头重新执行】。若在同一节点里「跑 plan → interrupt」，
-// resume 会重跑 plan（实测重跑一次 ~$0.5-0.8）。拆开后 plan 由 workflow 节点正常
-// return 落盘，approval 节点只 interrupt，重入的是 approval / 续跑的 workflow，
-// 都不会重跑 plan。
+// 为什么拆：若一个节点在中途暂停等待审批，它的 state 变更不落盘，resume 时会
+// 【从头重新执行】。若在同一节点里「跑 plan → interrupt」，resume 会重跑 plan
+// （实测重跑一次 ~$0.5-0.8）。拆开后 plan 由 workflow 节点正常 return 落盘，
+// approval 节点只 interrupt，重入的是 approval / 续跑的 workflow，都不会重跑 plan。
 //
 // coding 专属逻辑（git）全在 recipe 里，Runner 不碰。白名单：仅 CODING_ALLOWLIST。
 // ────────────────────────────────────────────────────────────────────────────
