@@ -3,6 +3,17 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import index from "./index.html";
+import graphPage from "./graph.html";
+import skillsPage from "./skills.html";
+
+import { buildGraph, type CompiledGraph } from "../graph/index.ts";
+import { invokeOrResume, extractReply, extractRoute } from "../graph/dispatch.ts";
+import { humanMessageWithSpeaker } from "../graph/speaker.ts";
+import { IntegrationRegistry, SlackIntegration } from "../integrations/index.ts";
+import { runWithContext, newSessionId, makeUserId } from "../observability/context.ts";
+import { buildSkillContext } from "../skills/context.ts";
+import { readBindings, writeBindings } from "../skills/bindings.ts";
+import { isValidSkillName, type SkillBindings } from "../skills/types.ts";
 
 // Serve log-viewer.html as a raw file to avoid Bun bundling it alongside
 // index.html — they would share the same HMR/JSX runtime bundle and conflict.
@@ -301,6 +312,77 @@ function getLocalIP(): string {
   return "localhost";
 }
 
+// ── Chat graph bootstrap ─────────────────────────────────────────────────────
+//
+// UI 进程自建一个 graph 实例(独立于 Slack 主进程)，给 Web 聊天界面用。
+// 复用 buildGraph + dispatch，与 Slack 走同一套 Router/Supervisor/审批逻辑，
+// 只是 store / 内存是这个进程自己的实例。
+//
+// 集成层照常初始化：有 SLACK_BOT_TOKEN 就装 Slack(让 Slack 工具可用)，
+// 没有也不影响 —— Web 聊天的 chat/capabilities 路径不依赖任何集成。
+
+const chatIntegrations = new IntegrationRegistry();
+if (process.env.SLACK_BOT_TOKEN) {
+  // socketMode=false：UI 进程只借用 Slack 的工具(发消息/查频道等)，
+  // 不监听事件(事件由 Slack 主进程处理)，避免两个进程抢同一个 socket。
+  chatIntegrations.add(new SlackIntegration({ socketMode: false }));
+}
+
+let chatGraph: CompiledGraph | null = null;
+
+// skill 上下文 —— 与 chatGraph 共享同一实例。/api/skills* 的 CRUD 操作这个
+// registry,改完调 reload() 让运行时(chat/slack/... 注入)即时生效。
+const skillCtx = buildSkillContext();
+
+async function initChatGraph(): Promise<void> {
+  try {
+    const toolRegistry = await chatIntegrations.initialize();
+    chatGraph = buildGraph({
+      baseURL: process.env.LLM_BASE_URL,
+      apiKey:  process.env.OPENAI_API_KEY,
+      model:   process.env.LLM_MODEL,
+      toolRegistry,
+      integrations: chatIntegrations,
+      skills: skillCtx,
+    });
+    console.log("[ui] chat graph ready");
+  } catch (err) {
+    console.error("[ui] failed to init chat graph:", err);
+  }
+}
+void initChatGraph();
+
+const WEB_THREAD_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+// ── Skill REST helpers ───────────────────────────────────────────────────────
+//
+// 可绑定的 agent 名 = 主 agent(supervisor) + 工具 agent(KNOWN_AGENTS)。
+// 去掉 capabilities/workflow 这类不走自建 ReAct 注入的节点(它们不消费 skill)。
+const SKILL_BINDABLE_AGENTS = ["supervisor", "slack", "web", "mcp"] as const;
+
+/** 校验并清洗 bindings:agent 必须在白名单、skill 必须真实存在。返回清洗后的映射。 */
+function sanitizeBindings(input: unknown): { ok: true; value: SkillBindings } | { ok: false; error: string } {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, error: "bindings 必须是对象" };
+  }
+  const out: SkillBindings = {};
+  for (const [agent, skills] of Object.entries(input as Record<string, unknown>)) {
+    if (!(SKILL_BINDABLE_AGENTS as readonly string[]).includes(agent)) {
+      return { ok: false, error: `未知 agent：${agent}` };
+    }
+    if (!Array.isArray(skills) || !skills.every((s) => typeof s === "string")) {
+      return { ok: false, error: `${agent} 的 skill 列表必须是字符串数组` };
+    }
+    for (const name of skills as string[]) {
+      if (!skillCtx.registry.has(name)) {
+        return { ok: false, error: `skill 不存在：${name}` };
+      }
+    }
+    out[agent] = skills as string[];
+  }
+  return { ok: true, value: out };
+}
+
 // ── Bun HTTP server ────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.UI_PORT ?? 3456);
@@ -311,7 +393,9 @@ const server = Bun.serve({
 
   routes: {
     // ── HTML pages ─────────────────────────────────────────
-    "/": index,
+    "/": index,            // Web 聊天主界面
+    "/graph": graphPage,   // 架构图(从主界面挪到独立路由)
+    "/skills": skillsPage, // skill 管理 + agent 调度矩阵
     "/logs": {
       GET(_req: Request): Response {
         return new Response(logViewerHtml, {
@@ -385,6 +469,152 @@ const server = Bun.serve({
       },
     },
 
+    // ── REST: Web 聊天 ─────────────────────────────────────
+    //
+    // Body: { threadId: string, message: string }
+    // 一个 threadId 一段对话(浏览器侧持久化)。复用 invokeOrResume —— 若该
+    // thread 有挂起的 workflow 审批中断，本次消息会被当作审批回复处理。
+    "/api/chat": {
+      async POST(req: Request): Promise<Response> {
+        if (!chatGraph) {
+          return Response.json({ error: "聊天服务尚未就绪，请稍候重试" }, { status: 503 });
+        }
+
+        let body: { threadId?: unknown; message?: unknown };
+        try {
+          body = await req.json();
+        } catch {
+          return Response.json({ error: "请求体必须是 JSON" }, { status: 400 });
+        }
+
+        const threadId = typeof body.threadId === "string" ? body.threadId : "";
+        const message  = typeof body.message === "string" ? body.message.trim() : "";
+        if (!WEB_THREAD_RE.test(threadId)) {
+          return Response.json({ error: "无效的 threadId" }, { status: 400 });
+        }
+        if (!message) {
+          return Response.json({ error: "message 不能为空" }, { status: 400 });
+        }
+
+        const sessionId  = newSessionId();
+        const externalId = `web:${threadId}`;
+        const userId     = makeUserId("web", threadId);
+
+        return runWithContext(
+          { sessionId, source: "web", externalId, userId },
+          async () => {
+            try {
+              const controller = new AbortController();
+              // workflow 可能跑很久(SDK 编程/测试)，放宽到 30 分钟。
+              const timeout = setTimeout(() => controller.abort(), 30 * 60_000);
+              const result = await invokeOrResume(
+                chatGraph!,
+                threadId,
+                humanMessageWithSpeaker(message, { speakerId: threadId, source: "web" }),
+                message,
+                controller.signal,
+              );
+              clearTimeout(timeout);
+              return Response.json({
+                reply: extractReply(result),
+                route: extractRoute(result),
+              });
+            } catch (err) {
+              const error = err instanceof Error ? err.message : String(err);
+              process.stderr.write(`[ui] /api/chat error: ${error}\n`);
+              return Response.json({ error: "处理出错，请稍后重试" }, { status: 500 });
+            }
+          },
+        );
+      },
+    },
+
+    // ── REST: Skill 管理 ──────────────────────────────────
+    //
+    // skill 真相源 = skills/ 目录下的 SKILL.md;归属 = skills/_bindings.json。
+    // 所有写操作走共享的 skillCtx.registry,改完即时生效(运行时同一实例)。
+    //
+    //   GET    /api/skills            列出所有 skill { name, description }
+    //   POST   /api/skills            新建 { name, description, body }
+    //   GET    /api/skills/:name      取单个 skill 全文(含 body,供编辑)
+    //   PUT    /api/skills/:name      改 { description?, body? }
+    //   DELETE /api/skills/:name      删
+    //   GET    /api/skills-bindings   取归属 + 可绑定 agent 列表
+    //   PUT    /api/skills-bindings   存归属(校验 agent 白名单 + skill 存在)
+    "/api/skills": {
+      GET(_req: Request): Response {
+        const list = skillCtx.registry.list().map((s) => ({ name: s.name, description: s.description }));
+        return Response.json({ skills: list });
+      },
+      async POST(req: Request): Promise<Response> {
+        let body: { name?: unknown; description?: unknown; body?: unknown };
+        try { body = await req.json(); } catch { return Response.json({ error: "请求体必须是 JSON" }, { status: 400 }); }
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const description = typeof body.description === "string" ? body.description : "";
+        const content = typeof body.body === "string" ? body.body : "";
+        if (!isValidSkillName(name)) return Response.json({ error: "name 需为 kebab-case(1~64 字符)" }, { status: 400 });
+        if (!description.trim()) return Response.json({ error: "description 不能为空" }, { status: 400 });
+        try {
+          const skill = skillCtx.registry.create(name, description, content);
+          return Response.json({ skill }, { status: 201 });
+        } catch (err) {
+          return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 409 });
+        }
+      },
+    },
+    "/api/skills/:name": {
+      GET(req: Request & { params: { name: string } }): Response {
+        const skill = skillCtx.registry.get(req.params.name);
+        if (!skill) return Response.json({ error: "skill 不存在" }, { status: 404 });
+        return Response.json({ skill });
+      },
+      async PUT(req: Request & { params: { name: string } }): Promise<Response> {
+        let body: { description?: unknown; body?: unknown };
+        try { body = await req.json(); } catch { return Response.json({ error: "请求体必须是 JSON" }, { status: 400 }); }
+        const patch: { description?: string; body?: string } = {};
+        if (typeof body.description === "string") patch.description = body.description;
+        if (typeof body.body === "string") patch.body = body.body;
+        try {
+          const skill = skillCtx.registry.update(req.params.name, patch);
+          return Response.json({ skill });
+        } catch (err) {
+          return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 404 });
+        }
+      },
+      DELETE(req: Request & { params: { name: string } }): Response {
+        try {
+          skillCtx.registry.remove(req.params.name);
+          // 顺手从 bindings 里清掉对该 skill 的引用,避免悬空绑定。
+          const b = readBindings(skillCtx.registry.skillsDir());
+          let changed = false;
+          for (const agent of Object.keys(b)) {
+            const next = b[agent]!.filter((s) => s !== req.params.name);
+            if (next.length !== b[agent]!.length) { b[agent] = next; changed = true; }
+          }
+          if (changed) writeBindings(skillCtx.registry.skillsDir(), b);
+          return Response.json({ ok: true });
+        } catch (err) {
+          return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 404 });
+        }
+      },
+    },
+    "/api/skills-bindings": {
+      GET(_req: Request): Response {
+        return Response.json({
+          bindings: readBindings(skillCtx.registry.skillsDir()),
+          agents: SKILL_BINDABLE_AGENTS,
+        });
+      },
+      async PUT(req: Request): Promise<Response> {
+        let body: unknown;
+        try { body = await req.json(); } catch { return Response.json({ error: "请求体必须是 JSON" }, { status: 400 }); }
+        const sane = sanitizeBindings((body as { bindings?: unknown })?.bindings ?? body);
+        if (!sane.ok) return Response.json({ error: sane.error }, { status: 400 });
+        writeBindings(skillCtx.registry.skillsDir(), sane.value);
+        return Response.json({ ok: true, bindings: sane.value });
+      },
+    },
+
     // ── SSE: real-time stream ──────────────────────────────
     "/api/logs/stream": {
       GET(req: Request): Response {
@@ -439,11 +669,13 @@ console.log(`
 ╔═══════════════════════════════════════════════╗
 ║           Tessel UI  (port ${PORT})               ║
 ╠═══════════════════════════════════════════════╣
-║  Agent Graph  →  http://localhost:${PORT}        ║
+║  Chat         →  http://localhost:${PORT}        ║
+║  Agent Graph  →  http://localhost:${PORT}/graph  ║
 ║  Log Viewer   →  http://localhost:${PORT}/logs   ║
 ║                                               ║
 ║  LAN access:                                  ║
-║  Agent Graph  →  http://${localIP}:${PORT}        ║
-║  Log Viewer   →  http://${localIP}:${PORT}/logs   ║
+║  Chat         →  http://${localIP}:${PORT}        ║
+║  Agent Graph  →  http://${localIP}:${PORT}/graph ║
+║  Log Viewer   →  http://${localIP}:${PORT}/logs  ║
 ╚═══════════════════════════════════════════════╝
 `);

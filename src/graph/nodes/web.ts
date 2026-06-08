@@ -2,6 +2,7 @@ import type { LLMClient } from "../../llm/client.ts";
 import { humanMsg, isHuman, isTool } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
+import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("web-agent");
 
@@ -32,7 +33,7 @@ const stubSearchTool: ReactTool = {
   },
 };
 
-export function buildWebAgentNode(llm: LLMClient) {
+export function buildWebAgentNode(llm: LLMClient, skills?: SkillContext) {
   const SYSTEM_PROMPT =
     "你是一个 Web 搜索助手。根据用户需求执行网络搜索，" +
     "总结搜索结果并给出清晰的回答。";
@@ -52,11 +53,15 @@ export function buildWebAgentNode(llm: LLMClient) {
     const inputSnippet = lastUserMsg.content.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
+    const systemPrompt = skills
+      ? skills.promptFor("web", SYSTEM_PROMPT, lastUserMsg.content)
+      : SYSTEM_PROMPT;
+
     try {
       const result = await runReactAgent({
         llm,
         tools: [stubSearchTool],
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         messages: [humanMsg(lastUserMsg.content)],
       });
       const output = result.messages.at(-1)?.content ?? "";

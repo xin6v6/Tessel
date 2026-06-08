@@ -7,6 +7,8 @@ import { recipeByTag, recordStageRun } from "../../workflows/recipe-store.ts";
 import { repoForChannel } from "../../workflows/repo-map.ts";
 import type { Recipe, StageDef } from "../../workflows/recipes/types.ts";
 import { runStageTask } from "../../workflows/coding/sdk.ts";
+import type { SkillContext } from "../../skills/context.ts";
+import { renderSkillBodies } from "../../skills/inject.ts";
 
 const logger = createLogger("workflow-runner");
 
@@ -72,6 +74,7 @@ async function runStageTaskFor(
   cwd: string,
   stage: StageDef,
   wf: WorkflowProgress,
+  skills?: SkillContext,
 ): Promise<{ output: string; ok: boolean; nextWf: WorkflowProgress }> {
   let next = wf;
   let snapshot: string | undefined;
@@ -83,7 +86,7 @@ async function runStageTaskFor(
       logger.warn({ stage: stage.id, err: String(err) }, "snapshot failed");
     }
   }
-  const prompt = stage.buildPrompt({
+  let prompt = stage.buildPrompt({
     requirement: next.requirement,
     plan: next.plan,
     prev: next.lastStageOutput,
@@ -91,6 +94,19 @@ async function runStageTaskFor(
     outputs: next.outputs,
     attempt: next.attempt,
   });
+
+  // skill 注入(配方级,无条件):把 stage.skills 声明的成熟指令正文拼到 prompt 末尾。
+  // 与自建 agent 不同 —— 这里不做命中判断,stage 用哪个 skill 是配方设计的一部分。
+  if (stage.skills?.length && skills) {
+    const resolved = stage.skills
+      .map((name) => skills.registry.get(name))
+      .filter((s): s is NonNullable<typeof s> => Boolean(s));
+    const missing = stage.skills.filter((name) => !skills.registry.has(name));
+    if (missing.length) logger.warn({ stage: stage.id, missing }, "stage 声明的 skill 不存在,已跳过");
+    const bodies = renderSkillBodies(resolved);
+    if (bodies) prompt = `${prompt}\n\n---\n参考以下技能指令执行本阶段:\n\n${bodies}`;
+  }
+
   const r = await runStageTask({ repoPath: cwd, prompt, allowedTools: stage.allowedTools, stageLabel: stage.id });
   recordStageRun({
     recipe: recipe.name, stage: stage.id, attempt: next.attempt,
@@ -116,7 +132,7 @@ async function abortWith(
 // ────────────────────────────────────────────────────────────────────────────
 // workflow 节点：跑 stage，遇审批点落盘并交给 approval 节点
 // ────────────────────────────────────────────────────────────────────────────
-export function buildWorkflowRunnerNode() {
+export function buildWorkflowRunnerNode(skills?: SkillContext) {
   return async function workflowRunnerNode(
     state: GraphStateType,
   ): Promise<Partial<GraphStateType>> {
@@ -189,7 +205,7 @@ export function buildWorkflowRunnerNode() {
         wf.phase !== "running_after_approval";
 
       logger.info({ stage: stage.id, attempt: wf.attempt }, "running");
-      const { output, ok, nextWf } = await runStageTaskFor(recipe, cwd, stage, wf);
+      const { output, ok, nextWf } = await runStageTaskFor(recipe, cwd, stage, wf, skills);
       wf = nextWf;
 
       if (needsApproval) {
