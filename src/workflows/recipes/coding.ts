@@ -70,6 +70,9 @@ export const codingRecipe: Recipe = {
       label: "审核",
       allowedTools: READONLY_BASH,
       mutates: false,
+      // 复用 skills/ 里的 code-review 成熟指令(若存在)。不存在则跳过,
+      // stage 仍按下面的 buildPrompt 正常审核 —— skill 是增强,不是依赖。
+      skills: ["code-review"],
       snapshot: async (cwd) => {
         const d = await diffSummary(cwd);
         return `${d.stat}\n\n${d.diff}`;

@@ -10,6 +10,7 @@ import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
 import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/workflow-runner.ts";
 import type { ToolRegistry } from "../tools/index.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
+import { buildSkillContext, type SkillContext } from "../skills/context.ts";
 
 export type { GraphStateType } from "./state.ts";
 
@@ -47,6 +48,9 @@ export function buildGraph(params: {
   /** 显式注入 GraphStore。测试传 :memory 的 SqliteGraphStore；
    *  不传则用默认的 data/graph-runs.db。 */
   store?: GraphStore;
+  /** 显式注入 SkillContext。不传则从 skills/ 目录构建一个(load 一次)。
+   *  UI 进程可与图共享同一实例,改 skill 后 reload 即时生效。 */
+  skills?: SkillContext;
 }) {
   const apiKey  = params.apiKey ?? process.env.OPENAI_API_KEY ?? "";
   const baseURL = params.baseURL ?? process.env.LLM_BASE_URL;
@@ -94,19 +98,23 @@ export function buildGraph(params: {
       })
     : mainClient;
 
+  // skill 上下文 —— 自建 agent(supervisor/slack/web/mcp)选择性注入 skill 用。
+  // 不传则从 skills/ 目录构建(load 一次)。绑定关系按 _bindings.json 强制。
+  const skills = params.skills ?? buildSkillContext();
+
   // 构建各节点
   const routerNode        = buildRouterNode({ routerLLM });
-  const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations);
-  const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry);
-  const webAgentNode      = buildWebAgentNode(mainClient);
-  const mcpAgentNode      = buildMcpAgentNode(mainClient);
+  const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations, skills);
+  const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry, skills);
+  const webAgentNode      = buildWebAgentNode(mainClient, skills);
+  const mcpAgentNode      = buildMcpAgentNode(mainClient, skills);
   const capabilitiesNode  = buildCapabilitiesNode(
     params.toolRegistry,
     params.integrations,
     KNOWN_AGENTS,
     SUB_AGENTS,
   );
-  const workflowNode         = buildWorkflowRunnerNode();
+  const workflowNode         = buildWorkflowRunnerNode(skills);
   const workflowApprovalNode = buildWorkflowApprovalNode();
 
   // 节点表 —— 拓扑（边）写死在 runtime.ts 的 routeFrom：

@@ -8,6 +8,7 @@ import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
 import type { IntegrationRegistry } from "../../integrations/registry.ts";
+import type { SkillContext } from "../../skills/context.ts";
 import {
   buildCapabilitiesSnapshot,
   snapshotForRoutingPrompt,
@@ -215,6 +216,7 @@ export function buildSupervisorNode(
   llm: LLMClient,
   toolRegistry: ToolRegistry,
   integrations: IntegrationRegistry,
+  skills?: SkillContext,
 ) {
   // Snapshot 在 supervisor 构造时算一次缓存住 —— 集成在 main.ts 启动时
   // 一次性 initialize，进程生命周期内不再变。如果以后引入热重载或动态
@@ -394,10 +396,14 @@ export function buildSupervisorNode(
     // ── 路径 2：chat → 直接 LLM 回复 ──
     if (intent === "chat") {
       const t1 = Date.now();
+      // 主 agent（supervisor）的 skill 选择性注入:绑定给 supervisor 的 skill 进 menu,
+      // 命中的注入正文。没绑定 / 没命中 → 等价于原 prompt,正常闲聊零影响。
+      const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`;
+      const chatSystem = skills
+        ? skills.promptFor("supervisor", chatBase, inputSnippet)
+        : chatBase;
       const directReply = await llm.invoke([
-        systemMsg(
-          `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`
-        ),
+        systemMsg(chatSystem),
         ...historyForPrompt(messages),
       ]);
       const safeDirectReply = sanitizeReply(directReply);

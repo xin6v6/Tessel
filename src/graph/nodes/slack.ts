@@ -4,6 +4,7 @@ import { humanMsg, systemMsg, isHuman, isTool, type Message } from "../../llm/me
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
+import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("slack-agent");
 
@@ -45,7 +46,7 @@ const FINAL_ANSWER_PARAMS = {
  * 2. ReAct 循环调用 Slack 工具完成任务
  * 3. 第二阶段把输出收敛成结构化成稿（invokeStructured），写 finalReply
  */
-export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry) {
+export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, skills?: SkillContext) {
   // ToolRegistry 的 slack_* 工具 → ReactTool（直接用 JSON Schema，不再过 zod）
   const tools: ReactTool[] = toolRegistry
     .definitions()
@@ -83,11 +84,17 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry) 
     const inputSnippet = userInputText.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
+    // skill 选择性注入:绑定给 slack 的 skill 进 menu,命中的注入正文。
+    // 没绑定 / 没命中 → 等价于原 SYSTEM_PROMPT,正常对话零影响。
+    const systemPrompt = skills
+      ? skills.promptFor("slack", SYSTEM_PROMPT, userInputText)
+      : SYSTEM_PROMPT;
+
     try {
       const result = await runReactAgent({
         llm,
         tools,
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         messages: [humanMsg(userInputText)],
       });
 

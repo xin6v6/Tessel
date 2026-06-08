@@ -32,6 +32,15 @@ export interface StageDef {
    * 构造交给 SDK 的 prompt。ctx 提供原始需求、plan、上一阶段产出、snapshot 等。
    */
   buildPrompt: (ctx: StagePromptContext) => string;
+  /**
+   * 本 stage 要复用的 skill name 列表（skills/ 目录下的成熟指令)。可选。
+   *
+   * 与自建 agent 的「命中才注入」不同:workflow 是长流程、配方即代码,stage
+   * 用哪个 skill 是【配方设计的一部分】—— 这里【无条件注入】声明的 skill 正文
+   * 到 stage prompt(不走 UI bindings、不做命中判断),保证流程行为稳定可复现。
+   * skill 不存在则跳过(记日志),不影响 stage 执行。
+   */
+  skills?: string[];
 }
 
 /** buildPrompt 可用的上下文。 */

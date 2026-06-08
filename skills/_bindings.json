@@ -1,0 +1,8 @@
+{
+  "supervisor": [
+    "code-review"
+  ],
+  "slack": [
+    "code-review"
+  ]
+}

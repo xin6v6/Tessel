@@ -2,6 +2,7 @@ import type { LLMClient } from "../../llm/client.ts";
 import { humanMsg, isHuman, isTool } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
+import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("mcp-agent");
 
@@ -35,7 +36,7 @@ const stubMcpTool: ReactTool = {
   },
 };
 
-export function buildMcpAgentNode(llm: LLMClient) {
+export function buildMcpAgentNode(llm: LLMClient, skills?: SkillContext) {
   const SYSTEM_PROMPT =
     "你是一个 MCP 工具助手。通过 MCP 协议操作外部服务（文件系统、GitHub、Notion 等）。" +
     "根据用户需求选择合适的 MCP Server 和操作，完成后用简洁的中文汇报结果。";
@@ -55,11 +56,15 @@ export function buildMcpAgentNode(llm: LLMClient) {
     const inputSnippet = lastUserMsg.content.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
+    const systemPrompt = skills
+      ? skills.promptFor("mcp", SYSTEM_PROMPT, lastUserMsg.content)
+      : SYSTEM_PROMPT;
+
     try {
       const result = await runReactAgent({
         llm,
         tools: [stubMcpTool],
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         messages: [humanMsg(lastUserMsg.content)],
       });
       const output = result.messages.at(-1)?.content ?? "";
