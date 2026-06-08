@@ -1,5 +1,10 @@
-import type { HumanMsg } from "./llm/messages.ts";
 import { buildGraph } from "./graph/index.ts";
+import {
+  invokeOrResume,
+  extractReply,
+  extractTokens,
+  extractRoute,
+} from "./graph/dispatch.ts";
 import { humanMessageWithSpeaker } from "./graph/speaker.ts";
 import {
   makeThreadId,
@@ -12,118 +17,8 @@ import { logger } from "./utils/logger.ts";
 import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
 import { traceWriter } from "./observability/trace.ts";
 
-// ----------------------------------------------------------------
-// 工具函数
-// ----------------------------------------------------------------
-
-/** 去掉推理模型（如 MiniMax M2.7）输出的 <think>...</think> 思考块 */
-function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-}
-
-function extractReply(
-  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
-): string {
-  // workflow interrupt（审批中断）：graph 暂停、没生成 AIMessage，审批提示在
-  // result.__interrupt__[0].value 里。必须优先取它 —— 否则会 fall through 到
-  // messages.at(-1)（=用户刚发的 HumanMessage），把用户原话复读回去。
-  const interruptReply = extractInterruptPrompt(result);
-  if (interruptReply) return interruptReply;
-
-  const last = result.messages.at(-1);
-  const raw =
-    typeof last?.content === "string"
-      ? last.content
-      : JSON.stringify(last?.content ?? "");
-  return stripThinking(raw) || "（无回复）";
-}
-
-/**
- * 若 graph 因 workflow 审批而中断，拼出发给用户的审批提示（计划摘要 + 确认指引）。
- * 返回 undefined 表示本次不是中断（走正常 message 提取）。
- *
- * interrupt 的 value 是 workflow-runner 传给 interrupt({...}) 的对象：
- *   { kind: "workflow-approval", summary, prompt, ... }
- * run loop 的中断形态：result.__interrupt__[0].value。
- */
-function extractInterruptPrompt(
-  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>,
-): string | undefined {
-  const interrupts = (result as unknown as Record<string, unknown>)["__interrupt__"];
-  if (!Array.isArray(interrupts) || interrupts.length === 0) return undefined;
-  const value = (interrupts[0] as { value?: unknown })?.value as
-    | { summary?: string; prompt?: string }
-    | undefined;
-  if (!value) return undefined;
-  const summary = value.summary ? stripThinking(value.summary).trim() : "";
-  const prompt = value.prompt?.trim() || "请回复「同意」继续，回复其他则放弃。";
-  return summary ? `${summary}\n\n---\n${prompt}` : prompt;
-}
-
-/** Extract token counts from the last AIMessage in a graph result */
-function extractTokens(
-  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
-): { prompt: number; completion: number; total: number } {
-  const last = result.messages.at(-1);
-  if (!last) return { prompt: 0, completion: 0, total: 0 };
-
-  // AIMsg carries usage_metadata
-  const meta = (last as unknown as Record<string, unknown>);
-  const usage = meta["usage_metadata"] as Record<string, number> | undefined
-    ?? (meta["response_metadata"] as Record<string, unknown> | undefined)?.["tokenUsage"] as Record<string, number> | undefined;
-
-  if (!usage) return { prompt: 0, completion: 0, total: 0 };
-
-  const prompt     = (usage["input_tokens"]        ?? usage["promptTokens"]     ?? 0) as number;
-  const completion = (usage["output_tokens"]       ?? usage["completionTokens"] ?? 0) as number;
-  const total      = (usage["total_tokens"]        ?? usage["totalTokens"]      ?? prompt + completion) as number;
-  return { prompt, completion, total };
-}
-
-/** Extract the route selected from graph state */
-function extractRoute(
-  result: Awaited<ReturnType<NonNullable<typeof graph>["invoke"]>>
-): string {
-  const state = result as unknown as Record<string, unknown>;
-  return typeof state["next"] === "string" ? state["next"] : "__end__";
-}
-
-/** 用户消息是否表达"同意"（用于审批恢复）。 */
-function isApproval(text: string): boolean {
-  return /(^|\s)(同意|确认|可以|好的|批准|approve|yes|ok|go)(\s|$|，|。|!|！)/i.test(text.trim());
-}
-
-/**
- * 调度图：若该 thread 有挂起的 workflow-approval 中断，则把本次消息当作审批
- * 回复用 Command 恢复；否则正常发起新一轮 invoke。
- *
- * Workflow Runner 用 interrupt() 暂停后，状态落进 graph store（持久化层叫
- * SqliteGraphStore）。下一条用户
- * 消息进来时在这里判定 —— "同意"则 resume({approved:true}) 让它继续编程/提交，
- * 否则 resume({approved:false}) 放弃。
- */
-async function invokeOrResume(
-  g: NonNullable<typeof graph>,
-  threadId: string,
-  message: HumanMsg,
-  rawText: string,
-  signal?: AbortSignal,
-): Promise<Awaited<ReturnType<typeof g.invoke>>> {
-  const config = { threadId, ...(signal ? { signal } : {}) };
-  let pending = false;
-  try {
-    pending = (await g.getState(threadId)).pending;
-  } catch {
-    pending = false; // 无 state / 读取失败 → 当作新对话
-  }
-
-  if (pending) {
-    const approved = isApproval(rawText);
-    logger.info({ threadId, approved }, "workflow: resuming from approval interrupt");
-    return g.invoke({ resume: { approved } }, config);
-  }
-  return g.invoke({ messages: [message] }, config);
-}
+// 调度逻辑(invokeOrResume / extractReply / …)收口在 graph/dispatch.ts，
+// 与 Web 入口(ui/server.ts)共用，保证两条入口走一致的 Router/Supervisor/审批语义。
 
 // ----------------------------------------------------------------
 // 集成层初始化

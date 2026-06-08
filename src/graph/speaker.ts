@@ -16,7 +16,7 @@ import { humanMsg, type HumanMsg } from "../llm/messages.ts";
 export interface SpeakerMeta {
   speakerId: string;
   speakerName?: string;
-  source: "slack" | "cli";
+  source: "slack" | "cli" | "web";
 }
 
 /**
@@ -42,7 +42,7 @@ export function getSpeaker(msg: { additional_kwargs?: Record<string, unknown> })
   const raw = msg.additional_kwargs?.speaker;
   if (!raw || typeof raw !== "object") return undefined;
   const s = raw as Partial<SpeakerMeta>;
-  if (typeof s.speakerId !== "string" || (s.source !== "slack" && s.source !== "cli")) return undefined;
+  if (typeof s.speakerId !== "string" || (s.source !== "slack" && s.source !== "cli" && s.source !== "web")) return undefined;
   return {
     speakerId: s.speakerId,
     speakerName: typeof s.speakerName === "string" ? s.speakerName : undefined,

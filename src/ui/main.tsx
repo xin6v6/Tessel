@@ -1,5 +1,5 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import AgentGraph from './AgentGraph.tsx';
+import Chat from './Chat.tsx';
 
-createRoot(document.getElementById('root')!).render(<AgentGraph />);
+createRoot(document.getElementById('root')!).render(<Chat />);
