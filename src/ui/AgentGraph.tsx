@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import {
   X, User, Bot, BrainCircuit, MessageSquare, Search, Wrench, Settings2,
   Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck, ThumbsUp,
-  GitBranch, Database, ScrollText, ChevronRight, Code2, Split,
+  GitBranch, Database, ScrollText, ChevronRight, Code2, Split, Puzzle, Cpu,
 } from 'lucide-react';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ import {
 
 type NodeType =
   | 'entry' | 'exit' | 'supervisor' | 'agent' | 'tool' | 'state'
-  | 'runner' | 'stage' | 'approval' | 'router';
+  | 'runner' | 'stage' | 'approval' | 'router' | 'skill' | 'classifier';
 
 interface GNode {
   id: string;
@@ -45,31 +45,40 @@ interface GEdge {
 // ─── 节点 ────────────────────────────────────────────────────────────────────
 
 const NODES: GNode[] = [
-  // L0 — 入口 / 出口
-  { id: 'slack_in', type: 'entry', label: 'Slack 入站', sub: '@mention / DM',
-    layer: 0, col: 2, Icon: User,
+  // L0 — 入口 / 出口（居中）
+  { id: 'slack_in', type: 'entry', label: '用户消息', sub: 'Slack / CLI REPL',
+    layer: 0, col: 3.5, Icon: User,
     prompt:
-`消息入站
+`消息入站（多平台）
 
-  Socket Mode 收到事件
+Slack（生产）
+  Socket Mode 收到 @mention / DM 事件
   → SlackReceiver.onMention / onMessage
-  → 封装 HumanMessage
+  → 封装 HumanMessage + SpeakerMeta
   → graph.invoke({ messages }, { thread_id })
 
-文件  src/integrations/slack/*` },
-  { id: 'slack_out', type: 'exit', label: 'Slack 回复', sub: 'chat.postMessage',
-    layer: 0, col: 6, Icon: Bot,
-    prompt:
-`消息出站
+CLI REPL（本地调试）
+  bun run dev / bun run start
+  → stdin readline → graph.invoke
 
+文件  src/integrations/slack/*、src/main.ts` },
+  { id: 'slack_out', type: 'exit', label: '回复', sub: 'Slack / stdout',
+    layer: 0, col: 5.2, Icon: Bot,
+    prompt:
+`消息出站（多平台）
+
+Slack
   Supervisor 生成最终 AIMessage（next = __end__）
   → say() → chat.postMessage 回到原 Thread
 
-文件  src/integrations/slack/*` },
+CLI REPL
+  → console.log 打印到终端
 
-  // L1 — 状态
+文件  src/integrations/slack/*、src/main.ts` },
+
+  // L1 — 状态（右侧）
   { id: 'state', type: 'state', label: 'Graph State', sub: 'Graph State + Store',
-    layer: 1, col: 6.4, Icon: Database,
+    layer: 1, col: 6.8, Icon: Database,
     prompt:
 `全局状态 + 持久化
 
@@ -82,30 +91,62 @@ Graph Store（data/graph-runs.db）
 
 文件  src/graph/state.ts、src/graph/store.ts` },
 
-  // L1 — Router（前置快速分类）
+  // L1 — Router + Classifier 同层
   { id: 'router', type: 'router', label: 'Router', sub: '前置快速分类',
-    layer: 1, col: 2, Icon: Split,
+    layer: 1, col: 3.5, Icon: Split,
     prompt:
 `前置快速分类节点（supervisor 之前）
 
 只做一件事：把消息判成 chat / tool / workflow / capabilities，
 写进 state.intent，让 supervisor 跳过自己那一轮意图分类。
 
-三层（最快的先跑）
-  Tier 0  零成本规则（不调 LLM）：命中 recipe tag / 强 workflow 动词
-          + 用户在白名单 → workflow，0 延迟。
-  Tier 1  一次 LLM 分类：chat / tool / workflow / capabilities
-          temperature:0 + 短超时；出错/超时 → chat（最安全）。
+分类机制（零 LLM 开销）
+  调 ClassifierClient → HTTP POST /classify
+  → { label, confidence }
+  confidence < CLASSIFIER_MIN_CONF（默认 0.7）或服务不可达 → null
+  → 兜底回退 chat（最安全）
 
-提速
-  可配独立的快小模型 ROUTER_MODEL（不配回退主模型），默认注入
-  thinking:{disabled} 关思考。实测 DeepSeek v4-flash 关思考 ~0.9s。
+权限门
+  classifier 判 workflow 但用户不在白名单 → 降级为 tool
 
-文件  src/graph/nodes/router.ts` },
+配置
+  CLASSIFIER_URL        http://127.0.0.1:9876（本地）
+                        http://classifier:9876（Docker 内网）
+  CLASSIFIER_TIMEOUT    请求超时 ms（默认 200）
+  CLASSIFIER_MIN_CONF   置信度下限（默认 0.7）
 
-  // L2 — Supervisor
+文件  src/graph/nodes/router.ts
+      src/router-classifier/client.ts` },
+
+  // L1 — ClassifierClient（Router 左侧紧邻）
+  { id: 'classifier', type: 'classifier', label: 'Classifier', sub: '本地 ONNX 推理',
+    layer: 1, col: 2.0, Icon: Cpu,
+    prompt:
+`本地 ONNX 判别模型推理服务
+
+ClassifierClient（src/router-classifier/client.ts）
+  HTTP POST /classify { text }
+  → { label: 'chat'|'tool'|'workflow'|'capabilities', confidence }
+
+置信度不足（< CLASSIFIER_MIN_CONF）或服务不可达时返回 null，
+Router 自动回退 chat —— 服务挂掉不影响主流程。
+
+推理服务部署
+  本地开发：cd scripts/train-router && python3 serve.py
+  Docker  ：classifier sidecar（Dockerfile.classifier），
+            模型文件挂载 tessel-model named volume，
+            仅暴露内网端口 9876。
+
+模型训练
+  cd scripts/train-router && python3 train.py
+  训练产物在本地，不提交到 git（.gitignore 忽略）。
+
+文件  src/router-classifier/client.ts
+      Dockerfile.classifier` },
+
+  // L2 — Supervisor（居中）
   { id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '消费 intent / 选 agent / 整合',
-    layer: 2, col: 4, Icon: BrainCircuit,
+    layer: 2, col: 3.5, Icon: BrainCircuit,
     prompt:
 `核心调度 Agent —— 保持纯粹
 
@@ -124,7 +165,7 @@ Graph Store（data/graph-runs.db）
 
   // L3 — sub-agent 横排（slack / web / mcp / capabilities / workflow）
   { id: 'slack_agent', type: 'agent', label: 'Slack Agent', sub: 'ReAct + Finalizer',
-    layer: 3, col: 0, Icon: MessageSquare,
+    layer: 3, col: 0.5, Icon: MessageSquare,  // agents: 0.5 / 1.8 / 3.1 / 4.4 / 6.2
     prompt:
 `Slack 工具 Agent（ReAct）
 
@@ -133,7 +174,7 @@ Graph Store（data/graph-runs.db）
 
 文件  src/graph/nodes/slack.ts` },
   { id: 'web_agent', type: 'agent', label: 'Web Agent', sub: '占位 stub',
-    layer: 3, col: 1.5, Icon: Search,
+    layer: 3, col: 1.8, Icon: Search,
     prompt:
 `Web Search Agent（stub）
 
@@ -142,7 +183,7 @@ Graph Store（data/graph-runs.db）
 
 文件  src/graph/nodes/web.ts` },
   { id: 'mcp_agent', type: 'agent', label: 'MCP Agent', sub: '占位 stub',
-    layer: 3, col: 3, Icon: Wrench,
+    layer: 3, col: 3.1, Icon: Wrench,
     prompt:
 `MCP Tools Agent（stub）
 
@@ -150,7 +191,7 @@ Graph Store（data/graph-runs.db）
 
 文件  src/graph/nodes/mcp.ts` },
   { id: 'capabilities', type: 'agent', label: 'Capabilities', sub: '自省节点',
-    layer: 3, col: 4.5, Icon: Settings2,
+    layer: 3, col: 4.4, Icon: Settings2,
     prompt:
 `自省节点（无 LLM）
 
@@ -196,7 +237,7 @@ recipe = 一份可复用、可进化的流程配方
 文件  src/graph/nodes/workflow-runner.ts
       src/workflows/recipe-store.ts、src/workflows/repo-map.ts` },
   { id: 'recipes', type: 'state', label: 'Recipe 库', sub: '流程配方 · 可复用',
-    layer: 2, col: 6.6, Icon: ClipboardList,
+    layer: 2, col: 6.8, Icon: ClipboardList,
     prompt:
 `Recipe 库 —— 记录好的流程，供复用
 
@@ -224,9 +265,46 @@ recipe = 一份可复用、可进化的流程配方
 文件  src/workflows/recipe-store.ts
       src/workflows/recipes/*.ts` },
 
-  // L4 — 工具层（挂在部分 agent 下）
+  // L4 — Skill 层（agent 中间正下方）
+  { id: 'skills', type: 'skill', label: 'SkillContext', sub: '选择性注入',
+    layer: 4, col: 2.5, Icon: Puzzle,
+    prompt:
+`Skill 系统 —— 可插拔的 system prompt 片段
+
+工作方式（选择性注入）
+  每个 agent 绑定一组 skill（skills/_bindings.json）。
+  每轮调用：
+    1. description 常驻 system prompt 底部（skill menu，几十 token/skill）
+    2. 用户输入命中某 skill（规则/2-gram 匹配，零 LLM 开销）
+       → 当轮把该 skill 完整正文注入 system prompt
+    3. 未命中 → 仅菜单，零额外 token，不污染正常对话
+
+SKILL.md 格式
+  ---
+  name: code-review
+  description: 审查 git diff，找正确性 bug。当需要审代码改动时使用。
+  ---
+  # 正文（命中时才用到的完整指令）
+  你是一个严格的代码审核员。……
+
+_bindings.json
+  { "supervisor": ["commit-msg"], "slack": ["code-review"] }
+  未列出的 agent 看不到任何 skill。
+
+Workflow 的 skill
+  stage 通过 StageDef.skills 无条件注入，不走 bindings。
+  skill 缺失时跳过（记日志），是增强不是依赖。
+
+UI 管理
+  /skills 页面：CRUD + agent×skill 绑定矩阵，改完即时生效（热重载）。
+
+文件  src/skills/registry.ts、inject.ts、bindings.ts
+      skills/*/SKILL.md（真相源）
+      skills/_bindings.json` },
+
+  // L4 — 工具层（Slack Agent 正下方）
   { id: 'slack_tools', type: 'tool', label: 'Slack Tools', sub: 'API wrappers',
-    layer: 4, col: 0, Icon: Wrench,
+    layer: 4, col: 0.5, Icon: Wrench,
     prompt:
 `Slack 工具集（挂在 Slack Agent）
 
@@ -235,9 +313,9 @@ recipe = 一份可复用、可进化的流程配方
 
 文件  src/integrations/slack/tools.ts` },
 
-  // L4 — coding workflow 的 stages（横排，作为 Runner 当前装载的定义）
+  // L5 — coding workflow 的 stages
   { id: 'wf_requirement', type: 'stage', label: '需求分析', sub: 'stage · 只读',
-    layer: 4, col: 3.4, Icon: ClipboardList,
+    layer: 5, col: 3.8, Icon: ClipboardList,
     prompt:
 `Stage · 需求分析（只读）
 
@@ -253,7 +331,7 @@ allowedTools  Read / Glob / Grep
 
 文件  src/graph/nodes/workflow/stage-runner.ts` },
   { id: 'wf_code', type: 'stage', label: '编程', sub: 'stage · 改文件',
-    layer: 4, col: 4.7, Icon: FileCode,
+    layer: 5, col: 4.9, Icon: FileCode,
     prompt:
 `Stage · 编程（真实改文件）
 
@@ -264,7 +342,7 @@ cwd  按触发频道选（CODING_REPOS 映射，落盘 workflowProgress.cwd）
 产出  codeResult → 回 Runner
 回退  测试/审核失败时 Runner 再次派到本 stage（retry < 2）` },
   { id: 'wf_test', type: 'stage', label: '测试', sub: 'stage · 不改文件',
-    layer: 4, col: 6, Icon: FlaskConical,
+    layer: 5, col: 6, Icon: FlaskConical,
     prompt:
 `Stage · 测试
 
@@ -274,7 +352,7 @@ allowedTools  Read / Bash / Glob / Grep
 结果 → Runner 判断：
   失败 & retry<2 → 回编程；超限 → 报告；通过 → 审核` },
   { id: 'wf_review', type: 'stage', label: '审核', sub: 'stage · 自审 diff',
-    layer: 4, col: 7.3, Icon: ShieldCheck,
+    layer: 5, col: 7.1, Icon: ShieldCheck,
     prompt:
 `Stage · 审核
 
@@ -286,7 +364,7 @@ allowedTools  Read / Bash / Glob / Grep
 
   // L5 — 审批 + 提交
   { id: 'wf_approval', type: 'approval', label: 'workflow_approval', sub: '独立节点 · interrupt',
-    layer: 5, col: 3.4, Icon: ThumbsUp,
+    layer: 6, col: 3.8, Icon: ThumbsUp,
     prompt:
 `审批节点（唯一人工审批点）—— 独立的 graph 节点
 
@@ -307,7 +385,7 @@ allowedTools  Read / Bash / Glob / Grep
 文件  src/graph/nodes/workflow-runner.ts（buildWorkflowApprovalNode）
       src/main.ts（审批恢复）` },
   { id: 'wf_commit', type: 'stage', label: '提交推送', sub: 'branch + push',
-    layer: 5, col: 7.3, Icon: GitBranch,
+    layer: 6, col: 7.1, Icon: GitBranch,
     prompt:
 `提交推送（审核通过后由 Runner 触发，无需再审批）
 
@@ -324,8 +402,10 @@ allowedTools  Read / Bash / Glob / Grep
 
 const EDGES: GEdge[] = [
   // 主流程纵向：入口先过 router 快速分类，再进 supervisor
-  { from: 'slack_in',   to: 'router',     kind: 'flow',   label: 'invoke' },
-  { from: 'router',     to: 'supervisor', kind: 'flow',   label: 'intent' },
+  { from: 'slack_in',   to: 'router',      kind: 'flow',   label: 'invoke' },
+  { from: 'router',     to: 'classifier',  kind: 'aux',    label: 'classify' },
+  { from: 'classifier', to: 'router',      kind: 'aux',    label: 'label+conf' },
+  { from: 'router',     to: 'supervisor',  kind: 'flow',   label: 'intent' },
   { from: 'supervisor', to: 'slack_out',  kind: 'flow',   label: 'next=__end__' },
   { from: 'state',      to: 'supervisor', kind: 'aux',    label: '读写 State' },
 
@@ -339,6 +419,12 @@ const EDGES: GEdge[] = [
 
   // agent → 工具
   { from: 'slack_agent', to: 'slack_tools', kind: 'aux', label: 'tool' },
+
+  // agents → SkillContext（选择性注入）
+  { from: 'slack_agent', to: 'skills', kind: 'aux', label: 'skill 注入' },
+  { from: 'web_agent',   to: 'skills', kind: 'aux' },
+  { from: 'mcp_agent',   to: 'skills', kind: 'aux' },
+  { from: 'supervisor',  to: 'skills', kind: 'aux' },
 
   // Recipe 库 → Runner（取流程配方）
   { from: 'recipes', to: 'workflow', kind: 'aux', label: '取 recipe' },
@@ -359,11 +445,12 @@ const EDGES: GEdge[] = [
 ];
 
 // ─── 布局引擎（层 → y，列 → x；正交折线）─────────────────────────────────────
+// L0 I/O  L1 Router+Classifier  L2 Supervisor  L3 Agents  L4 Skills  L5 Stages  L6 审批/提交
 
-const CANVAS_W = 1320;
-const LAYER_Y = [80, 210, 360, 530, 740, 940];    // 每层的 y（加大行距）
-const COL_W = 150;                                 // 列槽宽（加大列距）
-const COL_X0 = 175;                                // 第 0 列的 x（左侧 ~100px gutter 放层标签）
+const CANVAS_W = 1400;
+const LAYER_Y = [80, 220, 370, 520, 660, 810, 960];  // 7 层
+const COL_W = 160;
+const COL_X0 = 120;
 
 function nodeXY(n: GNode): { x: number; y: number } {
   return { x: COL_X0 + n.col * COL_W, y: LAYER_Y[n.layer] ?? 70 };
@@ -371,7 +458,7 @@ function nodeXY(n: GNode): { x: number; y: number } {
 
 const NODE_R: Record<NodeType, number> = {
   entry: 38, exit: 38, supervisor: 54, agent: 44, tool: 36, state: 40,
-  runner: 54, stage: 44, approval: 38, router: 44,
+  runner: 54, stage: 44, approval: 38, router: 44, skill: 44, classifier: 38,
 };
 
 // ─── 配色（扁平、克制）────────────────────────────────────────────────────────
@@ -387,6 +474,8 @@ const FILL: Record<NodeType, string> = {
   stage:      '#3b82f6',  // blue — workflow stage
   approval:   '#ec4899',  // pink — 人工
   router:     '#a855f7',  // purple — 前置分类
+  skill:      '#f59e0b',  // amber — skill 注入层
+  classifier: '#78716c',  // stone — 本地推理服务
 };
 
 const EDGE_COLOR: Record<GEdge['kind'], string> = {
@@ -403,9 +492,11 @@ const EDGE_DASH: Record<GEdge['kind'], string> = {
 
 const LEGEND_NODES = [
   { c: FILL.router,     t: 'Router（前置分类）' },
+  { c: FILL.classifier, t: 'ONNX 推理服务' },
   { c: FILL.supervisor, t: 'Supervisor' },
   { c: FILL.agent,      t: 'Sub-Agent' },
-  { c: FILL.runner,     t: 'Workflow Runner（通用）' },
+  { c: FILL.skill,      t: 'Skill（选择性注入）' },
+  { c: FILL.runner,     t: 'Workflow Runner' },
   { c: FILL.stage,      t: 'Workflow Stage' },
   { c: FILL.approval,   t: '人工审批' },
   { c: FILL.state,      t: 'State' },
@@ -422,7 +513,7 @@ const TYPE_LABEL: Record<NodeType, string> = {
   entry: 'Graph Entry', exit: 'Graph Exit', supervisor: 'Orchestrator',
   agent: 'Sub-Agent', tool: 'Tool', state: 'State / Memory',
   runner: 'Workflow Runner', stage: 'Workflow Stage', approval: 'Human Approval',
-  router: 'Router',
+  router: 'Router', skill: 'Skill Layer', classifier: 'ONNX Inference',
 };
 
 // ─── 正交折线 ─────────────────────────────────────────────────────────────────
@@ -434,15 +525,19 @@ function orthPath(
   b: { x: number; y: number }, rb: number,
   kind: GEdge['kind'],
 ): { d: string; mx: number; my: number } {
-  // 同层（retry / aux 横向）
+  // 同层横向：retry 弓出曲线，其余直线
   if (Math.abs(a.y - b.y) < 4) {
     const y = a.y;
     const dir = b.x > a.x ? 1 : -1;
-    const off = kind === 'retry' ? -54 : 38;       // 弓出方向
     const x1 = a.x + dir * ra, x2 = b.x - dir * rb;
-    const my = y + off;
-    const d = `M${x1},${y} C${x1},${my} ${x2},${my} ${x2},${y}`;
-    return { d, mx: (x1 + x2) / 2, my: my * 0.5 + y * 0.5 };
+    if (kind === 'retry') {
+      const off = -54;
+      const my = y + off;
+      const d = `M${x1},${y} C${x1},${my} ${x2},${my} ${x2},${y}`;
+      return { d, mx: (x1 + x2) / 2, my: my * 0.5 + y * 0.5 };
+    }
+    const d = `M${x1},${y} L${x2},${y}`;
+    return { d, mx: (x1 + x2) / 2, my: y - 10 };
   }
   // 纵向：a 在上，b 在下（或反向 return）
   const goingDown = b.y > a.y;
@@ -511,8 +606,8 @@ export default function AgentGraph() {
 
           {/* 层带分区标签（最左 gutter 内，水平，不与节点重叠） */}
           {[
-            { i: 0, t: 'I/O' }, { i: 1, t: '状态' }, { i: 2, t: '调度' },
-            { i: 3, t: 'AGENTS' }, { i: 4, t: 'STAGES' }, { i: 5, t: '审批' },
+            { i: 0, t: 'I/O' }, { i: 1, t: 'ROUTER' }, { i: 2, t: '调度' },
+            { i: 3, t: 'AGENTS' }, { i: 4, t: 'SKILLS' }, { i: 5, t: 'STAGES' }, { i: 6, t: '审批' },
           ].map(({ i, t }) => (
             <text key={t} x={14} y={LAYER_Y[i]! + 4} className="select-none"
               fill="#3a4658" fontSize="10" fontWeight="700" letterSpacing="1">{t}</text>

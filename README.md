@@ -8,29 +8,28 @@
 Slack (@mention / DM)
         │
         ▼
-     Router ──────────────────────── ClassifierClient
-        │                            （本地 ONNX 判别模型，~200ms 超时，
-        │                             置信度 < 0.7 时 null → 回退 chat）
-        ▼
-   Supervisor                     ← 消费 intent + 选 agent + 结果整合
+     Router ──── ClassifierClient（本地 ONNX，~200ms 超时，置信度 < 0.7 → 回退 chat）
         │
-   ┌────┼────┬─────────────┬──────────────┐
-   ▼    ▼    ▼             ▼              ▼
- Slack  Web  MCP       Capabilities    Workflow ⇄ Workflow
- Agent Agent Agent      (自省)          (跑 stage)  Approval (审批 interrupt)
-   │    │    │                            │
-   │  Skills │                        coding recipe
-   │  (可选  │                        （需求→编程→测试→审核→提交）
-   │  注入)  │                        stage.skills → 无条件注入
-   ▼         ▼
- Slack      MCP
- Tools     Servers
-
-skills/                          ← skill 真相源（SKILL.md 文件树）
-  _bindings.json                 ← agent ↔ skill 归属矩阵
-  code-review/SKILL.md
-  ...
-src/skills/                      ← SkillRegistry + inject 层（热重载，选择性注入）
+        ▼
+   Supervisor                ← 消费 intent + 选 agent + 结果整合
+        │
+   ┌────┼────┬─────────────┬──────────────────────────┐
+   ▼    ▼    ▼             ▼                          ▼
+ Slack  Web  MCP       Capabilities              Workflow ⇄ Workflow Approval
+ Agent Agent Agent      (自省)                   (跑 stage)  (审批 interrupt)
+   │    │    │                                       │
+   │    │    │                                   coding recipe
+   └────┴────┘                                   （需求→编程→测试→审核→提交）
+        │                                            │
+        ▼                                            ▼
+  SkillContext                               StageDef.skills
+  （选择性注入）                              （无条件注入，不走 bindings）
+        ▲
+        │ 读取
+   skills/_bindings.json        ← agent ↔ skill 归属
+   skills/*/SKILL.md            ← skill 真相源
+     description → 常驻 menu（每 skill 约一行）
+     body        → 命中时才注入（规则/2-gram 匹配，零 LLM）
 ```
 
 > **自建运行时**：图拓扑、节点执行、interrupt/resume 全在 `src/graph/runtime.ts` 里。每个节点是 `(state, resume?) => Promise<Partial<state> & { __interrupt__? }>`，run loop 顺序执行节点、`mergeState` 合并产出、按 `routeFrom` 决定下一跳，遇 `__interrupt__` 落盘暂停。LLM 调用走 `LLMClient`（`src/llm/client.ts`，直连任意 OpenAI-compatible endpoint），消息是原生 TS discriminated union（`src/llm/messages.ts`：`HumanMsg/AIMsg/SystemMsg/ToolMsg`），ReAct 循环是 `runReactAgent`（`src/llm/react.ts`）。
