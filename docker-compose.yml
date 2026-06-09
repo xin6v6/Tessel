@@ -11,6 +11,40 @@
 # ================================================================
 
 services:
+  # ── Intent Classifier sidecar ──────────────────────────────────
+  classifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.classifier
+    image: tessel-classifier:latest
+    container_name: tessel-classifier
+
+    restart: unless-stopped
+
+    # Model files live in a named volume populated by scp on the prod machine.
+    # To upload a newly trained model:
+    #   scp -r scripts/train-router/model/ user@prod:/opt/tessel-model/
+    # Then: docker compose restart classifier
+    volumes:
+      - tessel-model:/app/model:ro
+
+    # Only reachable by other containers on the internal network — never expose
+    # this port to the host.
+    expose:
+      - "9876"
+
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
   # ── 主 Agent 服务 ──────────────────────────────────────────────
   tessel:
     build:
@@ -84,6 +118,7 @@ services:
 
     depends_on:
       - tessel
+      - classifier
 
     deploy:
       resources:
@@ -107,3 +142,8 @@ services:
 #   docker compose exec tessel bun run contacts list
 volumes:
   tessel-data:
+  # Model files are populated by scp from the dev machine — never committed to git.
+  # First-time setup on prod:
+  #   docker volume create tessel_tessel-model
+  #   scp -r scripts/train-router/model/ user@prod:/var/lib/docker/volumes/tessel_tessel-model/_data/
+  tessel-model:
