@@ -8,8 +8,9 @@
 Slack (@mention / DM)
         │
         ▼
-     Router                       ← 前置快速分类（chat / tool / workflow / capabilities）
-        │
+     Router ──────────────────────── ClassifierClient
+        │                            （本地 ONNX 判别模型，~200ms 超时，
+        │                             置信度 < 0.7 时 null → 回退 chat）
         ▼
    Supervisor                     ← 消费 intent + 选 agent + 结果整合
         │
@@ -17,21 +18,31 @@ Slack (@mention / DM)
    ▼    ▼    ▼             ▼              ▼
  Slack  Web  MCP       Capabilities    Workflow ⇄ Workflow
  Agent Agent Agent      (自省)          (跑 stage)  Approval (审批 interrupt)
-   │    │    │             │              │
-   ▼    ▼    ▼             ▼              ▼
- Slack Search MCP      运行时工具     coding recipe
- Tools  APIs Servers   元数据快照     （需求→编程→测试→审核→提交）
+   │    │    │                            │
+   │  Skills │                        coding recipe
+   │  (可选  │                        （需求→编程→测试→审核→提交）
+   │  注入)  │                        stage.skills → 无条件注入
+   ▼         ▼
+ Slack      MCP
+ Tools     Servers
+
+skills/                          ← skill 真相源（SKILL.md 文件树）
+  _bindings.json                 ← agent ↔ skill 归属矩阵
+  code-review/SKILL.md
+  ...
+src/skills/                      ← SkillRegistry + inject 层（热重载，选择性注入）
 ```
 
 > **自建运行时**：图拓扑、节点执行、interrupt/resume 全在 `src/graph/runtime.ts` 里。每个节点是 `(state, resume?) => Promise<Partial<state> & { __interrupt__? }>`，run loop 顺序执行节点、`mergeState` 合并产出、按 `routeFrom` 决定下一跳，遇 `__interrupt__` 落盘暂停。LLM 调用走 `LLMClient`（`src/llm/client.ts`，直连任意 OpenAI-compatible endpoint），消息是原生 TS discriminated union（`src/llm/messages.ts`：`HumanMsg/AIMsg/SystemMsg/ToolMsg`），ReAct 循环是 `runReactAgent`（`src/llm/react.ts`）。
 
-- **Router**：前置快速分类节点，把消息判成 `chat / tool / workflow / capabilities` 写进 `state.intent`，让 supervisor 跳过自己那一轮意图分类。可配独立的快模型（`ROUTER_MODEL`）提速，见下。
+- **Router**：前置快速分类节点，通过 `ClassifierClient`（`src/router-classifier/client.ts`）调本地 ONNX 判别模型，把消息判成 `chat / tool / workflow / capabilities` 写进 `state.intent`。零 LLM 开销；超时或置信度不足时回退 `chat`。配置：`CLASSIFIER_URL`（默认 `http://127.0.0.1:9876`）、`CLASSIFIER_TIMEOUT`、`CLASSIFIER_MIN_CONF`。
 - **Supervisor**：消费 router 的 intent + 选具体 agent + 结果整合（见下）
 - **Slack Agent**：执行所有 Slack 操作（发消息、查历史、搜索等）
 - **Web Agent**：实时网络搜索（占位 stub，未接入搜索 API）
 - **MCP Agent**：通过 MCP 协议接入外部服务（占位 stub）
 - **Capabilities**：自省节点，根据运行时已注册的 integrations/tools 生成能力清单
 - **Workflow / Workflow Approval**：多阶段任务调度（按 recipe 跑 stage + 人工审批）。拆成两个节点——`workflow` 跑 stage、遇审批点落盘后交给 `workflow_approval` 做 interrupt，避免审批 resume 时重跑昂贵 stage（见下）。
+- **Skill 系统**：每个 agent 可绑定一组 skill（`skills/_bindings.json`）。skill 是 `SKILL.md` 文件，含一行 `description`（做命中判断）和完整指令正文。description 常驻 system prompt（几十 token/skill）；正文仅在命中时注入。命中走规则/2-gram 匹配（零 LLM 开销）。未命中则零额外开销，不污染正常对话。Workflow stage 通过 `StageDef.skills` 无条件注入，不走 bindings。UI 提供 `/skills` CRUD 界面和 agent×skill 矩阵调度。
 
 ### 路由（Router 前置分类 + Supervisor 选 agent）
 
@@ -39,10 +50,11 @@ Slack (@mention / DM)
 
 ```
 用户消息
-  ↓ Router：三层分类，写 state.intent
-  │   Tier 0  零成本规则（不调 LLM）：命中 recipe tag / workflow 动词 + 白名单 → workflow
-  │   Tier 1  一次 LLM 分类：chat / tool / workflow / capabilities（temperature:0 + 短超时）
-  │   兜底     LLM 出错/超时 → chat（最安全）
+  ↓ Router：分类，写 state.intent
+  │   ClassifierClient  调本地 ONNX 推理服务（HTTP POST /classify，~200ms 超时）
+  │                     → { label, confidence }；confidence < 0.7 或服务不可达 → null
+  │   兜底               null → chat（最安全）
+  │   权限门             classifier 判 workflow 但用户不在白名单 → 降级为 tool
   ↓ Supervisor 消费 intent
   ├─ chat         → 直接 LLM 回复
   ├─ capabilities → 路由到 Capabilities 节点（渲染真实能力清单）
@@ -54,9 +66,9 @@ Slack (@mention / DM)
 ```
 
 设计要点：
-- **分类前置到 Router**：router 可配一个比主模型更快的小模型（`ROUTER_MODEL` / `ROUTER_BASE_URL` / `ROUTER_API_KEY`），默认还会注入"关思考"参数提速（`ROUTER_THINKING=off`）。不配则回退主模型，功能不变。
-- **Router 的 Tier 0 零成本规则**：命中 recipe tag 或强 workflow 动词（"改代码 / 提 PR / 部署"等）且用户在白名单 → 直接判 `workflow`，0 延迟、不调 LLM。
-- **Supervisor 不依赖 Router 也能工作**：router intent 为 `unknown`（被绕过或出错）时，supervisor 回退到自带的意图分类 LLM。
+- **分类前置到 Router，零 LLM 开销**：Router 调本地 ONNX 判别模型，无需联网、无 token 消耗。整个分类路径（HTTP → 本地推理）通常在几毫秒内完成，200ms 超时兜底。
+- **置信度阈值**：`CLASSIFIER_MIN_CONF`（默认 0.7）控制可信下限；低于阈值视同 null → 回退 `chat`。
+- **Supervisor 不依赖 Router 也能工作**：router 返回 null / 服务不可达时，intent 回退 `chat`，supervisor 在 chat 路径里直接 LLM 回复，整体不中断。
 - **能力快照在启动时算一次**缓存在 supervisor 闭包里。每次路由不重新扫描 IntegrationRegistry。
 - **tool 路由的候选集只包含 ready 且非 stub 的 agent**。Stub 节点（web/mcp）在路由 prompt 里被打 `[STUB · 不要选]` 标记，LLM 物理上无法把任务派给它们。
 - **平台锁定保留**：source=slack 只能选 slack agent，避免用户消息里偶然出现"telegram"被路由错。
@@ -307,6 +319,8 @@ cd ~/actions-runner
 - **Runtime**：[Bun](https://bun.sh)
 - **Agent 框架**：自建图运行时（`src/graph/runtime.ts`）+ 原生 ReAct 循环（`src/llm/react.ts`）
 - **LLM**：自建 `LLMClient`，直连任意 OpenAI-compatible API（MiniMax、DeepSeek 等）
+- **Intent 分类**：本地 ONNX 判别模型，`ClassifierClient`（`src/router-classifier/client.ts`）通过 HTTP 调推理服务；零 token 消耗
+- **Skill 系统**：`src/skills/`（registry + inject）+ `skills/`（SKILL.md 文件树 + `_bindings.json`）；选择性注入，不污染正常对话
 - **Workflow stage 执行**：[Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)（coding recipe 的各 stage 底层用它跑工具）
 - **持久化**：`bun:sqlite`（`SqliteGraphStore`）
 - **Slack**：`@slack/bolt` + Socket Mode

@@ -1,0 +1,25 @@
+# ================================================================
+# Tessel — Classifier sidecar
+# Serves the ONNX intent classifier over HTTP on port 9876.
+# The model files are NOT baked into this image — mount them via
+# the `tessel-model` named volume at /app/model.
+# ================================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY scripts/train-router/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY scripts/train-router/serve.py ./serve.py
+
+# Model files are mounted at runtime — see docker-compose.yml
+# (tessel-model volume → /app/model)
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:9876/health')" || exit 1
+
+EXPOSE 9876
+
+ENTRYPOINT ["python3", "serve.py", "--model-dir", "/app/model", "--port", "9876"]

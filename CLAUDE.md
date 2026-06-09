@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Tessel** is a TypeScript + Bun multi-agent personal assistant that interacts over Slack. A pre-classifying **Router** tags each message, a **Supervisor** picks a specialist agent (or replies directly), sub-agents run a native ReAct tool-call loop, and the Supervisor aggregates results. A **Workflow** subsystem runs multi-stage tasks (e.g. the `coding` recipe) with a human-approval pause.
+**Tessel** is a TypeScript + Bun multi-agent personal assistant that interacts over Slack. A pre-classifying **Router** tags each message using a local ONNX classifier (zero LLM cost), a **Supervisor** picks a specialist agent (or replies directly), sub-agents run a native ReAct tool-call loop, and the Supervisor aggregates results. A **Workflow** subsystem runs multi-stage tasks (e.g. the `coding` recipe) with a human-approval pause. A **Skill** system lets each agent carry pluggable prompt fragments that are selectively injected only when triggered.
 
 The agent runtime is **fully self-built**: the graph engine, message types, LLM client, and ReAct loop are all native code under `src/graph/` and `src/llm/`. The LLM client speaks directly to any OpenAI-compatible API.
 
@@ -37,12 +37,15 @@ src/
     speaker.ts          — SpeakerMeta attached to human messages (additional_kwargs.speaker)
     capabilities-snapshot.ts, thread-id.ts
     nodes/
-      router.ts         — 3-tier intent classifier → state.intent (chat/tool/workflow/capabilities)
+      router.ts         — intent classifier using ClassifierClient → state.intent (chat/tool/workflow/capabilities)
       supervisor.ts     — consumes intent, selects sub-agent, aggregates. KNOWN_AGENTS / SUB_AGENTS here.
       slack.ts          — Slack ReAct agent
       web.ts, mcp.ts    — stub agents (marked [STUB] in routing prompt; never selected)
       capabilities.ts   — self-introspection: renders real capability list from registry
       workflow-runner.ts — buildWorkflowRunnerNode() + buildWorkflowApprovalNode()
+  router-classifier/
+    client.ts           — ClassifierClient: thin HTTP wrapper around local ONNX inference server
+                          ({ text } → { label, confidence }); returns null on timeout or low confidence
   llm/
     messages.ts         — native message types: Message = HumanMsg | AIMsg | SystemMsg | ToolMsg
                           (discriminated on `role`); constructors humanMsg/aiMsg/systemMsg/toolMsg;
@@ -51,6 +54,11 @@ src/
     react.ts            — runReactAgent(): native ReAct tool-call loop
   integrations/         — external service 调用层 (initialize / toolEntries via tools / destroy)
     base.ts, registry.ts (IntegrationRegistry), slack/ (client, tools, receiver, resolve, user-names)
+  skills/
+    types.ts            — Skill / SkillBindings types
+    registry.ts         — SkillRegistry: scan skills/, parse SKILL.md frontmatter, in-memory index, CRUD
+    inject.ts           — selective injection: renderSkillMenu() (always) + selectAndRenderSkillBodies() (on hit)
+    bindings.ts         — read/write skills/_bindings.json (agent → [skill names] mapping)
   workflows/
     recipe-store.ts     — recipe library + stage-run stats (WORKFLOW_STATS_DB)
     repo-map.ts         — repoForChannel(): channel → repo path from CODING_REPOS
@@ -60,7 +68,10 @@ src/
   types/index.ts        — shared types (ToolDefinition, ToolCall, ToolResult, …)
   observability/        — logger, trace writer, request context
   memory/index.ts       — MemoryStore (in-memory KV)
-  ui/server.ts          — React dashboard
+  ui/server.ts          — React dashboard (includes /skills CRUD + agent×skill binding matrix)
+skills/                 — skill definitions (true source); each subdirectory has a SKILL.md
+  _bindings.json        — agent ↔ skill bindings (supervisor / slack / web / mcp → [skill names])
+  code-review/SKILL.md  — example: review git diff for correctness bugs
 tests/                  — bun:test unit tests (mock providers/integrations, no live API calls)
 ```
 
@@ -81,7 +92,9 @@ Messages are plain TS objects (a discriminated union on `role`), so they `JSON.s
 
 **Routing** (`router` then `supervisor`)
 
-`router` does the intent classification (3 tiers: tier-0 zero-cost rules → tier-1 one LLM call → fallback `chat`) and writes `state.intent`. The supervisor consumes that intent and only picks a *specific* agent. Stub agents (web/mcp) are tagged `[STUB]` in the routing prompt so the LLM can't select them. Router can use a separate fast model via `ROUTER_MODEL` / `ROUTER_BASE_URL` / `ROUTER_API_KEY` / `ROUTER_THINKING` (defaults to injecting thinking-off); falls back to the main client if unset.
+`router` classifies intent using `ClassifierClient` — a thin HTTP wrapper around a local ONNX inference server (`scripts/deploy-model.sh`, served by `src/router-classifier/`). The call is fire-and-forget with a 200 ms timeout; if the server is unreachable or confidence < 0.7 the classifier returns `null` and the router falls back to `chat`. No LLM is called in the happy path. The result is written to `state.intent`. The supervisor consumes that intent and only picks a *specific* agent. Stub agents (web/mcp) are tagged `[STUB]` in the routing prompt so the LLM can't select them.
+
+Config: `CLASSIFIER_URL` (default `http://127.0.0.1:9876`), `CLASSIFIER_TIMEOUT` (ms), `CLASSIFIER_MIN_CONF` (0–1).
 
 **Result channels** — sub-agents return results to the supervisor on two state channels: `finalReply` (already-rendered, forwarded verbatim) and `subAgentResult` (raw ReAct output, LLM-synthesized only when `finalReply` is empty).
 
@@ -91,7 +104,11 @@ One row per `thread_id` in a `runs` table holding `{ state, pendingNode, interru
 
 **Workflow + approval** (`src/graph/nodes/workflow-runner.ts`, `src/workflows/`)
 
-`workflow` runs a recipe's stages; at a plan/approval stage it persists progress and the run pauses via `__interrupt__` handled by `workflow_approval`. Splitting into two nodes avoids re-running expensive stages on resume. The coding recipe's target repo is chosen **per Slack channel** via `repoForChannel()` (`CODING_REPOS="<channelId>:<repoPath>,..."`); unmapped channels (incl. DM) are refused, never falling back to a default. Only `CODING_ALLOWLIST` users can trigger workflows (enforced in router tier-0, supervisor, and the runner). Stages run via the **Claude Agent SDK** (`coding/sdk.ts`); `onAbort` does `git reset --hard` — beware self-targeting the repo you're hand-editing.
+`workflow` runs a recipe's stages; at a plan/approval stage it persists progress and the run pauses via `__interrupt__` handled by `workflow_approval`. Splitting into two nodes avoids re-running expensive stages on resume. The coding recipe's target repo is chosen **per Slack channel** via `repoForChannel()` (`CODING_REPOS="<channelId>:<repoPath>,..."`); unmapped channels (incl. DM) are refused, never falling back to a default. Only `CODING_ALLOWLIST` users can trigger workflows (enforced in router, supervisor, and the runner). Stages run via the **Claude Agent SDK** (`coding/sdk.ts`); `onAbort` does `git reset --hard` — beware self-targeting the repo you're hand-editing.
+
+**Skill system** (`src/skills/`, `skills/`)
+
+Each agent (supervisor / slack / web / mcp) can be bound to a set of skills via `skills/_bindings.json`. A skill is a `SKILL.md` file (frontmatter `name` + `description` + body). Injection is selective: the one-line `description` of every bound skill is always prepended to the agent's system prompt as a menu (cheap); the full body is injected only when the user input matches (strategy A: keyword/2-gram rules; costs zero). Unmatched skills add zero tokens to normal conversation. The `skills/` directory is the single source of truth — `SkillRegistry` in `src/skills/registry.ts` hot-reloads it; the UI at `/skills` provides CRUD and the agent×skill binding matrix. Workflow stages use skills unconditionally via `StageDef.skills` (not via bindings).
 
 ## Conventions for changing this codebase
 
@@ -109,6 +126,12 @@ One row per `thread_id` in a `runs` table holding `{ state, pendingNode, interru
 **Adding a workflow recipe**
 1. New file under `src/workflows/recipes/` implementing the `Recipe` interface (stages, `approveAfter`, `retryTo`, `maxRetries`, `cwdEnv`, `finalize`, `onAbort`).
 2. Register it in the `RECIPES` array in `recipe-store.ts`.
+
+**Adding / editing a skill**
+1. Create `skills/<name>/SKILL.md` with frontmatter `name` + `description` (one line, used for triggering) and a body (full instructions, injected only on match).
+2. Add the skill name to the relevant agent(s) in `skills/_bindings.json`.
+3. No restart needed — `SkillRegistry` hot-reloads the directory.
+4. For workflow stage skills: add `skills: ["name"]` to the `StageDef` in the recipe file (injected unconditionally, no binding needed).
 
 ## Bun-specific conventions
 
