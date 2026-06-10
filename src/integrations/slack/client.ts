@@ -124,29 +124,26 @@ export class SlackClient {
   // ----------------------------------------------------------------
 
   /**
-   * 下载图片 URL 并通过 files.uploadV2 上传到指定频道/thread。
-   * 适用于图片生成场景：生成 API 返回临时 URL，需要转存到 Slack 才能正常展示。
+   * 以 image block 形式把图片发到消息列（图片直接展开，不作为附件）。
+   * 优先用 chat.postMessage + blocks，无需下载转存，Slack 服务器直接拉 URL。
    */
   async uploadImageFromUrl(params: {
     url: string;
     channel: string;
     threadTs?: string;
-    filename?: string;
-    title?: string;
+    altText?: string;
   }): Promise<void> {
-    const res = await fetch(params.url);
-    if (!res.ok) throw new Error(`下载图片失败 ${res.status}: ${params.url}`);
-    const buf = await res.arrayBuffer();
-    const mime = res.headers.get("content-type") ?? "image/jpeg";
-    const ext = mime.split("/")[1]?.split(";")[0] ?? "jpg";
-    const filename = params.filename ?? `image.${ext}`;
-
-    await this.client.filesUploadV2({
-      channel_id: params.channel,
+    await this.client.chat.postMessage({
+      channel: params.channel,
       ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
-      filename,
-      title: params.title ?? filename,
-      file: Buffer.from(buf),
-    } as Parameters<typeof this.client.filesUploadV2>[0]);
+      text: params.altText ?? "生成的图片",
+      blocks: [
+        {
+          type: "image",
+          image_url: params.url,
+          alt_text: params.altText ?? "生成的图片",
+        },
+      ],
+    });
   }
 }
