@@ -195,6 +195,16 @@ function currentSpeakerLine(messages: Message[]): string {
   return "";
 }
 
+function currentDateTimeLine(): string {
+  const now = new Date();
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const weekday = weekdays[now.getDay()]!;
+  return `当前时间：${dateStr} ${weekday} ${timeStr}。\n`;
+}
+
 // ----------------------------------------------------------------
 // Supervisor 节点
 // ----------------------------------------------------------------
@@ -274,7 +284,7 @@ export function buildSupervisorNode(
       const t0 = Date.now();
       const finalReply = await llm.invoke([
         systemMsg(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
         humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
@@ -398,7 +408,7 @@ export function buildSupervisorNode(
       const t1 = Date.now();
       // 主 agent（supervisor）的 skill 选择性注入:绑定给 supervisor 的 skill 进 menu,
       // 命中的注入正文。没绑定 / 没命中 → 等价于原 prompt,正常闲聊零影响。
-      const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`;
+      const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
       const chatSystem = skills
         ? skills.promptFor("supervisor", chatBase, inputSnippet)
         : chatBase;
