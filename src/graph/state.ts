@@ -12,6 +12,8 @@ export type SubAgentName =
   | "slack"            // Slack ReAct Agent
   | "web"              // Web Search ReAct Agent（待接入）
   | "mcp"              // MCP Tools ReAct Agent（待接入）
+  | "vision"           // Vision Agent：识别图片内容（Slack 附件 / 公开 URL）
+  | "imagegen"         // Image Generation Agent：根据文字描述生成图片
   | "capabilities"     // 自省节点：列出当前真实可用的能力（tools + integrations）
   | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
   | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
@@ -77,6 +79,8 @@ export interface GraphState {
   subAgentResult: string;
   /** 子 Agent 已成稿、可直接发用户的回复。非空时 supervisor 原样转发。 */
   finalReply: string;
+  /** 需要作为文件发送给用户的图片 URL 列表（如生成图片）。入口层负责下载并上传。 */
+  attachmentUrls: string[];
   /** Workflow Runner 进度快照（null = 没有进行中的 workflow）。 */
   workflowProgress: WorkflowProgress | null;
 }
@@ -92,6 +96,7 @@ export function defaultState(): GraphState {
     intent: "unknown",
     subAgentResult: "",
     finalReply: "",
+    attachmentUrls: [],
     workflowProgress: null,
   };
 }
@@ -107,10 +112,11 @@ export function defaultState(): GraphState {
 export function mergeState(prev: GraphState, partial: Partial<GraphState>): GraphState {
   return {
     messages: partial.messages ? [...prev.messages, ...partial.messages] : prev.messages,
-    next:           partial.next           ?? prev.next,
-    intent:         partial.intent         ?? prev.intent,
-    subAgentResult: partial.subAgentResult ?? prev.subAgentResult,
-    finalReply:     partial.finalReply     ?? prev.finalReply,
+    next:             partial.next             ?? prev.next,
+    intent:           partial.intent           ?? prev.intent,
+    subAgentResult:   partial.subAgentResult   ?? prev.subAgentResult,
+    finalReply:       partial.finalReply       ?? prev.finalReply,
+    attachmentUrls:   partial.attachmentUrls   ?? prev.attachmentUrls,
     workflowProgress: "workflowProgress" in partial
       ? (partial.workflowProgress ?? null)
       : prev.workflowProgress,

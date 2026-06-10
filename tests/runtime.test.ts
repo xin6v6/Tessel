@@ -12,7 +12,7 @@ function memStore() {
 function nodeMap(overrides: Partial<NodeMap>): NodeMap {
   const noop = async (): Promise<NodeOutput> => ({});
   return {
-    router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop,
+    router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop, vision: noop, imagegen: noop,
     capabilities: noop, workflow: noop, workflow_approval: noop,
     ...overrides,
   };

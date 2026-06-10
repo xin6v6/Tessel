@@ -49,6 +49,7 @@ function freshState(text: string): GraphStateType {
     intent: "workflow",
     subAgentResult: "",
     finalReply: "",
+    attachmentUrls: [],
     workflowProgress: null,
   };
 }

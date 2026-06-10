@@ -16,6 +16,8 @@ export interface SlackMessageEvent {
   channel: string;
   ts: string;
   threadTs?: string;
+  /** Slack 图片附件的 URL 列表（需 bot token 鉴权下载）。 */
+  imageUrls?: string[];
 }
 
 export interface SlackMentionEvent {
@@ -25,6 +27,8 @@ export interface SlackMentionEvent {
   channel: string;
   ts: string;
   threadTs?: string;
+  /** Slack 图片附件的 URL 列表（需 bot token 鉴权下载）。 */
+  imageUrls?: string[];
 }
 
 /**
@@ -66,6 +70,16 @@ export class SlackReceiver {
     this._registerHandlers();
   }
 
+  /** 从 Slack message 事件的 files 数组里提取图片的 url_private。 */
+  private extractImageUrls(message: Record<string, unknown>): string[] {
+    const files = message["files"] as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(files)) return [];
+    return files
+      .filter((f) => typeof f["mimetype"] === "string" && f["mimetype"].startsWith("image/"))
+      .map((f) => (f["url_private"] ?? f["url_private_download"]) as string)
+      .filter(Boolean);
+  }
+
   private _registerHandlers() {
     // ---- DM 消息（仅 1:1 私聊）----
     //
@@ -93,15 +107,17 @@ export class SlackReceiver {
         return;
       }
 
+      const rawMsg = message as unknown as Record<string, unknown>;
       const event: SlackMessageEvent = {
         text: ("text" in message ? message.text : "") ?? "",
         user: message.user,
         channel: message.channel,
         ts: message.ts,
         threadTs: ("thread_ts" in message ? message.thread_ts : undefined) ?? undefined,
+        imageUrls: this.extractImageUrls(rawMsg),
       };
 
-      logger.debug({ user: event.user, channel: event.channel, text: event.text }, "message received");
+      logger.debug({ user: event.user, channel: event.channel, text: event.text, imageCount: event.imageUrls?.length ?? 0 }, "message received");
 
       const reply = await this.handler.onMessage?.(event);
       if (reply) {
@@ -121,9 +137,10 @@ export class SlackReceiver {
         channel: event.channel,
         ts: event.ts,
         threadTs: event.thread_ts ?? undefined,
+        imageUrls: this.extractImageUrls(event as unknown as Record<string, unknown>),
       };
 
-      logger.debug({ user: mentionEvent.user, text: textClean }, "mention received");
+      logger.debug({ user: mentionEvent.user, text: textClean, imageCount: mentionEvent.imageUrls?.length ?? 0 }, "mention received");
 
       const reply = await this.handler.onMention?.(mentionEvent);
       if (reply) {
