@@ -147,8 +147,9 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
       }
 
       // 新消息：在已存历史上追加，从 router 起跑。
+      // attachmentUrls 是一次性字段（上传完即废），每轮强制清空，防止上轮图片 URL 残留。
       const prev = saved?.state ?? defaultState();
-      const state = mergeState(prev, { messages: input.messages });
+      const state = mergeState(prev, { messages: input.messages, attachmentUrls: [] });
       return run("router", state, cfg);
     },
 

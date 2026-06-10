@@ -293,6 +293,7 @@ export function buildSupervisorNode(
         next: "__end__",
         subAgentResult: "",
         finalReply: "",
+        attachmentUrls: [],
       };
     }
 
