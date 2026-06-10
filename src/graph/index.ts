@@ -7,6 +7,8 @@ import { ClassifierClient } from "../router-classifier/client.ts";
 import { buildSlackAgentNode } from "./nodes/slack.ts";
 import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
+import { buildVisionAgentNode, buildVisionClient } from "./nodes/vision.ts";
+import { buildImageGenNode, buildImageGenClient } from "./nodes/imagegen.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
 import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/workflow-runner.ts";
 import type { ToolRegistry } from "../tools/index.ts";
@@ -69,6 +71,12 @@ export function buildGraph(params: {
     maxRetries: 1,
   });
 
+  // 视觉模型 client —— 优先用 VISION_* 环境变量单独配置，否则回退到主模型。
+  const visionClient = buildVisionClient({ apiKey, baseURL, model: mainModel });
+
+  // 图片生成 client —— 优先用 IMAGEGEN_* 环境变量，默认走 MiniMax image-01。
+  const imageGenClient = buildImageGenClient({ apiKey, baseURL });
+
   // 前置 router 使用本地 ONNX 判别模型（scripts/train-router/）。
   // 配置见 src/router-classifier/client.ts — 通过 CLASSIFIER_URL / CLASSIFIER_TIMEOUT /
   // CLASSIFIER_MIN_CONF 环境变量调整；服务未启动时自动 fallback 到 "chat"。
@@ -84,6 +92,8 @@ export function buildGraph(params: {
   const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry, skills);
   const webAgentNode      = buildWebAgentNode(mainClient, skills);
   const mcpAgentNode      = buildMcpAgentNode(mainClient, skills);
+  const visionAgentNode   = buildVisionAgentNode(visionClient);
+  const imageGenNode      = buildImageGenNode(imageGenClient);
   const capabilitiesNode  = buildCapabilitiesNode(
     params.toolRegistry,
     params.integrations,
@@ -105,6 +115,8 @@ export function buildGraph(params: {
     slack:             slackAgentNode,
     web:               webAgentNode,
     mcp:               mcpAgentNode,
+    vision:            visionAgentNode,
+    imagegen:          imageGenNode,
     capabilities:      capabilitiesNode,
     workflow:          workflowNode,
     workflow_approval: workflowApprovalNode,

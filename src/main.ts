@@ -36,7 +36,7 @@ if (process.env.SLACK_BOT_TOKEN) {
     socketMode,
     eventHandler: socketMode
       ? {
-            onMention: async ({ textClean, user, channel, threadTs }) => {
+            onMention: async ({ textClean, user, channel, ts, threadTs, imageUrls }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
@@ -46,16 +46,29 @@ if (process.env.SLACK_BOT_TOKEN) {
               // 进 LLM 的 HumanMessage 只带这个名字,user_id 仅留作内部 thread
               // 路由和 trace。
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
-              logger.info({ text: textClean, threadId, speakerName }, "slack:mention received");
+              logger.info({ text: textClean, threadId, speakerName, imageCount: imageUrls?.length ?? 0 }, "slack:mention received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
                 try {
+                  const humanMsg = humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" });
+                  if (imageUrls?.length) {
+                    humanMsg.additional_kwargs = { ...humanMsg.additional_kwargs, imageUrls };
+                  }
                   const result = await invokeOrResume(
                     graph!,
                     threadId,
-                    humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" }),
+                    humanMsg,
                     textClean,
                   );
                   const reply = extractReply(result);
+                  // 上传生成的图片附件
+                  const attachments = (result as unknown as Record<string, unknown>)["attachmentUrls"] as string[] | undefined;
+                  if (attachments?.length) {
+                    for (const url of attachments) {
+                      slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: threadTs ?? ts }).catch(
+                        (e: unknown) => logger.error({ err: String(e), url }, "slack:mention image upload failed"),
+                      );
+                    }
+                  }
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
@@ -70,7 +83,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     route: extractRoute(result),
                     threadId,
                   });
-                  return reply;
+                  return attachments?.length ? undefined : reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
                   logger.error({ err: String(err), threadId }, "slack:mention error");
@@ -93,28 +106,41 @@ if (process.env.SLACK_BOT_TOKEN) {
                 }
               });
             },
-            onMessage: async ({ text, user, channel }) => {
+            onMessage: async ({ text, user, channel, imageUrls }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
               const userId = makeUserId("slack", user);
               const threadId = threadIdForSlackDm({ userId: user });
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
-              logger.info({ text, threadId, speakerName }, "slack:dm received");
+              logger.info({ text, threadId, speakerName, imageCount: imageUrls?.length ?? 0 }, "slack:dm received");
               return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
                 try {
                   const controller = new AbortController();
                   // 普通对话 120s 超时;但开发类 workflow 可能跑很久,这里放宽到 30 分钟。
                   const timeout = setTimeout(() => controller.abort(), 30 * 60_000);
+                  const humanMsg = humanMessageWithSpeaker(text, { speakerId: user, speakerName, source: "slack" });
+                  if (imageUrls?.length) {
+                    humanMsg.additional_kwargs = { ...humanMsg.additional_kwargs, imageUrls };
+                  }
                   const result = await invokeOrResume(
                     graph!,
                     threadId,
-                    humanMessageWithSpeaker(text, { speakerId: user, speakerName, source: "slack" }),
+                    humanMsg,
                     text,
                     controller.signal,
                   );
                   clearTimeout(timeout);
                   const reply = extractReply(result);
+                  // 上传生成的图片附件（不阻塞主回复，fire-and-forget 打 log 即可）
+                  const attachments = (result as unknown as Record<string, unknown>)["attachmentUrls"] as string[] | undefined;
+                  if (attachments?.length) {
+                    for (const url of attachments) {
+                      slackIntegration.getClient().uploadImageFromUrl({ url, channel }).catch(
+                        (e: unknown) => logger.error({ err: String(e), url }, "slack:dm image upload failed"),
+                      );
+                    }
+                  }
                   await traceWriter.write({
                     ts: new Date().toISOString(),
                     sessionId,
@@ -129,7 +155,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     route: extractRoute(result),
                     threadId,
                   });
-                  return reply;
+                  return attachments?.length ? undefined : reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
                   logger.error({ err: String(err), threadId }, "slack:dm error");
