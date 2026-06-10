@@ -1,5 +1,6 @@
 import type { HumanMsg } from "../llm/messages.ts";
 import type { CompiledGraph } from "./index.ts";
+import type { GraphState } from "./state.ts";
 import { logger } from "../utils/logger.ts";
 
 // ----------------------------------------------------------------
@@ -69,6 +70,11 @@ export function extractTokens(
 export function extractRoute(result: InvokeResult): string {
   const state = result as unknown as Record<string, unknown>;
   return typeof state["next"] === "string" ? state["next"] : "__end__";
+}
+
+/** 从 graph 结果中安全提取 attachmentUrls（类型收口，避免双重断言散落在调用方）。 */
+export function extractAttachments(result: InvokeResult): string[] {
+  return (result as unknown as GraphState).attachmentUrls ?? [];
 }
 
 /** 用户消息是否表达"同意"(用于审批恢复)。 */

@@ -4,6 +4,7 @@ import {
   extractReply,
   extractTokens,
   extractRoute,
+  extractAttachments,
 } from "./graph/dispatch.ts";
 import { humanMessageWithSpeaker } from "./graph/speaker.ts";
 import {
@@ -60,13 +61,15 @@ if (process.env.SLACK_BOT_TOKEN) {
                     textClean,
                   );
                   const reply = extractReply(result);
-                  // 上传生成的图片附件
-                  const attachments = (result as unknown as Record<string, unknown>)["attachmentUrls"] as string[] | undefined;
-                  if (attachments?.length) {
-                    for (const url of attachments) {
-                      slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: threadTs ?? ts }).catch(
-                        (e: unknown) => logger.error({ err: String(e), url }, "slack:mention image upload failed"),
-                      );
+                  const attachments = extractAttachments(result);
+                  if (attachments.length) {
+                    try {
+                      for (const url of attachments) {
+                        await slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: threadTs ?? ts });
+                      }
+                    } catch (e: unknown) {
+                      logger.error({ err: String(e) }, "slack:mention image upload failed");
+                      return "❌ 图片生成成功，但上传失败，请稍后重试";
                     }
                   }
                   await traceWriter.write({
@@ -83,7 +86,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     route: extractRoute(result),
                     threadId,
                   });
-                  return attachments?.length ? undefined : reply;
+                  return attachments.length ? undefined : reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
                   logger.error({ err: String(err), threadId }, "slack:mention error");
@@ -132,13 +135,15 @@ if (process.env.SLACK_BOT_TOKEN) {
                   );
                   clearTimeout(timeout);
                   const reply = extractReply(result);
-                  // 上传生成的图片附件（不阻塞主回复，fire-and-forget 打 log 即可）
-                  const attachments = (result as unknown as Record<string, unknown>)["attachmentUrls"] as string[] | undefined;
-                  if (attachments?.length) {
-                    for (const url of attachments) {
-                      slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: ts }).catch(
-                        (e: unknown) => logger.error({ err: String(e), url }, "slack:dm image upload failed"),
-                      );
+                  const attachments = extractAttachments(result);
+                  if (attachments.length) {
+                    try {
+                      for (const url of attachments) {
+                        await slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: ts });
+                      }
+                    } catch (e: unknown) {
+                      logger.error({ err: String(e) }, "slack:dm image upload failed");
+                      return "❌ 图片生成成功，但上传失败，请稍后重试";
                     }
                   }
                   await traceWriter.write({
@@ -155,7 +160,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     route: extractRoute(result),
                     threadId,
                   });
-                  return attachments?.length ? undefined : reply;
+                  return attachments.length ? undefined : reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
                   logger.error({ err: String(err), threadId }, "slack:dm error");

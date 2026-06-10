@@ -34,6 +34,22 @@ function extractUrlsFromText(text: string): string[] {
   return Array.from(new Set(text.match(urlRe) ?? []));
 }
 
+/** SSRF 防护：只允许 HTTPS，屏蔽内网 IP 段和 localhost。 */
+function isSafeImageUrl(raw: string): boolean {
+  let url: URL;
+  try { url = new URL(raw); } catch { return false; }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return false;
+  // RFC-1918 内网段
+  if (/^10\./.test(host)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+  if (/^192\.168\./.test(host)) return false;
+  // 链路本地
+  if (/^169\.254\./.test(host)) return false;
+  return true;
+}
+
 /**
  * 下载图片并转成 base64 data URI。
  * Slack 私有图片需要 Authorization header；公开 URL 无需。
@@ -65,8 +81,10 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
     }
 
     // 收集图片 URL：附件（Slack 注入）+ 文本里的链接
+    // Slack 附件走私有 url_private（files.slack.com），不走 isSafeImageUrl 过滤，
+    // 因为它必须用 token 访问且来源可信；只对文本里提取的公开 URL 做 SSRF 校验。
     const attachedUrls = extractImageUrls(lastUserMsg);
-    const textUrls = extractUrlsFromText(lastUserMsg.content);
+    const textUrls = extractUrlsFromText(lastUserMsg.content).filter(isSafeImageUrl);
     const allUrls = [...new Set([...attachedUrls, ...textUrls])];
 
     if (allUrls.length === 0) {
