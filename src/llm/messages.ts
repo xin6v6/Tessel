@@ -64,7 +64,7 @@ export const humanMsg = (content: string, extra?: Omit<Partial<HumanMsg>, "role"
 /** Vision 消息：携带图片 URL 和可选文字说明。 */
 export function humanMsgWithImages(text: string, imageUrls: string[]): HumanMsg {
   const parts: ContentPart[] = [
-    ...imageUrls.map((url): ContentPart => ({ type: "image_url", image_url: { url, detail: "auto" } })),
+    ...imageUrls.map((url): ContentPart => ({ type: "image_url", image_url: { url } })),
     { type: "text", text },
   ];
   return { role: "human", content: text, contentParts: parts };
