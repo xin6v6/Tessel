@@ -133,17 +133,18 @@ export class SlackClient {
     threadTs?: string;
     altText?: string;
   }): Promise<void> {
-    await this.client.chat.postMessage({
-      channel: params.channel,
+    const res = await fetch(params.url);
+    if (!res.ok) throw new Error(`下载图片失败 ${res.status}: ${params.url}`);
+    const buf = await res.arrayBuffer();
+    const mime = res.headers.get("content-type") ?? "image/jpeg";
+    const ext = mime.split("/")[1]?.split(";")[0] ?? "jpg";
+    const filename = `image.${ext}`;
+
+    await this.client.filesUploadV2({
+      channel_id: params.channel,
       ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
-      text: params.altText ?? "生成的图片",
-      blocks: [
-        {
-          type: "image",
-          image_url: params.url,
-          alt_text: params.altText ?? "生成的图片",
-        },
-      ],
-    });
+      filename,
+      file: Buffer.from(buf),
+    } as Parameters<typeof this.client.filesUploadV2>[0]);
   }
 }
