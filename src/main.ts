@@ -106,7 +106,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                 }
               });
             },
-            onMessage: async ({ text, user, channel, imageUrls }) => {
+            onMessage: async ({ text, user, channel, ts, imageUrls }) => {
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
@@ -136,7 +136,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                   const attachments = (result as unknown as Record<string, unknown>)["attachmentUrls"] as string[] | undefined;
                   if (attachments?.length) {
                     for (const url of attachments) {
-                      slackIntegration.getClient().uploadImageFromUrl({ url, channel }).catch(
+                      slackIntegration.getClient().uploadImageFromUrl({ url, channel, threadTs: ts }).catch(
                         (e: unknown) => logger.error({ err: String(e), url }, "slack:dm image upload failed"),
                       );
                     }
