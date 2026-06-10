@@ -19,6 +19,7 @@ function stateOf(text: string) {
     intent: "unknown" as const,
     subAgentResult: "",
     finalReply: "",
+    attachmentUrls: [],
     workflowProgress: null,
   };
 }

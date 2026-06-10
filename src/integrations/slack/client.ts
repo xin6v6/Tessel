@@ -118,4 +118,33 @@ export class SlackClient {
       count: params.count ?? 10,
     });
   }
+
+  // ----------------------------------------------------------------
+  // Files
+  // ----------------------------------------------------------------
+
+  /**
+   * 以 image block 形式把图片发到消息列（图片直接展开，不作为附件）。
+   * 优先用 chat.postMessage + blocks，无需下载转存，Slack 服务器直接拉 URL。
+   */
+  async uploadImageFromUrl(params: {
+    url: string;
+    channel: string;
+    threadTs?: string;
+    altText?: string;
+  }): Promise<void> {
+    const res = await fetch(params.url);
+    if (!res.ok) throw new Error(`下载图片失败 ${res.status}: ${params.url}`);
+    const buf = await res.arrayBuffer();
+    const mime = res.headers.get("content-type") ?? "image/jpeg";
+    const ext = mime.split("/")[1]?.split(";")[0] ?? "jpg";
+    const filename = `image.${ext}`;
+
+    await this.client.filesUploadV2({
+      channel_id: params.channel,
+      ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
+      filename,
+      file: Buffer.from(buf),
+    } as Parameters<typeof this.client.filesUploadV2>[0]);
+  }
 }

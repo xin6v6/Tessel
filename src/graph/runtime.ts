@@ -27,7 +27,7 @@ export const END = "__end__" as const;
 
 /** run loop 可调度的节点名（不含 __end__）。 */
 export type NodeName =
-  | "router" | "supervisor" | "slack" | "web" | "mcp"
+  | "router" | "supervisor" | "slack" | "web" | "mcp" | "vision" | "imagegen"
   | "capabilities" | "workflow" | "workflow_approval";
 
 /** 中断信息（透出给 main，形如 __interrupt__[].value）。 */
@@ -62,6 +62,8 @@ function routeFrom(node: NodeName, state: GraphState): NodeName | typeof END {
     case "slack":
     case "web":
     case "mcp":
+    case "vision":
+    case "imagegen":
     case "capabilities":
       return "supervisor";
     case "supervisor":
@@ -145,8 +147,9 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
       }
 
       // 新消息：在已存历史上追加，从 router 起跑。
+      // attachmentUrls 是一次性字段（上传完即废），每轮强制清空，防止上轮图片 URL 残留。
       const prev = saved?.state ?? defaultState();
-      const state = mergeState(prev, { messages: input.messages });
+      const state = mergeState(prev, { messages: input.messages, attachmentUrls: [] });
       return run("router", state, cfg);
     },
 

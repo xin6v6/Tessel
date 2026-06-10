@@ -5,10 +5,15 @@
 //   · m.role === "..." / isHuman(m) 类型守卫
 //   · 天然是 plain object，序列化进 SQLite store 无需任何序列化协议
 //
-// content 在本项目里始终是 string，所以这里直接定为 string，简化下游。
+// content 通常是 string；vision 场景下 HumanMsg 可用 ContentPart[] 携带图片。
 // ────────────────────────────────────────────────────────────────────────────
 
 export type Role = "human" | "ai" | "system" | "tool";
+
+/** OpenAI vision 格式：文本或图片（URL 或 base64 data URI）。 */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
 
 /** 工具调用（AIMsg 在 ReAct 阶段产出，对应 OpenAI tool_calls）。 */
 export interface ToolCall {
@@ -32,7 +37,11 @@ interface MsgBase {
   additional_kwargs?: Record<string, unknown>;
 }
 
-export interface HumanMsg extends MsgBase { role: "human"; }
+export interface HumanMsg extends MsgBase {
+  role: "human";
+  /** Vision 场景：图片+文本的 content array，发给 provider 时优先于 content 字段。 */
+  contentParts?: ContentPart[];
+}
 export interface SystemMsg extends MsgBase { role: "system"; }
 export interface ToolMsg extends MsgBase { role: "tool"; tool_call_id: string; }
 export interface AIMsg extends MsgBase {
@@ -51,6 +60,15 @@ export type Message = HumanMsg | SystemMsg | ToolMsg | AIMsg;
 
 export const humanMsg = (content: string, extra?: Omit<Partial<HumanMsg>, "role">): HumanMsg =>
   ({ role: "human", content, ...extra });
+
+/** Vision 消息：携带图片 URL 和可选文字说明。 */
+export function humanMsgWithImages(text: string, imageUrls: string[]): HumanMsg {
+  const parts: ContentPart[] = [
+    ...imageUrls.map((url): ContentPart => ({ type: "image_url", image_url: { url, detail: "auto" } })),
+    { type: "text", text },
+  ];
+  return { role: "human", content: text, contentParts: parts };
+}
 
 export const aiMsg = (content: string, extra?: Omit<Partial<AIMsg>, "role">): AIMsg =>
   ({ role: "ai", content, ...extra });

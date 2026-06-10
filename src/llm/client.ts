@@ -1,4 +1,4 @@
-import type { Message, AIMsg, ToolCall } from "./messages.ts";
+import type { Message, AIMsg, ToolCall, HumanMsg } from "./messages.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
 // LLMClient —— OpenAI-compatible chat client。
@@ -54,7 +54,12 @@ const DEFAULT_BASE = "https://api.openai.com/v1";
 function toApiMessages(messages: Message[]): Array<Record<string, unknown>> {
   return messages.map((m) => {
     switch (m.role) {
-      case "human":  return { role: "user", content: m.content };
+      case "human": {
+        const h = m as HumanMsg;
+        // vision: contentParts 优先，回退到纯文本 content
+        const content = h.contentParts && h.contentParts.length > 0 ? h.contentParts : h.content;
+        return { role: "user", content };
+      }
       case "system": return { role: "system", content: m.content };
       case "tool":   return { role: "tool", content: m.content, tool_call_id: m.tool_call_id };
       case "ai": {

@@ -23,8 +23,8 @@ import type { IntegrationRegistry } from "../integrations/registry.ts";
 const STUB_AGENTS = new Set<string>(["web", "mcp"]);
 
 // 纯节点（无 integration、无前缀工具）但本身就绪、可作为 tool_routing 候选。
-// workflow runner 的能力来自 recipe 库，不依赖注册工具，所以显式标记为就绪。
-const READY_PURE_NODES = new Set<string>(["workflow"]);
+// workflow/vision/imagegen 都没有注册到 ToolRegistry，但节点本身可路由。
+const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen"]);
 
 /** 描述一个子节点（agent）的能力。 */
 export interface AgentCapability {

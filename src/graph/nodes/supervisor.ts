@@ -87,6 +87,8 @@ export const SUB_AGENTS: Record<
   web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
   capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
+  vision:       "识别图片内容：当用户上传图片或分享图片 URL 并希望描述/分析图片时使用",
+  imagegen:     "根据文字描述生成图片：当用户说「帮我画…」「生成一张…」「画一个…」等文生图需求时使用",
   // workflow 是【通用】多阶段调度器，不绑定开发。描述由已注册 recipe 动态生成：
   // 现在只有 coding recipe 就只提开发；以后加 research/docs 等 recipe 自动扩展。
   workflow:     workflowAgentDescription(),
@@ -195,6 +197,16 @@ function currentSpeakerLine(messages: Message[]): string {
   return "";
 }
 
+function currentDateTimeLine(): string {
+  const now = new Date();
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const weekday = weekdays[now.getDay()]!;
+  return `当前时间：${dateStr} ${weekday} ${timeStr}。\n`;
+}
+
 // ----------------------------------------------------------------
 // Supervisor 节点
 // ----------------------------------------------------------------
@@ -245,6 +257,23 @@ export function buildSupervisorNode(
       ? lastHuman.content.slice(0, 120)
       : "";
 
+    // ── 视觉快速路径：消息携带图片 → 直接路由到 vision agent，跳过意图分类 ──
+    //
+    // 检测条件：additional_kwargs.imageUrls 有值（Slack 附件）或 content 中包含
+    // 可识别的图片 URL（http...jpg/png/gif/webp）。
+    // 此快速路径在阶段 A0 之前执行，但只在初始路由时（!subAgentResult && !finalReply）
+    // 生效，避免 vision 回来后被再次路由到 vision。
+    if (!subAgentResult && !finalReply && lastHuman) {
+      const attachedUrls = lastHuman.additional_kwargs?.["imageUrls"] as string[] | undefined;
+      const hasAttachedImages = Array.isArray(attachedUrls) && attachedUrls.length > 0;
+      const hasInlineImageUrl = typeof lastHuman.content === "string" &&
+        /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)/i.test(lastHuman.content);
+      if (hasAttachedImages || hasInlineImageUrl) {
+        logger.info({ hasAttachedImages, hasInlineImageUrl }, "routing: vision fast-path");
+        return { next: "vision", intent: "unknown" };
+      }
+    }
+
     // ── 阶段 A0：子 Agent 给了成稿 finalReply → 原样转发（仅 sanitize） ──
     //
     // 子 Agent 通过 finalReply 显式声明「这是给用户看的最终回复」，supervisor
@@ -274,7 +303,7 @@ export function buildSupervisorNode(
       const t0 = Date.now();
       const finalReply = await llm.invoke([
         systemMsg(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
         humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
@@ -398,7 +427,7 @@ export function buildSupervisorNode(
       const t1 = Date.now();
       // 主 agent（supervisor）的 skill 选择性注入:绑定给 supervisor 的 skill 进 menu,
       // 命中的注入正文。没绑定 / 没命中 → 等价于原 prompt,正常闲聊零影响。
-      const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${REPLY_GUARDRAILS}`;
+      const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
       const chatSystem = skills
         ? skills.promptFor("supervisor", chatBase, inputSnippet)
         : chatBase;
@@ -479,7 +508,7 @@ ${snapshotForRoutingPrompt(allowedSnapshot)}
 - 不要凭直觉选不存在的 agent，也不要选清单里标了 [STUB] 的。
 - 不确定时回复 \`none\`，不要硬选。`,
       ),
-      ...historyForPrompt(messages),
+      humanMsg(inputSnippet),
     ]);
 
     const routeText =
