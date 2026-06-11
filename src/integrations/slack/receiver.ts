@@ -157,12 +157,15 @@ export class SlackReceiver {
 
       const reply = await this.handler.onMention?.(mentionEvent);
 
-      // 用真实回复替换占位消息
+      // 删掉占位消息，再发真实回复（避免 chat.update 产生"已编辑"标志）
       if (placeholder.ts) {
-        await client.chat.update({
+        await client.chat.delete({ channel: event.channel, ts: placeholder.ts }).catch(() => {});
+      }
+      if (reply) {
+        await client.chat.postMessage({
           channel: event.channel,
-          ts: placeholder.ts,
-          text: reply || "",
+          thread_ts: threadTs,
+          text: reply,
         });
       }
     });
