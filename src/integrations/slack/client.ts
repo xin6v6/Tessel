@@ -127,6 +127,24 @@ export class SlackClient {
    * 以 image block 形式把图片发到消息列（图片直接展开，不作为附件）。
    * 优先用 chat.postMessage + blocks，无需下载转存，Slack 服务器直接拉 URL。
    */
+  async uploadFile(params: {
+    filePath: string;
+    filename: string;
+    channel: string;
+    threadTs?: string;
+    initialComment?: string;
+  }): Promise<void> {
+    const file = Bun.file(params.filePath);
+    const buf = Buffer.from(await file.arrayBuffer());
+    await this.client.filesUploadV2({
+      channel_id: params.channel,
+      ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
+      filename: params.filename,
+      file: buf,
+      ...(params.initialComment ? { initial_comment: params.initialComment } : {}),
+    } as Parameters<typeof this.client.filesUploadV2>[0]);
+  }
+
   async uploadImageFromUrl(params: {
     url: string;
     channel: string;

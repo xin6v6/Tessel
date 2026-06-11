@@ -77,6 +77,11 @@ export function extractAttachments(result: InvokeResult): string[] {
   return (result as unknown as GraphState).attachmentUrls ?? [];
 }
 
+/** 从 graph 结果中安全提取 attachmentPaths（本地文件路径，入口层负责上传）。 */
+export function extractAttachmentPaths(result: InvokeResult): string[] {
+  return (result as unknown as GraphState).attachmentPaths ?? [];
+}
+
 /** 用户消息是否表达"同意"(用于审批恢复)。 */
 export function isApproval(text: string): boolean {
   return /(^|\s)(同意|确认|可以|好的|批准|approve|yes|ok|go)(\s|$|，|。|!|！)/i.test(text.trim());

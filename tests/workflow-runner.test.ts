@@ -50,6 +50,7 @@ function freshState(text: string): GraphStateType {
     subAgentResult: "",
     finalReply: "",
     attachmentUrls: [],
+    attachmentPaths: [],
     workflowProgress: null,
   };
 }
