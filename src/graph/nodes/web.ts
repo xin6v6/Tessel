@@ -27,10 +27,8 @@ const FINAL_ANSWER_PARAMS = {
 };
 
 const SYSTEM_PROMPT =
-  "你是一个互联网信息助手。根据用户需求选择合适的工具获取信息：\n" +
-  "- 天气查询 → web_weather（城市名）\n" +
-  "- 新闻/文档/技术资料 → web_fetch（构造合适的 URL，如 GitHub release 页、官方博客等）\n" +
-  "回答时引用来源，用简洁中文回复。";
+  "你是一个互联网搜索助手。使用 web_search 搜索用户需要的实时信息，" +
+  "总结搜索结果并给出清晰的回答。回答时引用来源 URL，用简洁中文回复。";
 
 export function buildWebAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, skills?: SkillContext) {
   const tools: ReactTool[] = toolRegistry

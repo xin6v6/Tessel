@@ -213,7 +213,9 @@ if (process.env.SLACK_BOT_TOKEN) {
   integrations.add(slackIntegration);
 }
 
-integrations.add(new WebSearchIntegration());
+if (process.env.BOCHA_API_KEY) {
+  integrations.add(new WebSearchIntegration());
+}
 
 // ----------------------------------------------------------------
 // 启动

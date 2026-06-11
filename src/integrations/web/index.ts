@@ -8,12 +8,13 @@ export { WebSearchClient } from "./client.ts";
 
 export class WebSearchIntegration implements Integration {
   readonly id = "web";
-  readonly description = "Search the internet via DuckDuckGo + Jina Reader (no API key required)";
+  readonly description = "Search the internet via Bocha AI Search API";
 
   private client = new WebSearchClient();
   private entries: Array<{ definition: ToolDefinition; handler: ToolHandler }> = [];
 
   async initialize(): Promise<void> {
+    if (!process.env.BOCHA_API_KEY) throw new Error("BOCHA_API_KEY 未配置");
     this.entries = buildWebTools(this.client);
   }
 
