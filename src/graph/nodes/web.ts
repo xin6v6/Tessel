@@ -1,42 +1,50 @@
+import { z } from "zod";
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, isHuman, isTool } from "../../llm/messages.ts";
+import { humanMsg, systemMsg, isHuman, isTool } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
+import type { ToolRegistry } from "../../tools/index.ts";
 import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("web-agent");
 
-// ----------------------------------------------------------------
-// Web Search Agent 节点（stub）
-// ----------------------------------------------------------------
-//
-// 接入步骤：
-//   1. 选择 Search API（Tavily / Brave / SerpAPI）
-//   2. 新建 src/integrations/web/ 实现 Integration 接口
-//   3. 在 IntegrationRegistry 注册，工具名以 "web_" 开头
-//   4. 把 toolRegistry 传入 buildWebAgentNode，替换掉下面的占位工具
-//
-// ----------------------------------------------------------------
+const FinalAnswerSchema = z.object({
+  displayMessage: z
+    .string()
+    .describe("给用户的最终回复，包含搜索结果摘要和来源链接。不含内部推理。"),
+  status: z
+    .enum(["ok", "error", "needs_clarification"])
+    .describe("ok=成功；error=失败；needs_clarification=信息不全。"),
+});
 
-/** 占位工具 —— 提示用户该能力尚未接入 */
-const stubSearchTool: ReactTool = {
-  name: "web_search",
-  description: "搜索互联网获取实时信息",
-  parameters: {
-    type: "object",
-    properties: { query: { type: "string", description: "搜索关键词" } },
-    required: ["query"],
+const FINAL_ANSWER_PARAMS = {
+  type: "object",
+  properties: {
+    displayMessage: { type: "string", description: "给用户的最终回复，含摘要和来源链接。" },
+    status: { type: "string", enum: ["ok", "error", "needs_clarification"] },
   },
-  handler: async (input) => {
-    logger.warn(`[web-agent] Web Search 尚未接入，查询被忽略: "${String(input.query)}"`);
-    return "Web Search 功能尚未接入，请联系管理员配置。";
-  },
+  required: ["displayMessage", "status"],
 };
 
-export function buildWebAgentNode(llm: LLMClient, skills?: SkillContext) {
-  const SYSTEM_PROMPT =
-    "你是一个 Web 搜索助手。根据用户需求执行网络搜索，" +
-    "总结搜索结果并给出清晰的回答。";
+const SYSTEM_PROMPT =
+  "你是一个互联网搜索助手。使用 web_search 搜索用户需要的实时信息，" +
+  "总结搜索结果并给出清晰的回答。回答时引用来源 URL，用简洁中文回复。";
+
+export function buildWebAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, skills?: SkillContext) {
+  const tools: ReactTool[] = toolRegistry
+    .definitions()
+    .filter((def) => def.name.startsWith("web_"))
+    .map((def) => ({
+      name: def.name,
+      description: def.description,
+      parameters: def.parameters,
+      handler: async (input: Record<string, unknown>) => {
+        const results = await toolRegistry.execute([
+          { toolCallId: crypto.randomUUID(), name: def.name, input },
+        ]);
+        return results[0]?.output ?? "";
+      },
+    }));
 
   return async function webAgentNode(
     state: GraphStateType
@@ -44,9 +52,8 @@ export function buildWebAgentNode(llm: LLMClient, skills?: SkillContext) {
     const nodeStart = Date.now();
 
     const lastUserMsg = [...state.messages].reverse().find(isHuman);
-
     if (!lastUserMsg) {
-      logger.warn("no human message found, skipping");
+      logger.warn("no human message found");
       return { subAgentResult: "未找到用户消息，无法执行搜索。" };
     }
 
@@ -58,22 +65,44 @@ export function buildWebAgentNode(llm: LLMClient, skills?: SkillContext) {
       : SYSTEM_PROMPT;
 
     try {
-      const result = await runReactAgent({
+      const reactResult = await runReactAgent({
         llm,
-        tools: [stubSearchTool],
+        tools,
         systemPrompt,
         messages: [humanMsg(lastUserMsg.content)],
       });
-      const output = result.messages.at(-1)?.content ?? "";
-      const toolCallCount = result.messages.filter(isTool).length;
 
-      logger.info({
-        durationMs: Date.now() - nodeStart,
-        toolCallCount,
-        outputSnippet: output.slice(0, 120),
-      }, "completed");
+      const toolCallCount = reactResult.messages.filter(isTool).length;
+      const rawOutput = reactResult.messages.at(-1)?.content ?? "";
 
-      return { subAgentResult: output };
+      // 第二阶段：收敛为结构化成稿
+      const structured = await llm.invokeStructured(
+        [
+          systemMsg(
+            "你是一个结果整理助手。把以下搜索结果整理成给用户的最终回复，" +
+            "包含关键信息摘要和相关来源链接（markdown 格式）。",
+          ),
+          humanMsg(rawOutput),
+        ],
+        FinalAnswerSchema,
+        {
+          name: "final_answer",
+          description: "最终回复",
+          parameters: FINAL_ANSWER_PARAMS,
+        },
+      );
+
+      const parsed = FinalAnswerSchema.safeParse(structured);
+      const finalReply = parsed.success
+        ? parsed.data.displayMessage
+        : rawOutput;
+
+      logger.info(
+        { durationMs: Date.now() - nodeStart, toolCallCount, outputSnippet: finalReply.slice(0, 120) },
+        "completed",
+      );
+
+      return { finalReply };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ durationMs: Date.now() - nodeStart, err: msg }, "failed");
