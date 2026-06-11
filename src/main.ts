@@ -213,9 +213,7 @@ if (process.env.SLACK_BOT_TOKEN) {
   integrations.add(slackIntegration);
 }
 
-if (process.env.BRAVE_API_KEY) {
-  integrations.add(new WebSearchIntegration());
-}
+integrations.add(new WebSearchIntegration());
 
 // ----------------------------------------------------------------
 // 启动

@@ -1,68 +1,88 @@
 import { createLogger } from "../../observability/logger.ts";
-const logger = createLogger("brave-search");
+const logger = createLogger("web-search");
 
-export interface BraveSearchConfig {
-  apiKey?: string;
-}
-
-export interface BraveSearchResult {
+export interface SearchResult {
   title: string;
   url: string;
-  description: string;
+  snippet: string;
 }
 
-export interface BraveSearchResponse {
-  query: string;
-  results: BraveSearchResult[];
+export interface FetchedPage {
+  url: string;
+  content: string;
 }
 
 /**
- * Brave Search API 客户端。
- * 文档：https://api.search.brave.com/app/documentation/web-search
+ * DuckDuckGo HTML 搜索 + Jina Reader 内容抓取。
+ * 无需 API Key，完全免费。
+ *
+ * 搜索：https://html.duckduckgo.com/html/
+ * 读取：https://r.jina.ai/<url>
  */
-export class BraveSearchClient {
-  private apiKey: string;
-  private baseURL = "https://api.search.brave.com/res/v1";
+export class WebSearchClient {
+  private static readonly DDG_URL = "https://html.duckduckgo.com/html/";
+  private static readonly JINA_URL = "https://r.jina.ai/";
+  private static readonly UA =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0 Safari/537.36";
 
-  constructor(config: BraveSearchConfig = {}) {
-    this.apiKey = config.apiKey ?? process.env.BRAVE_API_KEY ?? "";
-  }
+  async search(query: string, count = 5): Promise<SearchResult[]> {
+    logger.debug({ query, count }, "ddg search");
 
-  async search(query: string, count = 5): Promise<BraveSearchResponse> {
-    if (!this.apiKey) throw new Error("BRAVE_API_KEY 未配置");
-
-    const url = new URL(`${this.baseURL}/web/search`);
-    url.searchParams.set("q", query);
-    url.searchParams.set("count", String(count));
-    url.searchParams.set("text_decorations", "false");
-    url.searchParams.set("search_lang", "zh-hans");
-
-    logger.debug({ query, count }, "brave search request");
-
-    const res = await fetch(url.toString(), {
+    const body = new URLSearchParams({ q: query, kl: "cn-zh" });
+    const res = await fetch(WebSearchClient.DDG_URL, {
+      method: "POST",
       headers: {
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "X-Subscription-Token": this.apiKey,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": WebSearchClient.UA,
       },
+      body: body.toString(),
     });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Brave Search API 错误 ${res.status}: ${body}`);
+    if (!res.ok) throw new Error(`DuckDuckGo 搜索失败 ${res.status}`);
+
+    const html = await res.text();
+    const results = this._parseResults(html, count);
+    logger.debug({ query, resultCount: results.length }, "ddg search done");
+    return results;
+  }
+
+  async fetchPage(url: string, maxChars = 3000): Promise<FetchedPage> {
+    logger.debug({ url }, "jina fetch");
+    const jinaUrl = `${WebSearchClient.JINA_URL}${url}`;
+    const res = await fetch(jinaUrl, {
+      headers: { "User-Agent": WebSearchClient.UA, "Accept": "text/plain" },
+    });
+    if (!res.ok) throw new Error(`Jina 抓取失败 ${res.status}: ${url}`);
+    const text = await res.text();
+    return { url, content: text.slice(0, maxChars) };
+  }
+
+  private _parseResults(html: string, count: number): SearchResult[] {
+    const results: SearchResult[] = [];
+
+    // 提取每个结果块：.result__title + .result__snippet
+    const blockRe =
+      /class="result__title"[\s\S]*?uddg=([^&"]+)[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+
+    let m: RegExpExecArray | null;
+    while ((m = blockRe.exec(html)) !== null && results.length < count) {
+      const url = decodeURIComponent(m[1]!);
+      const title = this._stripTags(m[2]!).trim();
+      const snippet = this._stripTags(m[3]!).trim();
+      if (url && title) results.push({ title, url, snippet });
     }
 
-    const data = await res.json() as {
-      web?: { results?: Array<{ title: string; url: string; description?: string }> };
-    };
+    return results;
+  }
 
-    const results: BraveSearchResult[] = (data.web?.results ?? []).map((r) => ({
-      title: r.title ?? "",
-      url: r.url ?? "",
-      description: r.description ?? "",
-    }));
-
-    logger.debug({ query, resultCount: results.length }, "brave search response");
-    return { query, results };
+  private _stripTags(s: string): string {
+    return s
+      .replace(/<[^>]+>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#x27;/g, "'")
+      .replace(/\s+/g, " ");
   }
 }

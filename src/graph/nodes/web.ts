@@ -28,7 +28,8 @@ const FINAL_ANSWER_PARAMS = {
 
 const SYSTEM_PROMPT =
   "你是一个 Web 搜索助手。根据用户需求执行网络搜索，总结搜索结果并给出清晰的回答。" +
-  "回答时引用来源 URL，帮助用户找到更多信息。用简洁中文回复。";
+  "先用 web_search 搜索，如果摘要不足以回答问题，再用 web_fetch 读取最相关的页面。" +
+  "回答时引用来源 URL，用简洁中文回复。";
 
 export function buildWebAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, skills?: SkillContext) {
   const tools: ReactTool[] = toolRegistry
