@@ -50,7 +50,11 @@ def main():
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # 删除默认 sheet
 
-    for sheet_def in data.get("sheets", []):
+    sheets = data.get("sheets", [])
+    if not sheets:
+        sheets = [{}]  # 至少保留一个空 sheet，避免 openpyxl 保存无 sheet 的工作簿报错
+
+    for sheet_def in sheets:
         ws = wb.create_sheet(sheet_def.get("name", "Sheet"))
         row_idx = 1
 
