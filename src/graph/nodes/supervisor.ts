@@ -226,6 +226,7 @@ export function buildSupervisorNode(
   ): Promise<Partial<GraphStateType>> {
     const nodeStart = Date.now();
     const { messages, subAgentResult, finalReply } = state;
+    const source = getContext()?.source as Source | undefined;
 
     // 取最后一条用户消息用于日志（截断避免刷屏）
     const lastHuman = [...messages].reverse().find((m) => isHuman(m));
@@ -281,7 +282,7 @@ export function buildSupervisorNode(
       const t0 = Date.now();
       const finalReply = await llm.invoke([
         systemMsg(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
         humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
@@ -319,7 +320,6 @@ export function buildSupervisorNode(
     //   unknown  → 分类置信度不足或 server 不可达，当作 chat 回复并提示用户
     //   chat     → 直接 LLM 对话
     //   其他节点  → 直接路由（workflow 再加白名单二次校验）
-    const source = getContext()?.source as Source | undefined;
     const routerIntent = state.intent;
     logger.info({ inputSnippet, source, routerIntent }, "routing (intent)");
 
@@ -349,7 +349,7 @@ export function buildSupervisorNode(
 
     // ── chat / unknown → 直接 LLM 回复 ──
     const t1 = Date.now();
-    const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
+    const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
     const chatSystem = skills
       ? skills.promptFor("supervisor", chatBase, inputSnippet)
       : chatBase;
