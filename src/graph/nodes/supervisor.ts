@@ -271,6 +271,8 @@ export function buildSupervisorNode(
         next: "__end__",
         subAgentResult: "",
         finalReply: "",
+        attachmentPaths: state.attachmentPaths,
+        attachmentUrls: state.attachmentUrls,
       };
     }
 
@@ -305,6 +307,8 @@ export function buildSupervisorNode(
         next: "__end__",
         subAgentResult: "",
         finalReply: "",
+        attachmentPaths: state.attachmentPaths,
+        attachmentUrls: state.attachmentUrls,
       };
     }
 
