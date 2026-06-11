@@ -1,6 +1,10 @@
 # dependencies (bun install)
 node_modules
 
+# Python
+__pycache__/
+*.pyc
+
 # output
 out
 tmp
