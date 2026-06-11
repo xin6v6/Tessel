@@ -15,6 +15,7 @@ import {
 } from "./graph/thread-id.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
 import { WebSearchIntegration } from "./integrations/web/index.ts";
+import { McpIntegration } from "./integrations/mcp/index.ts";
 import { resolveUserName } from "./integrations/slack/user-names.ts";
 import { logger } from "./utils/logger.ts";
 import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
@@ -216,6 +217,9 @@ if (process.env.SLACK_BOT_TOKEN) {
 if (process.env.BOCHA_API_KEY) {
   integrations.add(new WebSearchIntegration());
 }
+
+// McpIntegration 总是注册（内部按 mcp.json 决定连接哪些 server）
+integrations.add(new McpIntegration());
 
 // ----------------------------------------------------------------
 // 启动
