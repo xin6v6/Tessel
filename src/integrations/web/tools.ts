@@ -11,45 +11,37 @@ export function buildWebTools(client: WebSearchClient): ToolEntry[] {
   return [
     {
       definition: {
-        name: "web_search",
-        description:
-          "搜索互联网获取实时信息、新闻、文档、最新版本等。返回标题、URL 和摘要列表。",
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "搜索关键词或问题" },
-            count: { type: "number", description: "返回结果数量，默认 5，最多 8" },
-          },
-          required: ["query"],
-        },
-      },
-      handler: async (input) => {
-        const query = input.query as string;
-        const count = Math.min(Number(input.count ?? 5), 8);
-        const results = await client.search(query, count);
-        if (results.length === 0) return "未找到相关结果。";
-        return results
-          .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
-          .join("\n\n");
-      },
-    },
-    {
-      definition: {
         name: "web_fetch",
         description:
-          "获取指定 URL 的页面正文内容（markdown 格式）。在搜索结果摘要不足时用来深入阅读某个页面。",
+          "获取指定 URL 的页面正文内容（markdown 格式）。可用于读取新闻、文档、博客、GitHub 等任意网页。",
         parameters: {
           type: "object",
           properties: {
-            url: { type: "string", description: "要读取的网页 URL" },
+            url: { type: "string", description: "要读取的网页完整 URL" },
           },
           required: ["url"],
         },
       },
       handler: async (input) => {
-        const url = input.url as string;
-        const page = await client.fetchPage(url);
+        const page = await client.fetchPage(input.url as string);
         return page.content || "页面内容为空。";
+      },
+    },
+    {
+      definition: {
+        name: "web_weather",
+        description:
+          "查询指定城市的实时天气和未来3天预报。城市名支持中英文，如「北京」「Shanghai」「New York」。",
+        parameters: {
+          type: "object",
+          properties: {
+            city: { type: "string", description: "城市名称，支持中英文" },
+          },
+          required: ["city"],
+        },
+      },
+      handler: async (input) => {
+        return client.fetchWeather(input.city as string);
       },
     },
   ];
