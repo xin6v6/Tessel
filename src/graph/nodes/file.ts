@@ -82,8 +82,9 @@ const fileTools: ReactTool[] = [
       // 只对看起来像独立路径的参数做 safePath 校验（不含 { 的参数，避免误判 JSON 字符串）
       const safeParts = parts.map((part, i) => {
         if (i === 0) return part;
-        // 预制脚本目录下的路径直接放行
-        if (part.startsWith(FILE_GEN_SCRIPTS + path.sep) || part === FILE_GEN_SCRIPTS) return part;
+        // 预制脚本目录下的路径放行（先 resolve 规范化，防止 ../ 绕过）
+        const resolved = path.resolve(ROOT, part);
+        if (resolved === FILE_GEN_SCRIPTS || resolved.startsWith(FILE_GEN_SCRIPTS + path.sep)) return resolved;
         // JSON 参数（含 {）不做路径校验
         if (part.includes("{")) return part;
         if (/^[./]/.test(part) || part.includes("/")) {
