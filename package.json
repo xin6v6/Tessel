@@ -20,7 +20,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "ui": "bun --hot src/ui/server.ts",
-    "contacts": "bun run scripts/contacts.ts"
+    "contacts": "bun run scripts/contacts.ts",
+    "train": "cd scripts/train-router && python3 train.py && pkill -f serve.py; nohup python3 serve.py > /tmp/classifier.log 2>&1 &"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -24,7 +24,7 @@ const STUB_AGENTS = new Set<string>(["web", "mcp"]);
 
 // 纯节点（无 integration、无前缀工具）但本身就绪、可作为 tool_routing 候选。
 // workflow/vision/imagegen 都没有注册到 ToolRegistry，但节点本身可路由。
-const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen"]);
+const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen", "file"]);
 
 /** 描述一个子节点（agent）的能力。 */
 export interface AgentCapability {
