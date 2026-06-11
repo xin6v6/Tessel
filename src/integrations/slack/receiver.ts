@@ -130,9 +130,11 @@ export class SlackReceiver {
     this.app.assistant(assistant);
 
     // ---- App Mention (@Bot) ----
-    this.app.event("app_mention", async ({ event, say }) => {
+    // 频道里没有 assistant thread 上下文，用占位消息 + chat.update 模拟状态效果。
+    this.app.event("app_mention", async ({ event, client }) => {
       // 去掉 <@BOTID> 前缀
       const textClean = event.text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
+      const threadTs = event.thread_ts ?? event.ts;
 
       const mentionEvent: SlackMentionEvent = {
         text: event.text,
@@ -146,9 +148,22 @@ export class SlackReceiver {
 
       logger.debug({ user: mentionEvent.user, text: textClean, imageCount: mentionEvent.imageUrls?.length ?? 0 }, "mention received");
 
+      // 先发占位消息显示"评估中..."
+      const placeholder = await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadTs,
+        text: "_评估中..._",
+      });
+
       const reply = await this.handler.onMention?.(mentionEvent);
-      if (reply) {
-        await say({ text: reply, thread_ts: mentionEvent.threadTs ?? mentionEvent.ts });
+
+      // 用真实回复替换占位消息
+      if (placeholder.ts) {
+        await client.chat.update({
+          channel: event.channel,
+          ts: placeholder.ts,
+          text: reply || "",
+        });
       }
     });
   }
