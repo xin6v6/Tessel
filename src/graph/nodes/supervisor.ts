@@ -100,6 +100,8 @@ export const KNOWN_AGENTS = Object.keys(SUB_AGENTS) as Array<Exclude<SubAgentNam
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
 
 // router 输出的节点级 intent 可直接路由的集合（chat/unknown 不在此）。
+// web/mcp 标记为 [STUB]，尚未接入真实实现，不加入此集合；
+// 启用时在 ONNX 训练数据中补充对应标签并在此添加即可。
 const ROUTABLE_INTENTS = new Set(["slack", "file", "vision", "imagegen", "workflow", "capabilities"]);
 
 

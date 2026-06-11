@@ -59,9 +59,17 @@ const fileTools: ReactTool[] = [
     },
     handler: async ({ command }: { command?: unknown }) => {
       const cmd = String(command ?? "");
+      // 拆分参数数组，避免 sh -c 整串传入导致的命令注入
+      const parts = cmd.trim().split(/\s+/);
       assertCommandAllowed(cmd);
-      const result = await Bun.$`sh -c ${cmd}`.cwd(ROOT).text();
-      return result || "(命令执行完成，无输出)";
+      const proc = Bun.spawn(parts, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      await proc.exited;
+      const out = stdout + (stderr ? `\nstderr: ${stderr}` : "");
+      return out.trim() || "(命令执行完成，无输出)";
     },
   },
   {
@@ -234,7 +242,9 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
         generatedPaths = finalized.generatedPaths ?? [];
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.warn({ err: msg }, "finalize step failed; falling back to subAgentResult compose");
+        logger.warn({ err: msg }, "finalize step failed; falling back to reactOutput");
+        // finalize 失败时直接用 reactOutput 作为回复，避免用户收到空白
+        finalReply = reactOutput;
       }
 
       logger.info({
