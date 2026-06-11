@@ -1,30 +1,12 @@
-import { z } from "zod";
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, systemMsg, isHuman, isTool } from "../../llm/messages.ts";
+import { isHuman, isTool } from "../../llm/messages.ts";
+import { humanMsg, systemMsg } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
 import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("web-agent");
-
-const FinalAnswerSchema = z.object({
-  displayMessage: z
-    .string()
-    .describe("给用户的最终回复，包含搜索结果摘要和来源链接。不含内部推理。"),
-  status: z
-    .enum(["ok", "error", "needs_clarification"])
-    .describe("ok=成功；error=失败；needs_clarification=信息不全。"),
-});
-
-const FINAL_ANSWER_PARAMS = {
-  type: "object",
-  properties: {
-    displayMessage: { type: "string", description: "给用户的最终回复，含摘要和来源链接。" },
-    status: { type: "string", enum: ["ok", "error", "needs_clarification"] },
-  },
-  required: ["displayMessage", "status"],
-};
 
 const SYSTEM_PROMPT =
   "你是一个互联网搜索助手。使用 web_search 搜索用户需要的实时信息，" +
@@ -73,29 +55,7 @@ export function buildWebAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, sk
       });
 
       const toolCallCount = reactResult.messages.filter(isTool).length;
-      const rawOutput = reactResult.messages.at(-1)?.content ?? "";
-
-      // 第二阶段：收敛为结构化成稿
-      const structured = await llm.invokeStructured(
-        [
-          systemMsg(
-            "你是一个结果整理助手。把以下搜索结果整理成给用户的最终回复，" +
-            "包含关键信息摘要和相关来源链接（markdown 格式）。",
-          ),
-          humanMsg(rawOutput),
-        ],
-        FinalAnswerSchema,
-        {
-          name: "final_answer",
-          description: "最终回复",
-          parameters: FINAL_ANSWER_PARAMS,
-        },
-      );
-
-      const parsed = FinalAnswerSchema.safeParse(structured);
-      const finalReply = parsed.success
-        ? parsed.data.displayMessage
-        : rawOutput;
+      const finalReply = reactResult.messages.at(-1)?.content ?? "";
 
       logger.info(
         { durationMs: Date.now() - nodeStart, toolCallCount, outputSnippet: finalReply.slice(0, 120) },
