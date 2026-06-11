@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { z } from "zod";
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, systemMsg, isHuman, isTool, type Message } from "../../llm/messages.ts";
+import { humanMsg, systemMsg, isHuman, isAI, isTool, type Message } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { SkillContext } from "../../skills/context.ts";
@@ -225,9 +225,18 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
         messages: [humanMsg(userInputText)],
       });
 
-      const lastMsg = result.messages.at(-1);
-      const reactOutput = lastMsg?.content ?? "";
+      // 最后一条 AI 消息作为 ReAct 总结（最后一条消息可能是 tool 结果）
+      const lastAiMsg = [...result.messages].reverse().find(isAI);
+      const reactOutput = lastAiMsg?.content ?? "";
       const toolCallCount = result.messages.filter(isTool).length;
+
+      // 从 tool 消息结果中提取生成的文件路径（file_write/shell_exec 均会返回绝对路径）
+      const pathPattern = new RegExp(`${ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\s'"]+`, "g");
+      const toolOutputs = result.messages
+        .filter(isTool)
+        .map((m) => m.content)
+        .join("\n");
+      const extractedPaths = [...new Set(toolOutputs.match(pathPattern) ?? [])];
 
       let finalReply = "";
       let status: "ok" | "error" | "needs_clarification" = "ok";
@@ -237,13 +246,13 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
         const finalizeMessages: Message[] = [
           systemMsg(
             "你正在为一个文件操作子 Agent 输出最终回复。" +
-            "下面会给你：1) 用户的原始问题；2) ReAct 阶段产生的草稿/工具执行总结。" +
+            "下面会给你：1) 用户的原始问题；2) ReAct 阶段产生的草稿；3) 工具执行结果。" +
             "请基于这些信息，写一段直接发给用户的中文回复。" +
-            "硬性要求：不要包含 <think>、<thinking> 等内部推理标签；不要解释内部工具调用细节；不要编造草稿里没有的事实。" +
-            "如果生成了文件，在 generatedPaths 中填入文件的完整绝对路径。",
+            "硬性要求：不要包含 <think>、<thinking> 等内部推理标签；不要解释内部工具调用细节；不要编造工具结果里没有的事实。" +
+            "如果工具结果中包含文件路径，在 generatedPaths 中填入这些完整绝对路径。",
           ),
           humanMsg(
-            `用户原始问题：\n${userInputText}\n\nReAct 阶段草稿（含工具执行总结）：\n${reactOutput}`,
+            `用户原始问题：\n${userInputText}\n\nReAct 阶段草稿：\n${reactOutput}\n\n工具执行结果：\n${toolOutputs}`,
           ),
         ];
         const finalized = await llm.invokeStructured(finalizeMessages, FinalAnswerSchema, {
@@ -252,12 +261,12 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
         });
         finalReply = finalized.displayMessage;
         status = finalized.status;
-        generatedPaths = finalized.generatedPaths ?? [];
+        generatedPaths = finalized.generatedPaths?.length ? finalized.generatedPaths : extractedPaths;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn({ err: msg }, "finalize step failed; falling back to reactOutput");
-        // finalize 失败时直接用 reactOutput 作为回复，避免用户收到空白
-        finalReply = reactOutput;
+        finalReply = reactOutput || toolOutputs;
+        generatedPaths = extractedPaths;
       }
 
       logger.info({
