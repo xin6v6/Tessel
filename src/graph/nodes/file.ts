@@ -60,21 +60,38 @@ const fileTools: ReactTool[] = [
   {
     name: "shell_exec",
     description:
-      "执行 shell 命令，用于生成或处理非纯文本格式文件（如 PDF、docx、xlsx、图片等）。" +
-      "所有路径必须在工作根目录内。可用命令：pandoc、python3、libreoffice、convert、ffmpeg、cat、ls、mkdir、cp、mv、rm、echo、tee、head、tail、grep、sed、awk、zip、unzip、tar。",
+      "执行命令。参数必须拆成数组传入（args），不要拼成单字符串，这样 JSON 参数里的空格才不会被误分割。" +
+      "可用命令（args[0]）：python3、cat、ls、mkdir、cp、mv、rm、echo、tee、head、tail、grep、sed、awk、zip、unzip、tar、pandoc、node、bun、libreoffice、convert、ffmpeg。",
     parameters: {
       type: "object",
       properties: {
-        command: { type: "string", description: "要执行的 shell 命令（单条，不支持管道链）" },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description: "命令及参数数组，如 [\"python3\", \"/path/gen_docx.py\", \"{...json...}\"]。第一个元素是可执行文件，后续是参数，每个元素独立，不含 shell 特殊字符。",
+        },
       },
-      required: ["command"],
+      required: ["args"],
     },
-    handler: async ({ command }: { command?: unknown }) => {
-      const cmd = String(command ?? "");
-      // 拆分参数数组，避免 sh -c 整串传入导致的命令注入
-      const parts = cmd.trim().split(/\s+/);
-      assertCommandAllowed(cmd);
-      const safeParts = sanitizeArgs(parts);
+    handler: async ({ args }: { args?: unknown }) => {
+      if (!Array.isArray(args) || args.length === 0) {
+        throw new Error("args 必须是非空数组");
+      }
+      const parts = args.map(String);
+      assertCommandAllowed(parts[0]!);
+      // 只对看起来像独立路径的参数做 safePath 校验（不含 { 的参数，避免误判 JSON 字符串）
+      const safeParts = parts.map((part, i) => {
+        if (i === 0) return part;
+        // 预制脚本目录下的路径放行（先 resolve 规范化，防止 ../ 绕过）
+        const resolved = path.resolve(ROOT, part);
+        if (resolved === FILE_GEN_SCRIPTS || resolved.startsWith(FILE_GEN_SCRIPTS + path.sep)) return resolved;
+        // JSON 参数（含 {）不做路径校验
+        if (part.includes("{")) return part;
+        if (/^[./]/.test(part) || part.includes("/")) {
+          return safePath(part);
+        }
+        return part;
+      });
       const proc = Bun.spawn(safeParts, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr] = await Promise.all([
         new Response(proc.stdout).text(),
@@ -191,11 +208,33 @@ const FINAL_ANSWER_PARAMS = {
 // File Agent 节点
 // ----------------------------------------------------------------
 
+// 预制脚本目录（scripts/file-gen/），每个脚本接收 JSON 字符串参数，输出生成文件的绝对路径。
+const FILE_GEN_SCRIPTS = path.resolve(import.meta.dir, "../../../scripts/file-gen");
+
 const SYSTEM_PROMPT =
-  "你是一个文件操作专项助手。你负责执行本地文件的读取、写入、编辑、目录列表操作，以及生成各种格式的文件（PDF、docx、xlsx、图片等）。" +
-  "对于纯文本文件，优先使用 file_read/file_write/file_edit/file_list 工具。" +
-  "对于需要特定格式的文件（如 PDF、docx、xlsx），使用 shell_exec 工具调用系统命令（如 pandoc、python3）来生成。" +
-  "文件生成完成后，在 generatedPaths 中返回文件的完整绝对路径，后续流程会负责将文件发送给用户。" +
+  "你是一个文件操作专项助手。你负责执行本地文件的读取、写入、编辑、目录列表操作，以及生成各种格式的文件（PDF、docx、xlsx、图片等）。\n" +
+  "对于纯文本文件，优先使用 file_read/file_write/file_edit/file_list 工具。\n" +
+  "对于需要生成特定格式文件，【必须优先使用下面的预制脚本】，通过 shell_exec 调用，不要现场写代码：\n" +
+  "\n" +
+  "## 预制脚本（直接调用，速度最快）\n" +
+  `脚本目录：${FILE_GEN_SCRIPTS}\n` +
+  "\n" +
+  "shell_exec 的 args 格式：[\"python3\", \"<脚本路径>\", \"<JSON字符串>\"]\n" +
+  "\n" +
+  "| 格式 | 脚本路径 |\n" +
+  "|------|----------|\n" +
+  `| Word (.docx) | ${FILE_GEN_SCRIPTS}/gen_docx.py |\n` +
+  `| Excel (.xlsx) | ${FILE_GEN_SCRIPTS}/gen_xlsx.py |\n` +
+  `| PDF (.pdf) | ${FILE_GEN_SCRIPTS}/gen_pdf.py |\n` +
+  `| CSV (.csv) | ${FILE_GEN_SCRIPTS}/gen_csv.py |\n` +
+  `| Markdown (.md) | ${FILE_GEN_SCRIPTS}/gen_md.py |\n` +
+  `| 纯文本 (.txt) | ${FILE_GEN_SCRIPTS}/gen_txt.py |\n` +
+  "\n" +
+  "调用示例（生成 docx）：\n" +
+  `args: ["python3", "${FILE_GEN_SCRIPTS}/gen_docx.py", "{\"output\":\"tmp/out.docx\",\"title\":\"标题\",\"sections\":[{\"text\":\"内容\"}]}"]\n` +
+  "JSON 的 output 路径必须在工作根目录内。脚本执行成功后会打印生成文件的绝对路径。\n" +
+  "\n" +
+  "文件生成完成后，在 generatedPaths 中返回文件的完整绝对路径，后续流程会负责将文件发送给用户。\n" +
   `工作根目录：${ROOT}`;
 
 export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
@@ -229,6 +268,17 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
       const lastAiMsg = [...result.messages].reverse().find(isAI);
       const reactOutput = lastAiMsg?.content ?? "";
       const toolCallCount = result.messages.filter(isTool).length;
+
+      // 打印每次 tool call 的名称和参数摘要，便于调试
+      for (const m of result.messages) {
+        if (isAI(m) && m.tool_calls?.length) {
+          for (const tc of m.tool_calls) {
+            logger.info({ tool: tc.name, args: JSON.stringify(tc.args).slice(0, 300) }, "tool call");
+          }
+        } else if (isTool(m)) {
+          logger.info({ result: String(m.content).slice(0, 200) }, "tool result");
+        }
+      }
 
       // 从 tool 消息结果中提取生成的文件路径（file_write/shell_exec 均会返回绝对路径）
       const pathPattern = new RegExp(`${ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\s'"]+`, "g");
