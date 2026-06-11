@@ -128,8 +128,10 @@ export function mergeState(prev: GraphState, partial: Partial<GraphState>): Grap
     intent:           partial.intent           ?? prev.intent,
     subAgentResult:   partial.subAgentResult   ?? prev.subAgentResult,
     finalReply:       partial.finalReply       ?? prev.finalReply,
-    attachmentUrls:   partial.attachmentUrls   ?? prev.attachmentUrls,
-    attachmentPaths:  partial.attachmentPaths  ?? prev.attachmentPaths,
+    // attachmentUrls/Paths 是"本轮产出"，不跨轮继承；
+    // 节点明确返回时才合并，否则重置为空（避免旧文件在下一轮被重复发送）。
+    attachmentUrls:  "attachmentUrls"  in partial ? (partial.attachmentUrls  ?? []) : [],
+    attachmentPaths: "attachmentPaths" in partial ? (partial.attachmentPaths ?? []) : [],
     workflowProgress: "workflowProgress" in partial
       ? (partial.workflowProgress ?? null)
       : prev.workflowProgress,
