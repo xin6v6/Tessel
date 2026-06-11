@@ -18,10 +18,21 @@ JSON 格式：
 """
 import sys
 import json
+import os
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# 输出路径必须在 FILE_AGENT_ROOT（默认 tmp/）内，防止路径遍历
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+
+def safe_output(raw: str) -> Path:
+    p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
+    if p != ROOT and not str(p).startswith(str(ROOT) + os.sep):
+        print(f"路径越界：{raw} 不在允许目录 {ROOT} 内", file=sys.stderr)
+        sys.exit(1)
+    return p
 
 def main():
     if len(sys.argv) < 2:
@@ -29,12 +40,13 @@ def main():
         sys.exit(1)
 
     data = json.loads(sys.argv[1])
-    output_path = Path(data["output"])
+    output_path = safe_output(data["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     doc = Document()
 
-    if title := data.get("title"):
+    title = data.get("title")
+    if title:
         h = doc.add_heading(title, 0)
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 

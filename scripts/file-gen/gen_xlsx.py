@@ -21,6 +21,7 @@ JSON 格式：
 """
 import sys
 import json
+import os
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -28,13 +29,22 @@ from openpyxl.styles import Font, PatternFill, Alignment
 HEADER_FILL = PatternFill("solid", fgColor="4472C4")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+
+def safe_output(raw):
+    p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
+    if p != ROOT and not str(p).startswith(str(ROOT) + os.sep):
+        print("路径越界：{} 不在允许目录 {} 内".format(raw, ROOT), file=sys.stderr)
+        sys.exit(1)
+    return p
+
 def main():
     if len(sys.argv) < 2:
         print("用法: python3 gen_xlsx.py '<JSON>'", file=sys.stderr)
         sys.exit(1)
 
     data = json.loads(sys.argv[1])
-    output_path = Path(data["output"])
+    output_path = safe_output(data["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = openpyxl.Workbook()

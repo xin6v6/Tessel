@@ -20,8 +20,18 @@ JSON 格式：
 """
 import sys
 import json
+import os
 from pathlib import Path
 from fpdf import FPDF
+
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+
+def safe_output(raw):
+    p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
+    if p != ROOT and not str(p).startswith(str(ROOT) + os.sep):
+        print("路径越界：{} 不在允许目录 {} 内".format(raw, ROOT), file=sys.stderr)
+        sys.exit(1)
+    return p
 
 def find_cjk_font() -> str | None:
     # 优先找单文件 .ttf（fpdf2 对 .ttc 有中文字宽计算 bug）
@@ -105,13 +115,14 @@ def main():
         sys.exit(1)
 
     data = json.loads(sys.argv[1])
-    output_path = Path(data["output"])
+    output_path = safe_output(data["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     font_path = find_cjk_font()
     pdf = TesPDF(font_path)
 
-    if title := data.get("title"):
+    title = data.get("title")
+    if title:
         pdf.add_heading(title, level=1)
 
     for section in data.get("sections", []):
