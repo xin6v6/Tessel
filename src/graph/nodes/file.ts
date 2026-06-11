@@ -44,6 +44,18 @@ function assertCommandAllowed(cmd: string): void {
   }
 }
 
+// 看起来像路径的参数（以 / 或 . 开头，或包含 /）需要经过 safePath 校验，
+// 防止攻击者通过参数传入沙盒外的绝对路径（如 /etc/passwd）。
+function sanitizeArgs(parts: string[]): string[] {
+  return parts.map((part, i) => {
+    if (i === 0) return part; // 命令本身已由 assertCommandAllowed 校验
+    if (/^[./]/.test(part) || part.includes("/")) {
+      return safePath(part); // 抛出异常即可阻止执行
+    }
+    return part;
+  });
+}
+
 const fileTools: ReactTool[] = [
   {
     name: "shell_exec",
@@ -62,7 +74,8 @@ const fileTools: ReactTool[] = [
       // 拆分参数数组，避免 sh -c 整串传入导致的命令注入
       const parts = cmd.trim().split(/\s+/);
       assertCommandAllowed(cmd);
-      const proc = Bun.spawn(parts, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+      const safeParts = sanitizeArgs(parts);
+      const proc = Bun.spawn(safeParts, { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr] = await Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
