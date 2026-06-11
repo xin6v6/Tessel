@@ -1,4 +1,4 @@
-import { App, type AppOptions } from "@slack/bolt";
+import { App, Assistant, type AppOptions } from "@slack/bolt";
 import type { SlackClient } from "./client.ts";
 import { createLogger } from "../../observability/logger.ts";
 const logger = createLogger("slack-receiver");
@@ -81,49 +81,53 @@ export class SlackReceiver {
   }
 
   private _registerHandlers() {
-    // ---- DM 消息（仅 1:1 私聊）----
+    // ---- DM 消息（Assistant thread）----
     //
-    // Slack Bolt 的 app.message() 会捕获所有订阅范围内的 message 事件 ——
-    // 包括公开频道里的 message.channels。在频道里 @bot 时,事件会同时
-    // 触发 app_mention 和 message.channels;两个 handler 都跑,bot 就回
-    // 两次。
-    //
-    // 这里显式 gate 在 channel_type === "im":
-    //   - 频道里的消息 (channel_type=channel/group) → 走 app_mention,
-    //     仅当用户 @ 了 bot 才响应
-    //   - DM 私聊 (channel_type=im) → 这条路径,任何消息都响应
-    this.app.message(async ({ message, say }) => {
-      logger.debug({ raw: JSON.stringify(message) }, "raw message event");
+    // 使用 Bolt 的 Assistant 类，而非 app.message()。
+    // Assistant 会自动订阅 assistant_thread_started / assistant_thread_context_changed，
+    // 并在正确上下文里暴露 setStatus / say，这是 assistant.threads.setStatus API 生效的前提。
+    const assistant = new Assistant({
+      threadStarted: async ({ say, setStatus }) => {
+        await setStatus("已就绪");
+        await say({ text: "你好！有什么我可以帮你的？" });
+      },
+      threadContextChanged: async () => {
+        // context 变化时不需要特别处理
+      },
+      userMessage: async ({ message, say, setStatus }) => {
+        logger.debug({ raw: JSON.stringify(message) }, "raw assistant message event");
 
-      // 过滤:仅响应 DM,过滤 bot 自己和无文本消息
-      const channelType = "channel_type" in message ? message.channel_type : undefined;
-      if (channelType !== "im") return;
-      if (
-        !("user" in message) ||
-        !message.user ||
-        message.subtype === "bot_message" ||
-        message.user === this.botUserId
-      ) {
-        return;
-      }
+        if (
+          !("user" in message) ||
+          !message.user ||
+          message.subtype === "bot_message" ||
+          message.user === this.botUserId
+        ) {
+          return;
+        }
 
-      const rawMsg = message as unknown as Record<string, unknown>;
-      const event: SlackMessageEvent = {
-        text: ("text" in message ? message.text : "") ?? "",
-        user: message.user,
-        channel: message.channel,
-        ts: message.ts,
-        threadTs: ("thread_ts" in message ? message.thread_ts : undefined) ?? undefined,
-        imageUrls: this.extractImageUrls(rawMsg),
-      };
+        const rawMsg = message as unknown as Record<string, unknown>;
+        const event: SlackMessageEvent = {
+          text: ("text" in message ? message.text : "") ?? "",
+          user: message.user as string,
+          channel: message.channel,
+          ts: message.ts,
+          threadTs: ("thread_ts" in message ? (message.thread_ts as string) : undefined) ?? undefined,
+          imageUrls: this.extractImageUrls(rawMsg),
+        };
 
-      logger.debug({ user: event.user, channel: event.channel, text: event.text, imageCount: event.imageUrls?.length ?? 0 }, "message received");
+        logger.debug({ user: event.user, channel: event.channel, text: event.text, imageCount: event.imageUrls?.length ?? 0 }, "assistant message received");
 
-      const reply = await this.handler.onMessage?.(event);
-      if (reply) {
-        await say({ text: reply, thread_ts: event.threadTs ?? event.ts });
-      }
+        await setStatus("评估中...");
+        const reply = await this.handler.onMessage?.(event);
+        await setStatus("");
+        if (reply) {
+          await say({ text: reply });
+        }
+      },
     });
+
+    this.app.assistant(assistant);
 
     // ---- App Mention (@Bot) ----
     this.app.event("app_mention", async ({ event, say }) => {

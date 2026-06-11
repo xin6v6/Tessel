@@ -120,6 +120,28 @@ export class SlackClient {
   }
 
   // ----------------------------------------------------------------
+  // Assistant thread status (Agents & Assistants API)
+  // ----------------------------------------------------------------
+
+  /** 显示"正在处理"状态气泡（图片里那个 "评估中..." 效果）。*/
+  async setAssistantStatus(params: { channel: string; threadTs: string; status: string }) {
+    return this.client.apiCall("assistant.threads.setStatus", {
+      channel_id: params.channel,
+      thread_ts: params.threadTs,
+      status: params.status,
+    });
+  }
+
+  /** 清除状态气泡（回复完成后调用）。*/
+  async clearAssistantStatus(params: { channel: string; threadTs: string }) {
+    return this.client.apiCall("assistant.threads.setStatus", {
+      channel_id: params.channel,
+      thread_ts: params.threadTs,
+      status: "",
+    });
+  }
+
+  // ----------------------------------------------------------------
   // Files
   // ----------------------------------------------------------------
 
