@@ -130,7 +130,8 @@ export class SlackReceiver {
     this.app.assistant(assistant);
 
     // ---- App Mention (@Bot) ----
-    // 频道里没有 assistant thread 上下文，用占位消息 + chat.update 模拟状态效果。
+    // 尝试用 assistant.threads.setStatus 显示原生状态气泡（需要频道已配置为 Assistant channel）。
+    // 若 API 返回错误则静默忽略，不影响正常回复流程。
     this.app.event("app_mention", async ({ event, client }) => {
       // 去掉 <@BOTID> 前缀
       const textClean = event.text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
@@ -148,19 +149,21 @@ export class SlackReceiver {
 
       logger.debug({ user: mentionEvent.user, text: textClean, imageCount: mentionEvent.imageUrls?.length ?? 0 }, "mention received");
 
-      // 先发占位消息显示"评估中..."
-      const placeholder = await client.chat.postMessage({
-        channel: event.channel,
+      // 尝试原生状态气泡；失败则静默（频道未配置为 Assistant channel 时 API 会拒绝）
+      client.assistant.threads.setStatus({
+        channel_id: event.channel,
         thread_ts: threadTs,
-        text: "_评估中..._",
-      });
+        status: "评估中...",
+      }).catch(() => {});
 
       const reply = await this.handler.onMention?.(mentionEvent);
 
-      // 删掉占位消息，再发真实回复（避免 chat.update 产生"已编辑"标志）
-      if (placeholder.ts) {
-        await client.chat.delete({ channel: event.channel, ts: placeholder.ts }).catch(() => {});
-      }
+      client.assistant.threads.setStatus({
+        channel_id: event.channel,
+        thread_ts: threadTs,
+        status: "",
+      }).catch(() => {});
+
       if (reply) {
         await client.chat.postMessage({
           channel: event.channel,
