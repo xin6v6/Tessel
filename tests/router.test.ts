@@ -20,6 +20,7 @@ function stateOf(text: string) {
     subAgentResult: "",
     finalReply: "",
     attachmentUrls: [],
+    attachmentPaths: [],
     workflowProgress: null,
   };
 }
@@ -37,10 +38,10 @@ beforeEach(() => {
 });
 
 describe("router — classifier result used directly", () => {
-  it("classifier returns tool → intent is tool", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "tool", confidence: 0.95 }) });
+  it("classifier returns slack → intent is slack", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ label: "slack", confidence: 0.95 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("给 #general 发条消息")));
-    expect(out.intent).toBe("tool");
+    expect(out.intent).toBe("slack");
   });
 
   it("classifier returns chat → intent is chat", async () => {
@@ -63,23 +64,23 @@ describe("router — classifier result used directly", () => {
 });
 
 describe("router — workflow permission gate", () => {
-  it("non-allowlisted user + classifier returns workflow → downgraded to tool", async () => {
+  it("non-allowlisted user + classifier returns workflow → downgraded to chat", async () => {
     const node = buildRouterNode({ classifier: fakeClassifier({ label: "workflow", confidence: 0.93 }) });
     const out  = await runWithContext(deniedCtx, () => node(stateOf("帮我提个 PR")));
-    expect(out.intent).toBe("tool");
+    expect(out.intent).toBe("chat");
   });
 });
 
 describe("router — fallback when classifier unavailable", () => {
-  it("classifier returns null (server down) → falls back to chat", async () => {
+  it("classifier returns null (server down) → falls back to unknown", async () => {
     const node = buildRouterNode({ classifier: fakeClassifier(null) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("帮我发条消息")));
-    expect(out.intent).toBe("chat");
+    expect(out.intent).toBe("unknown");
   });
 
-  it("classifier returns unknown label → falls back to chat", async () => {
+  it("classifier returns unknown label → falls back to unknown", async () => {
     const node = buildRouterNode({ classifier: fakeClassifier({ label: "garbage" as any, confidence: 0.99 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("帮我发条消息")));
-    expect(out.intent).toBe("chat");
+    expect(out.intent).toBe("unknown");
   });
 });

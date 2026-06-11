@@ -12,7 +12,7 @@ function memStore() {
 function nodeMap(overrides: Partial<NodeMap>): NodeMap {
   const noop = async (): Promise<NodeOutput> => ({});
   return {
-    router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop, vision: noop, imagegen: noop,
+    router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop, vision: noop, imagegen: noop, file: noop,
     capabilities: noop, workflow: noop, workflow_approval: noop,
     ...overrides,
   };
@@ -21,10 +21,10 @@ function nodeMap(overrides: Partial<NodeMap>): NodeMap {
 describe("mergeState（reducer 语义）", () => {
   it("messages = append；next/intent = replace", () => {
     const s0 = defaultState();
-    const s1 = mergeState(s0, { messages: [humanMsg("a")], next: "slack", intent: "tool" });
+    const s1 = mergeState(s0, { messages: [humanMsg("a")], next: "slack", intent: "slack" });
     expect(s1.messages.map((m) => m.content)).toEqual(["a"]);
     expect(s1.next).toBe("slack");
-    expect(s1.intent).toBe("tool");
+    expect(s1.intent).toBe("slack");
     const s2 = mergeState(s1, { messages: [aiMsg("b")] });
     expect(s2.messages.map((m) => m.content)).toEqual(["a", "b"]); // append
     expect(s2.next).toBe("slack"); // partial 没传 next → 保持

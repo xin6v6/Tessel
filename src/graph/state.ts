@@ -14,6 +14,7 @@ export type SubAgentName =
   | "mcp"              // MCP Tools ReAct Agent（待接入）
   | "vision"           // Vision Agent：识别图片内容（Slack 附件 / 公开 URL）
   | "imagegen"         // Image Generation Agent：根据文字描述生成图片
+  | "file"             // File Agent：读取、编辑、写入本地文件
   | "capabilities"     // 自省节点：列出当前真实可用的能力（tools + integrations）
   | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
   | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
@@ -34,7 +35,15 @@ export type SubAgentName =
  * 零成本规则快路径，supervisor 只负责"读结论 + 整合子 agent 输出"。
  * 加 `unknown` 兜底 = router 即便失效，supervisor 仍能独立工作。
  */
-export type RouteIntent = "chat" | "tool" | "workflow" | "capabilities" | "unknown";
+export type RouteIntent =
+  | "chat"         // 直接对话，无需工具
+  | "slack"        // Slack 操作
+  | "file"         // 文件读写编辑
+  | "vision"       // 图片识别
+  | "imagegen"     // 图片生成
+  | "workflow"     // 多阶段工作流
+  | "capabilities" // 自省：列出能力
+  | "unknown";     // 分类失败 fallback
 
 /**
  * Workflow Runner 的进度快照（落进 GraphState，随 graph store 持久化）。
@@ -81,6 +90,8 @@ export interface GraphState {
   finalReply: string;
   /** 需要作为文件发送给用户的图片 URL 列表（如生成图片）。入口层负责下载并上传。 */
   attachmentUrls: string[];
+  /** 需要作为文件发送给用户的本地文件路径列表（如生成的 PDF/docx）。入口层负责上传。 */
+  attachmentPaths: string[];
   /** Workflow Runner 进度快照（null = 没有进行中的 workflow）。 */
   workflowProgress: WorkflowProgress | null;
 }
@@ -97,6 +108,7 @@ export function defaultState(): GraphState {
     subAgentResult: "",
     finalReply: "",
     attachmentUrls: [],
+    attachmentPaths: [],
     workflowProgress: null,
   };
 }
@@ -117,6 +129,7 @@ export function mergeState(prev: GraphState, partial: Partial<GraphState>): Grap
     subAgentResult:   partial.subAgentResult   ?? prev.subAgentResult,
     finalReply:       partial.finalReply       ?? prev.finalReply,
     attachmentUrls:   partial.attachmentUrls   ?? prev.attachmentUrls,
+    attachmentPaths:  partial.attachmentPaths  ?? prev.attachmentPaths,
     workflowProgress: "workflowProgress" in partial
       ? (partial.workflowProgress ?? null)
       : prev.workflowProgress,
