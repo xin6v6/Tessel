@@ -83,7 +83,7 @@ export const SUB_AGENTS: Record<
   string
 > = {
   slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
-  web:          "搜索互联网获取实时信息、新闻、文档等（待接入）",
+  web:          "搜索互联网获取实时信息、新闻、最新版本、文档等",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等（待接入）",
   capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
   vision:       "识别图片内容：当用户上传图片或分享图片 URL 并希望描述/分析图片时使用",
@@ -100,9 +100,8 @@ export const KNOWN_AGENTS = Object.keys(SUB_AGENTS) as Array<Exclude<SubAgentNam
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
 
 // router 输出的节点级 intent 可直接路由的集合（chat/unknown 不在此）。
-// web/mcp 标记为 [STUB]，尚未接入真实实现，不加入此集合；
-// 启用时在 ONNX 训练数据中补充对应标签并在此添加即可。
-const ROUTABLE_INTENTS = new Set(["slack", "file", "vision", "imagegen", "workflow", "capabilities"]);
+// mcp 标记为 [STUB]，尚未接入真实实现，不加入此集合。
+const ROUTABLE_INTENTS = new Set(["slack", "file", "vision", "imagegen", "web", "workflow", "capabilities"]);
 
 
 // ----------------------------------------------------------------

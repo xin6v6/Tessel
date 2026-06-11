@@ -91,7 +91,7 @@ export function buildGraph(params: {
   const routerNode        = buildRouterNode({ classifier });
   const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations, skills);
   const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry, skills);
-  const webAgentNode      = buildWebAgentNode(mainClient, skills);
+  const webAgentNode      = buildWebAgentNode(mainClient, params.toolRegistry, skills);
   const mcpAgentNode      = buildMcpAgentNode(mainClient, skills);
   const visionAgentNode   = buildVisionAgentNode(visionClient);
   const imageGenNode      = buildImageGenNode(imageGenClient);

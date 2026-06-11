@@ -10,7 +10,7 @@ import type { Message } from "../llm/messages.ts";
  */
 export type SubAgentName =
   | "slack"            // Slack ReAct Agent
-  | "web"              // Web Search ReAct Agent（待接入）
+  | "web"              // Web Search ReAct Agent（Brave Search）
   | "mcp"              // MCP Tools ReAct Agent（待接入）
   | "vision"           // Vision Agent：识别图片内容（Slack 附件 / 公开 URL）
   | "imagegen"         // Image Generation Agent：根据文字描述生成图片
@@ -41,6 +41,7 @@ export type RouteIntent =
   | "file"         // 文件读写编辑
   | "vision"       // 图片识别
   | "imagegen"     // 图片生成
+  | "web"          // 互联网搜索
   | "workflow"     // 多阶段工作流
   | "capabilities" // 自省：列出能力
   | "unknown";     // 分类失败 fallback

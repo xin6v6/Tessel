@@ -9,13 +9,13 @@ const logger = createLogger("router");
 // 合法的 RouteIntent 值（对应 data/ 下的节点名 + chat + unknown）。
 // 新加节点 = 在 data/ 加 <node>.jsonl 重训后，这里补一行。
 const VALID_INTENTS = new Set<RouteIntent>([
-  "chat", "slack", "file", "vision", "imagegen", "workflow", "capabilities",
+  "chat", "slack", "file", "vision", "imagegen", "web", "workflow", "capabilities",
 ]);
 
 // RouteIntent 中可直接映射为 supervisor next 的节点名。
 // "chat" 和 "unknown" 不在此集合，supervisor 会直接回复或走 fallback。
 const AGENT_INTENTS = new Set<RouteIntent>([
-  "slack", "file", "vision", "imagegen", "workflow", "capabilities",
+  "slack", "file", "vision", "imagegen", "web", "workflow", "capabilities",
 ]);
 
 function lastHumanText(messages: GraphStateType["messages"]): string {

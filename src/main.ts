@@ -14,6 +14,7 @@ import {
   threadIdForSlackMention,
 } from "./graph/thread-id.ts";
 import { IntegrationRegistry, SlackIntegration } from "./integrations/index.ts";
+import { WebSearchIntegration } from "./integrations/web/index.ts";
 import { resolveUserName } from "./integrations/slack/user-names.ts";
 import { logger } from "./utils/logger.ts";
 import { runWithContext, newSessionId, makeUserId } from "./observability/context.ts";
@@ -210,6 +211,10 @@ if (process.env.SLACK_BOT_TOKEN) {
         : undefined,
   });
   integrations.add(slackIntegration);
+}
+
+if (process.env.BRAVE_API_KEY) {
+  integrations.add(new WebSearchIntegration());
 }
 
 // ----------------------------------------------------------------
