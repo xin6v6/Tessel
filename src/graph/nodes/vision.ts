@@ -111,7 +111,8 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
           "你是一个视觉分析助手。请仔细观察用户发送的图片，根据用户的问题或要求给出准确、详细的中文回答。" +
           "如果用户没有特定问题，默认描述图片的主要内容、场景和关键信息。\n\n" +
           "【硬性约束】如果你没有看到任何图片，或图片加载失败、内容不可见，" +
-          "必须回复「图片加载失败，无法识别，请重新上传」，绝对禁止猜测或编造图片内容。",
+          "必须回复「图片加载失败，无法识别，请重新上传」，绝对禁止猜测或编造图片内容。\n\n" +
+          "【输出约束】直接输出结果，不要输出 <think>、<thinking> 等内部推理过程。",
         ),
         visionMsg,
       ]);
@@ -142,6 +143,8 @@ export function buildVisionClient(fallback: { apiKey: string; baseURL?: string; 
     maxTokens: 2048,
     maxRetries: 1,
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 60000),
+    // 禁用推理模型的 thinking 输出，减少延迟
+    modelKwargs: { thinking: { type: "disabled" } },
   };
   return new LLMClient(cfg);
 }

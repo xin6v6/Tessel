@@ -22,6 +22,8 @@ function stateOf(text: string) {
     attachmentUrls: [],
     attachmentPaths: [],
     workflowProgress: null,
+    pendingPlan: [],
+    planContext: "",
   };
 }
 
@@ -37,35 +39,51 @@ beforeEach(() => {
   process.env.CODING_ALLOWLIST = "cli:tester";
 });
 
-describe("router — classifier result used directly", () => {
-  it("classifier returns slack → intent is slack", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "slack", confidence: 0.95 }) });
+describe("router — single-step classifier result", () => {
+  it("classifier returns slack plan → intent is slack", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["slack"], confidence: 0.95 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("给 #general 发条消息")));
     expect(out.intent).toBe("slack");
+    expect(out.pendingPlan).toEqual([]);
   });
 
-  it("classifier returns chat → intent is chat", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "chat", confidence: 0.91 }) });
+  it("classifier returns chat plan → intent is chat", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["chat"], confidence: 0.91 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("最近有啥好书推荐")));
     expect(out.intent).toBe("chat");
   });
 
-  it("classifier returns capabilities → intent is capabilities", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "capabilities", confidence: 0.88 }) });
+  it("classifier returns capabilities plan → intent is capabilities", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["capabilities"], confidence: 0.88 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("你有什么能力")));
     expect(out.intent).toBe("capabilities");
   });
 
-  it("allowlisted user + classifier returns workflow → intent is workflow", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "workflow", confidence: 0.93 }) });
+  it("allowlisted user + classifier returns workflow plan → intent is workflow", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["workflow"], confidence: 0.93 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("帮我提个 PR")));
     expect(out.intent).toBe("workflow");
   });
 });
 
+describe("router — multi-step plan", () => {
+  it("vision→file→slack plan → pendingPlan set, intent unknown", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file", "slack"], confidence: 0.92 }) });
+    const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片做成excel发给我")));
+    expect(out.intent).toBe("unknown");
+    expect(out.pendingPlan).toEqual(["vision", "file", "slack"]);
+  });
+
+  it("vision→file plan → pendingPlan set", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file"], confidence: 0.89 }) });
+    const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片然后存成文件")));
+    expect(out.pendingPlan).toEqual(["vision", "file"]);
+  });
+});
+
 describe("router — workflow permission gate", () => {
-  it("non-allowlisted user + classifier returns workflow → downgraded to chat", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "workflow", confidence: 0.93 }) });
+  it("non-allowlisted user + workflow in plan → downgraded to chat", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["workflow"], confidence: 0.93 }) });
     const out  = await runWithContext(deniedCtx, () => node(stateOf("帮我提个 PR")));
     expect(out.intent).toBe("chat");
   });
@@ -78,8 +96,8 @@ describe("router — fallback when classifier unavailable", () => {
     expect(out.intent).toBe("unknown");
   });
 
-  it("classifier returns unknown label → falls back to unknown", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ label: "garbage" as any, confidence: 0.99 }) });
+  it("classifier returns unknown label in plan → filtered out, falls back to unknown", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["garbage" as any], confidence: 0.99 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("帮我发条消息")));
     expect(out.intent).toBe("unknown");
   });

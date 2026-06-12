@@ -23,7 +23,7 @@ import json
 import os
 from pathlib import Path
 
-ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT") or (Path(__file__).parent.parent.parent / "tmp")).resolve()
 
 def safe_output(raw):
     p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()

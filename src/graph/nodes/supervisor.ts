@@ -239,9 +239,9 @@ export function buildSupervisorNode(
     //
     // 检测条件：additional_kwargs.imageUrls 有值（Slack 附件）或 content 中包含
     // 可识别的图片 URL（http...jpg/png/gif/webp）。
-    // 此快速路径在阶段 A0 之前执行，但只在初始路由时（!subAgentResult && !finalReply）
-    // 生效，避免 vision 回来后被再次路由到 vision。
-    if (!subAgentResult && !finalReply && lastHuman) {
+    // 此快速路径只在初始路由时（!subAgentResult && !finalReply && !pendingPlan）生效，
+    // 避免 vision 回来后被再次路由到 vision，也避免覆盖已有的多步计划。
+    if (!subAgentResult && !finalReply && !state.pendingPlan?.length && lastHuman) {
       const attachedUrls = lastHuman.additional_kwargs?.["imageUrls"] as string[] | undefined;
       const hasAttachedImages = Array.isArray(attachedUrls) && attachedUrls.length > 0;
       const hasInlineImageUrl = typeof lastHuman.content === "string" &&
@@ -250,6 +250,72 @@ export function buildSupervisorNode(
         logger.info({ hasAttachedImages, hasInlineImageUrl }, "routing: vision fast-path");
         return { next: "vision", intent: "unknown" };
       }
+    }
+
+    // ── 多步计划调度 ──
+    //
+    // pendingPlan 由 router 写入（如 ["vision","file","slack"]）。
+    // 每次 supervisor 被唤起时：
+    //   · 有 subAgentResult/finalReply → 上一步 agent 刚完成 → 把输出存入 planContext，
+    //     弹出已完成的第一步，若还有剩余步骤继续路由下一个 agent。
+    //   · 无 subAgentResult/finalReply 且 pendingPlan 非空 → 首次进入多步计划 →
+    //     直接路由第一个 agent。
+    //
+    // planContext 会被各 agent 节点读取并注入到自己的 system prompt 里（作为背景）。
+    const pendingPlan = state.pendingPlan ?? [];
+
+    if (pendingPlan.length > 0) {
+      const currentResult = (finalReply || subAgentResult || "").trim();
+
+      // 上一步 agent 刚返回结果
+      if (currentResult) {
+        const remaining = pendingPlan.slice(1);
+        // strip <think> 避免下游 agent 把推理过程误读为"已完成的历史"
+        const cleanedContext = stripThinking(currentResult);
+        if (remaining.length > 0) {
+          const nextAgent = remaining[0] as SubAgentName;
+          logger.info(
+            { completed: pendingPlan[0], next: nextAgent, remaining: remaining.length, planContextLen: cleanedContext.length },
+            "plan: step done, routing next",
+          );
+          // 多步计划中途透传 attachmentPaths（如 file agent 生成的文件），
+          // 避免 mergeState 把它重置为 []，入口层最终统一上传。
+          const accPaths = [
+            ...(state.attachmentPaths ?? []),
+            // file agent 刚产出的路径已经在 state.attachmentPaths 里（mergeState 已 merge）
+          ];
+          // 同时把文件路径追加到 planContext，让 slack agent 知道文件名
+          const pathsInfo = accPaths.length
+            ? `\n\n已生成文件：\n${accPaths.map((p) => `- ${p}`).join("\n")}`
+            : "";
+          return {
+            next: nextAgent,
+            pendingPlan: remaining,
+            planContext: cleanedContext + pathsInfo,
+            subAgentResult: "",
+            finalReply: "",
+            attachmentPaths: accPaths,
+          };
+        }
+        // 计划全部完成 → 最后一步 agent 的输出就是最终回复，直接结束
+        logger.info({ totalSteps: state.pendingPlan?.length }, "plan: all steps done");
+        const cleaned = stripThinking(currentResult);
+        return {
+          messages: [aiMsg(cleaned)],
+          next: "__end__",
+          pendingPlan: [],
+          planContext: "",
+          subAgentResult: "",
+          finalReply: "",
+          attachmentPaths: state.attachmentPaths,
+          attachmentUrls: state.attachmentUrls,
+        };
+      }
+
+      // 首次进入计划（还没有 agent 结果）→ 路由第一个 agent
+      const firstAgent = pendingPlan[0] as SubAgentName;
+      logger.info({ plan: pendingPlan, first: firstAgent }, "plan: starting execution");
+      return { next: firstAgent };
     }
 
     // ── 阶段 A0：子 Agent 给了成稿 finalReply → 原样转发（仅 sanitize） ──

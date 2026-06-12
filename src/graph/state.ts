@@ -78,6 +78,9 @@ export interface WorkflowProgress {
  * finalReply     — 子 Agent 已经成稿、可直接发给用户的回复文本。Supervisor 看到
  *                  非空时会跳过 LLM 重写、原样转发（仅做 sanitize），避免成稿
  *                  内容（表格 / 列表等）被 LLM 二次改写后丢失。
+ * pendingPlan    — Router 输出的有序 agent 执行计划（如 ["vision","file","slack"]）。
+ *                  Supervisor 每次取 [0] 执行，agent 返回后弹出继续。空数组 = 无计划。
+ * planContext    — 上一个 agent 的输出，作为下一个 agent 的背景 context 注入。
  */
 export interface GraphState {
   /** 完整对话历史（humanMsg / aiMsg / toolMsg）。 */
@@ -96,6 +99,10 @@ export interface GraphState {
   attachmentPaths: string[];
   /** Workflow Runner 进度快照（null = 没有进行中的 workflow）。 */
   workflowProgress: WorkflowProgress | null;
+  /** Router 输出的有序 agent 执行计划。空数组 = 无多步计划（走单步路由）。 */
+  pendingPlan: RouteIntent[];
+  /** 上一个 agent 的输出文本，注入给下一个 agent 作为背景 context。 */
+  planContext: string;
 }
 
 /** 兼容别名：下游大量 import GraphStateType。 */
@@ -112,6 +119,8 @@ export function defaultState(): GraphState {
     attachmentUrls: [],
     attachmentPaths: [],
     workflowProgress: null,
+    pendingPlan: [],
+    planContext: "",
   };
 }
 
@@ -137,5 +146,7 @@ export function mergeState(prev: GraphState, partial: Partial<GraphState>): Grap
     workflowProgress: "workflowProgress" in partial
       ? (partial.workflowProgress ?? null)
       : prev.workflowProgress,
+    pendingPlan: partial.pendingPlan ?? prev.pendingPlan,
+    planContext:  partial.planContext  ?? prev.planContext,
   };
 }

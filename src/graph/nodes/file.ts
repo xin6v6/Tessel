@@ -15,7 +15,7 @@ const logger = createLogger("file-agent");
 // 防止路径穿越（../../../etc/passwd）。
 // ----------------------------------------------------------------
 
-const ROOT = path.resolve(process.env.FILE_AGENT_ROOT ?? "tmp");
+const ROOT = path.resolve(process.env.FILE_AGENT_ROOT ?? import.meta.dir + "/../../../tmp");
 
 function safePath(userPath: string): string {
   const resolved = path.resolve(ROOT, userPath);
@@ -231,8 +231,8 @@ const SYSTEM_PROMPT =
   `| 纯文本 (.txt) | ${FILE_GEN_SCRIPTS}/gen_txt.py |\n` +
   "\n" +
   "调用示例（生成 docx）：\n" +
-  `args: ["python3", "${FILE_GEN_SCRIPTS}/gen_docx.py", "{\"output\":\"tmp/out.docx\",\"title\":\"标题\",\"sections\":[{\"text\":\"内容\"}]}"]\n` +
-  "JSON 的 output 路径必须在工作根目录内。脚本执行成功后会打印生成文件的绝对路径。\n" +
+  `args: ["python3", "${FILE_GEN_SCRIPTS}/gen_docx.py", "{\"output\":\"out.docx\",\"title\":\"标题\",\"sections\":[{\"text\":\"内容\"}]}"]\n` +
+  "【重要】JSON 的 output 只填文件名或子路径，例如 \"报告.xlsx\"、\"sub/报告.xlsx\"，不要加 \"tmp/\" 前缀——脚本已自动在安全目录内保存。脚本执行成功后会打印生成文件的绝对路径。\n" +
   "\n" +
   "文件生成完成后，在 generatedPaths 中返回文件的完整绝对路径，后续流程会负责将文件发送给用户。\n" +
   `工作根目录：${ROOT}`;
@@ -250,18 +250,28 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
     }
 
     const userInputText = lastUserMsg.content;
-    logger.info({ inputSnippet: userInputText.slice(0, 120) }, "started");
+    logger.info({
+      inputSnippet: userInputText.slice(0, 120),
+      planContextLen: state.planContext?.length ?? 0,
+      planContextSnippet: state.planContext?.slice(0, 60) ?? "",
+      msgCount: state.messages.length,
+    }, "started");
 
     const systemPrompt = skills
       ? skills.promptFor("file", SYSTEM_PROMPT, userInputText)
       : SYSTEM_PROMPT;
+
+    // 多步计划：把上游结果拼进 human message，且不传历史消息（避免模型被历史对话干扰）
+    const taskMessage = state.planContext
+      ? `用户原始需求：${userInputText}\n\n上一步处理结果（直接基于此内容完成任务，不要询问确认）：\n${state.planContext}`
+      : userInputText;
 
     try {
       const result = await runReactAgent({
         llm,
         tools: fileTools,
         systemPrompt,
-        messages: [humanMsg(userInputText)],
+        messages: [humanMsg(taskMessage)],
       });
 
       // 最后一条 AI 消息作为 ReAct 总结（最后一条消息可能是 tool 结果）
