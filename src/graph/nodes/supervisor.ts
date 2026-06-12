@@ -63,6 +63,7 @@ const REPLY_GUARDRAILS = `
 4. 不知道、不确定、或信息不在上下文中时，直接说明"我不知道"或"上下文中没有相关信息"，不要猜测、不要用看似合理的内容填充。
 5. 不要输出 <think>、<thinking> 等内部推理标签；推理保留在脑内，对外只输出结论。
 6. 引用子 Agent 结果时，按其原文转述，不要改写关键字段或补充原文没有的信息。
+7. 【严禁】描述自身能力、已接入的工具、MCP、集成、插件等。你没有能力凭记忆或推断知道当前运行时挂载了哪些工具——这些信息只存在于系统注册表中，不在你的上下文里。被问到此类问题时，直接说"我不知道"，不要猜测或编造。
 `.trim();
 
 // ----------------------------------------------------------------
@@ -282,7 +283,7 @@ export function buildSupervisorNode(
       const t0 = Date.now();
       const finalReply = await llm.invoke([
         systemMsg(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。只陈述子 Agent 结果中有证据支撑的内容，没有的不说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
         ),
         ...historyForPrompt(messages),
         humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
@@ -349,7 +350,7 @@ export function buildSupervisorNode(
 
     // ── chat / unknown → 直接 LLM 回复 ──
     const t1 = Date.now();
-    const chatBase = `你是一个有帮助的个人助手。请直接回答用户的问题。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
+    const chatBase = `你是一个有帮助的个人助手。只基于对话中已有的事实回答用户的问题；没有证据支撑的内容不要说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
     const chatSystem = skills
       ? skills.promptFor("supervisor", chatBase, inputSnippet)
       : chatBase;
