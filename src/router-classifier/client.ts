@@ -15,7 +15,8 @@
  */
 
 export interface ClassifyResult {
-  label: string;
+  /** Ordered list of agent names to execute, e.g. ["vision", "file", "slack"]. */
+  plan: string[];
   confidence: number;
 }
 
@@ -52,9 +53,12 @@ export class ClassifierClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!res.ok) return null;
-      const data = (await res.json()) as ClassifyResult;
-      if (data.confidence < this.minConfidence) return null;
-      return data;
+      const raw = (await res.json()) as { plan?: string[]; label?: string; confidence: number };
+      if (raw.confidence < this.minConfidence) return null;
+      // Support both new {"plan": [...]} and legacy {"label": "..."} server responses.
+      const plan = raw.plan ?? (raw.label ? [raw.label] : null);
+      if (!plan || plan.length === 0) return null;
+      return { plan, confidence: raw.confidence };
     } catch {
       return null;
     }

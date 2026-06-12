@@ -29,7 +29,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 HEADER_FILL = PatternFill("solid", fgColor="4472C4")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 
-ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT") or (Path(__file__).parent.parent.parent / "tmp")).resolve()
 
 def safe_output(raw):
     p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
@@ -58,7 +58,17 @@ def main():
         ws = wb.create_sheet(sheet_def.get("name", "Sheet"))
         row_idx = 1
 
-        headers = sheet_def.get("headers", [])
+        # 支持两种格式：
+        # 1. {"headers": [...], "rows": [[...],...]}  — 表头和数据分开
+        # 2. {"data": [[header_row], [row1], ...]}    — 第一行为表头的完整二维数组
+        raw_data = sheet_def.get("data")
+        if raw_data:
+            headers = raw_data[0] if raw_data else []
+            data_rows = raw_data[1:] if len(raw_data) > 1 else []
+        else:
+            headers = sheet_def.get("headers", [])
+            data_rows = sheet_def.get("rows", [])
+
         if headers:
             for col, header in enumerate(headers, 1):
                 cell = ws.cell(row=row_idx, column=col, value=header)
@@ -67,7 +77,7 @@ def main():
                 cell.alignment = Alignment(horizontal="center")
             row_idx += 1
 
-        for row in sheet_def.get("rows", []):
+        for row in data_rows:
             for col, value in enumerate(row, 1):
                 ws.cell(row=row_idx, column=col, value=value)
             row_idx += 1

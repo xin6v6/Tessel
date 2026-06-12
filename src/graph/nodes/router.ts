@@ -48,31 +48,45 @@ export function buildRouterNode({ classifier = new ClassifierClient() }: RouterD
     const userId = getContext()?.userId ?? "";
 
     const result = await classifier.classify(text);
-    let intent: RouteIntent = "unknown";
 
-    if (result && VALID_INTENTS.has(result.label as RouteIntent)) {
-      intent = result.label as RouteIntent;
-    }
+    // Validate each step in the plan; drop unknown intents.
+    const rawPlan: RouteIntent[] = result
+      ? result.plan.filter((s) => VALID_INTENTS.has(s as RouteIntent)) as RouteIntent[]
+      : [];
 
-    // workflow 白名单门控
-    if (intent === "workflow" && !allowlist().has(userId)) {
+    // workflow 白名单门控：计划里有 workflow 且用户不在白名单 → 整个计划降级为 chat
+    if (rawPlan.includes("workflow") && !allowlist().has(userId)) {
       logger.info(
         { userId, snippet: text.slice(0, 80) },
-        "router: workflow intent but user not in allowlist — downgrading to chat",
+        "router: workflow in plan but user not in allowlist — downgrading to chat",
       );
-      intent = "chat";
+      return { intent: "chat", pendingPlan: [] };
     }
 
-    logger.info(
-      {
-        intent,
-        confidence: result?.confidence,
-        durationMs: Date.now() - start,
-        snippet: text.slice(0, 80),
-      },
-      `router → ${intent}`,
-    );
+    // 单步计划：走旧路径（intent），保持 supervisor 兼容
+    if (rawPlan.length === 1) {
+      const intent = rawPlan[0]!;
+      logger.info(
+        { intent, confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
+        `router → ${intent}`,
+      );
+      return { intent, pendingPlan: [] };
+    }
 
-    return { intent };
+    // 多步计划：写入 pendingPlan，intent 置 unknown（supervisor 读 pendingPlan 优先）
+    if (rawPlan.length > 1) {
+      logger.info(
+        { plan: rawPlan, confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
+        `router → plan [${rawPlan.join("→")}]`,
+      );
+      return { intent: "unknown", pendingPlan: rawPlan };
+    }
+
+    // 分类失败 fallback
+    logger.info(
+      { confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
+      "router → unknown (fallback)",
+    );
+    return { intent: "unknown", pendingPlan: [] };
   };
 }

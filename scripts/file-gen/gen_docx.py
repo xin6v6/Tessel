@@ -25,7 +25,7 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # 输出路径必须在 FILE_AGENT_ROOT（默认 tmp/）内，防止路径遍历
-ROOT = Path(os.environ.get("FILE_AGENT_ROOT", "tmp")).resolve()
+ROOT = Path(os.environ.get("FILE_AGENT_ROOT") or (Path(__file__).parent.parent.parent / "tmp")).resolve()
 
 def safe_output(raw: str) -> Path:
     p = (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
