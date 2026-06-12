@@ -21,7 +21,9 @@
     "lint": "tsc --noEmit",
     "ui": "bun --hot src/ui/server.ts",
     "contacts": "bun run scripts/contacts.ts",
-    "train": "cd scripts/train-router && python3 train.py && pkill -f serve.py; nohup python3 serve.py > /tmp/classifier.log 2>&1 &"
+    "train": "cd scripts/train-router && python3 train.py && pkill -f serve.py; nohup python3 serve.py > /tmp/classifier.log 2>&1 &",
+    "mcp:check": "bun run scripts/mcp-check.ts",
+    "mcp:restart": "bun run scripts/mcp-check.ts --restart"
   },
   "devDependencies": {
     "@types/bun": "latest",
