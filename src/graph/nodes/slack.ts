@@ -6,6 +6,7 @@ import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
 import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
+import { getContext } from "../../observability/context.ts";
 const logger = createLogger("slack-agent");
 
 // 子 Agent 的成稿输出契约。displayMessage 会被 supervisor 原样转发给用户，
@@ -64,9 +65,12 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
     }));
 
   const SYSTEM_PROMPT =
-    "你是一个 Slack 专项助手。你只负责执行 Slack 相关操作。" +
-    "根据用户的需求，使用可用的 Slack 工具完成任务。" +
-    "完成后，用简洁的中文总结你做了什么以及结果。";
+    "你是一个 Slack 专项助手。你只负责执行 Slack 相关操作。\n" +
+    "根据用户的需求，使用可用的 Slack 工具完成任务。\n" +
+    "完成后，用简洁的中文总结你做了什么以及结果。\n\n" +
+    "【重要】当上一步处理结果中包含文件路径（如 .xlsx / .pdf / .docx）时：\n" +
+    "文件会由系统自动上传到 Slack，你不需要也不能上传文件。\n" +
+    "你只需用 slack_send_message 发一条文字消息，告知用户文件已生成并正在发送即可。";
 
   return async function slackAgentNode(
     state: GraphStateType
@@ -90,12 +94,35 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
       ? skills.promptFor("slack", SYSTEM_PROMPT, userInputText)
       : SYSTEM_PROMPT;
 
+    const ctx = getContext();
+
+    // 多步计划模式：跳过 ReAct 循环，只返回通知文字（由入口层作为文件 initialComment 发出）
+    if (state.planContext && ctx?.channel) {
+      const paths = state.attachmentPaths ?? [];
+      const notifyText = paths.length
+        ? `✅ 文件已生成（${paths.map((p) => p.split("/").at(-1)).join("、")}），正在发送！`
+        : "✅ 任务完成！";
+      logger.info({ durationMs: Date.now() - nodeStart }, "completed (plan fast-path)");
+      return {
+        finalReply: notifyText,
+        attachmentPaths: paths,
+      };
+    }
+
+    // 多步计划：把上游结果拼进 human message，且不传历史消息（避免模型被历史对话干扰）
+    const channelHint = ctx?.channel
+      ? `\n\n【重要】必须发送到 channel id：${ctx.channel}（这是当前用户所在的频道/DM）。`
+      : "";
+    const taskMessage = state.planContext
+      ? `用户原始需求：${userInputText}${channelHint}\n\n上一步处理结果（直接基于此内容完成任务，不要询问确认）：\n${state.planContext}`
+      : userInputText;
+
     try {
       const result = await runReactAgent({
         llm,
         tools,
         systemPrompt,
-        messages: [humanMsg(userInputText)],
+        messages: [humanMsg(taskMessage)],
       });
 
       const lastMsg = result.messages.at(-1);
@@ -142,6 +169,8 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
       return {
         subAgentResult: reactOutput,
         finalReply,
+        // 透传上游生成的文件路径，入口层负责上传（slack agent 自己不上传文件）
+        attachmentPaths: state.attachmentPaths ?? [],
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

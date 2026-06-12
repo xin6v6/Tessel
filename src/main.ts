@@ -78,8 +78,16 @@ if (process.env.SLACK_BOT_TOKEN) {
                   }
                   if (attachmentPaths.length) {
                     try {
-                      for (const filePath of attachmentPaths) {
-                        await slackIntegration.getClient().uploadFile({ filePath, filename: filePath.split("/").at(-1) ?? "file", channel, threadTs: threadTs ?? ts });
+                      for (let i = 0; i < attachmentPaths.length; i++) {
+                        const filePath = attachmentPaths[i]!;
+                        await slackIntegration.getClient().uploadFile({
+                          filePath,
+                          filename: filePath.split("/").at(-1) ?? "file",
+                          channel,
+                          threadTs: threadTs ?? ts,
+                          // 第一个文件带通知文字，后续文件不重复
+                          initialComment: i === 0 && reply ? reply : undefined,
+                        });
                       }
                     } catch (e: unknown) {
                       logger.error({ err: String(e) }, "slack:mention file upload failed");
@@ -100,6 +108,7 @@ if (process.env.SLACK_BOT_TOKEN) {
                     route: extractRoute(result),
                     threadId,
                   });
+                  // 有文件时 reply 已作为 initialComment 随文件发出，不再单独发
                   return attachments.length || attachmentPaths.length ? undefined : reply;
                 } catch (err) {
                   const error = err instanceof Error ? err.message : String(err);
@@ -163,8 +172,16 @@ if (process.env.SLACK_BOT_TOKEN) {
                   }
                   if (attachmentPaths.length) {
                     try {
-                      for (const filePath of attachmentPaths) {
-                        await slackIntegration.getClient().uploadFile({ filePath, filename: filePath.split("/").at(-1) ?? "file", channel, threadTs: ts });
+                      for (let i = 0; i < attachmentPaths.length; i++) {
+                        const filePath = attachmentPaths[i]!;
+                        await slackIntegration.getClient().uploadFile({
+                          filePath,
+                          filename: filePath.split("/").at(-1) ?? "file",
+                          channel,
+                          threadTs: ts,
+                          // 第一个文件带通知文字，后续文件不重复
+                          initialComment: i === 0 && reply ? reply : undefined,
+                        });
                       }
                     } catch (e: unknown) {
                       logger.error({ err: String(e) }, "slack:dm file upload failed");
