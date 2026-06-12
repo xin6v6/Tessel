@@ -47,7 +47,7 @@ export function buildCapabilitiesNode(
       durationMs: Date.now() - t0,
     }, "capabilities snapshot built");
 
-    return { subAgentResult: report };
+    return { finalReply: report };
   };
 }
 
@@ -73,25 +73,19 @@ export function renderSnapshotForUser(snapshot: CapabilitiesSnapshot): string {
     let status: string;
     if (agent.isStub) status = "占位 stub · 未接入";
     else if (!agent.ready) status = "未启用 / 初始化失败";
-    else if (agent.tools.length === 0) status = "已注册但无可用工具";
+    else if (agent.builtIn) status = "已连接（内置实现）";
+    else if (agent.tools.length === 0) status = "已就绪 · 暂无工具挂载";
     else status = "已连接";
 
-    const header = `### ${agent.agentName} (${status})\n${agent.description}`;
-    if (agent.tools.length === 0 || agent.isStub) {
-      sections.push(header);
-      continue;
-    }
-    const lines = agent.tools
-      .map((t) => `- \`${t.name}\` — ${t.description.replace(/\s+/g, " ").trim()}`)
-      .join("\n");
-    sections.push(`${header}\n${lines}`);
+    const toolSummary = agent.tools.length > 0
+      ? `（${agent.tools.length} 个工具）`
+      : "";
+    const header = `### ${agent.agentName} (${status}${toolSummary})\n${agent.description}`;
+    sections.push(header);
   }
 
   if (snapshot.otherTools.length > 0) {
-    const lines = snapshot.otherTools
-      .map((t) => `- \`${t.name}\` — ${t.description.replace(/\s+/g, " ").trim()}`)
-      .join("\n");
-    sections.push(`### 其他工具\n${lines}`);
+    sections.push(`### 其他工具（${snapshot.otherTools.length} 个，未归属任何 agent）`);
   }
 
   if (sections.length === 0) {

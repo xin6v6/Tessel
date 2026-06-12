@@ -39,7 +39,12 @@ export function loadMcpConfig(): McpConfig {
   for (const p of candidates) {
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf-8");
-      return JSON.parse(raw) as McpConfig;
+      // 展开 ${VAR} / $VAR 占位符，值从 process.env 读取
+      const expanded = raw.replace(/\$\{([^}]+)\}|\$([A-Z_][A-Z0-9_]*)/g, (_, braced, bare) => {
+        const name = braced ?? bare;
+        return process.env[name] ?? "";
+      });
+      return JSON.parse(expanded) as McpConfig;
     }
   }
 

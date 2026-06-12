@@ -20,11 +20,15 @@ import type { IntegrationRegistry } from "../integrations/registry.ts";
 // 真实任务派给它们。
 //
 // 一旦真正接入（替换掉 stubSearchTool / stubMcpTool），从这个集合移除。
-const STUB_AGENTS = new Set<string>(["web", "mcp"]);
+const STUB_AGENTS = new Set<string>([]);
 
 // 纯节点（无 integration、无前缀工具）但本身就绪、可作为 tool_routing 候选。
-// workflow/vision/imagegen 都没有注册到 ToolRegistry，但节点本身可路由。
+// workflow/vision/imagegen/file 都没有注册到 ToolRegistry，但节点本身可路由。
 const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen", "file"]);
+
+// 工具内嵌在节点实现里（ReactTool），不经过 ToolRegistry，因此 ToolRegistry
+// 前缀匹配找不到它们。在 snapshot 里标记 builtIn=true，渲染时如实展示。
+const BUILT_IN_TOOL_NODES = new Set<string>(["vision", "imagegen", "file", "workflow"]);
 
 /** 描述一个子节点（agent）的能力。 */
 export interface AgentCapability {
@@ -36,6 +40,8 @@ export interface AgentCapability {
   tools: ToolDefinition[];
   /** 是否为 stub 占位实现。路由层应跳过 isStub=true 的 agent。 */
   isStub: boolean;
+  /** 工具内嵌在节点实现里，不经过 ToolRegistry，tools 数组为空但节点实际可用。 */
+  builtIn: boolean;
   /**
    * 是否就绪：integration 已 initialize 成功（在 IntegrationRegistry.list() 里出现）
    * 且至少有一个工具被注册到 ToolRegistry。stub 节点 ready 但 isStub=true。
@@ -92,6 +98,7 @@ export function buildCapabilitiesSnapshot(params: {
   const agents: AgentCapability[] = knownAgents.map((agentName) => {
     const tools = toolsByAgent.get(agentName) ?? [];
     const isStub = STUB_AGENTS.has(agentName);
+    const builtIn = BUILT_IN_TOOL_NODES.has(agentName);
     // 就绪条件：要么是 integration 派生的 agent（且 integration 注册成功），
     // 要么是 stub 节点（节点本身可路由，但工具是占位）。
     const ready =
@@ -101,6 +108,7 @@ export function buildCapabilitiesSnapshot(params: {
       description: agentDescriptions[agentName] ?? "",
       tools,
       isStub,
+      builtIn,
       ready,
     };
   });

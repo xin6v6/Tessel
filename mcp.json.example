@@ -26,6 +26,16 @@
         "NOTION_API_KEY": "secret_xxxxxxxxxxxx"
       }
     },
+    "jira": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "JIRA_URL": "https://your-org.atlassian.net",
+        "JIRA_USERNAME": "your-email@example.com",
+        "JIRA_API_TOKEN": "your-atlassian-api-token"
+      }
+    },
     "my-remote-server": {
       "transport": "sse",
       "url": "https://my-mcp-server.example.com/sse"
