@@ -77,7 +77,7 @@ describe("buildCapabilitiesSnapshot", () => {
     expect(slack.tools.map((t) => t.name)).toEqual(["slack_send", "slack_get"]);
   });
 
-  it("marks web/mcp as stubs regardless of tool registration", async () => {
+  it("marks web/mcp as non-stub real agents", async () => {
     const { toolRegistry, integrations } = await setup({
       integrations: [stubIntegration("slack", "Slack", ["slack_send"])],
     });
@@ -88,11 +88,8 @@ describe("buildCapabilitiesSnapshot", () => {
     });
     const web = snap.agents.find((a) => a.agentName === "web")!;
     const mcp = snap.agents.find((a) => a.agentName === "mcp")!;
-    expect(web.isStub).toBe(true);
-    expect(mcp.isStub).toBe(true);
-    // Stub agents are still "ready" so capabilities node can mention them,
-    // but routing-prompt filtering will hide them.
-    expect(web.ready).toBe(true);
+    expect(web.isStub).toBe(false);
+    expect(mcp.isStub).toBe(false);
   });
 
   it("marks integration-derived agent NOT ready when integration failed to initialise", async () => {
@@ -127,7 +124,7 @@ describe("buildCapabilitiesSnapshot", () => {
 // ----------------------------------------------------------------
 
 describe("snapshotForRoutingPrompt", () => {
-  it("tags stub agents with [STUB · 不要选] so LLM skips them", async () => {
+  it("lists real agents without STUB tag, slack tools enumerated", async () => {
     const { toolRegistry, integrations } = await setup({
       integrations: [stubIntegration("slack", "Slack ops", ["slack_send"])],
     });
@@ -137,13 +134,9 @@ describe("snapshotForRoutingPrompt", () => {
       agentDescriptions: AGENT_DESCRIPTIONS,
     });
     const prompt = snapshotForRoutingPrompt(snap);
-    expect(prompt).toContain("web [STUB · 不要选]");
-    expect(prompt).toContain("mcp [STUB · 不要选]");
+    expect(prompt).not.toContain("[STUB");
     expect(prompt).toContain("- slack:");
-    // slack tools should be listed
     expect(prompt).toContain("slack_send");
-    // Stub tools should NOT have their (placeholder) tools enumerated
-    expect(prompt).not.toContain("web_search");
   });
 
   it("hides agents that are not ready", async () => {
@@ -156,8 +149,8 @@ describe("snapshotForRoutingPrompt", () => {
     const prompt = snapshotForRoutingPrompt(snap);
     // slack is not ready (no integration) → must not appear
     expect(prompt).not.toMatch(/^- slack:/m);
-    // web/mcp are stubs but still considered ready, so they appear with tag
-    expect(prompt).toContain("web [STUB");
+    // web/mcp are pure nodes (READY_PURE_NODES), appear without STUB tag
+    expect(prompt).not.toContain("web [STUB");
   });
 
   it("returns explicit empty notice when nothing is routable", async () => {
