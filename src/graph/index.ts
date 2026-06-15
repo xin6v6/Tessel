@@ -56,7 +56,7 @@ export function buildGraph(params: {
    *  UI 进程可与图共享同一实例,改 skill 后 reload 即时生效。 */
   skills?: SkillContext;
 }) {
-  const apiKey  = params.apiKey ?? process.env.OPENAI_API_KEY ?? "";
+  const apiKey  = params.apiKey ?? process.env.LLM_API_KEY ?? "";
   const baseURL = params.baseURL ?? process.env.LLM_BASE_URL;
 
   const mainModel = params.model ?? process.env.LLM_MODEL ?? "gpt-4o";
