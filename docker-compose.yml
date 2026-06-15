@@ -13,17 +13,21 @@
 services:
   # ── Intent Classifier sidecar ──────────────────────────────────
   classifier:
-    build:
-      context: .
-      dockerfile: Dockerfile.classifier
+    # Image is built locally and transferred via scp — not built in CI.
+    # To update the classifier image on prod:
+    #   docker build -f Dockerfile.classifier -t tessel-classifier:latest .
+    #   docker save tessel-classifier:latest | gzip > /tmp/tessel-classifier.tar.gz
+    #   scp /tmp/tessel-classifier.tar.gz user@prod:~/
+    #   ssh user@prod "docker load < ~/tessel-classifier.tar.gz && docker compose restart classifier"
     image: tessel-classifier:latest
+    pull_policy: never
     container_name: tessel-classifier
 
     restart: unless-stopped
 
     # Model files live in a named volume populated by scp on the prod machine.
     # To upload a newly trained model:
-    #   scp -r scripts/train-router/model/ user@prod:/opt/tessel-model/
+    #   scp -r scripts/train-router/model/ user@prod:/var/lib/docker/volumes/tessel_tessel-model/_data/
     # Then: docker compose restart classifier
     volumes:
       - tessel-model:/app/model:ro

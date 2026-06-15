@@ -55,8 +55,23 @@ jobs:
           true
 
       # ── 构建 & 滚动部署 ───────────────────────────────────────────
+      # classifier 镜像需手动从本地 build 后 scp 传入，不在 CI 中构建：
+      #   docker build -f Dockerfile.classifier -t tessel-classifier:latest .
+      #   docker save tessel-classifier:latest | gzip > /tmp/tessel-classifier.tar.gz
+      #   scp /tmp/tessel-classifier.tar.gz user@prod:~/
+      #   ssh user@prod "docker load < ~/tessel-classifier.tar.gz"
+      - name: 检查 classifier 镜像
+        run: |
+          if docker image inspect tessel-classifier:latest &>/dev/null; then
+            echo "✅ tessel-classifier:latest 已存在，跳过构建"
+          else
+            echo "❌ tessel-classifier:latest 不存在，请先从本地手动传入镜像"
+            echo "   参考 docker-compose.yml 顶部注释的操作步骤"
+            exit 1
+          fi
+
       - name: 构建 Docker 镜像
-        run: docker compose build
+        run: docker compose build --no-cache tessel ui
 
       - name: 滚动重启容器
         run: docker compose up -d
