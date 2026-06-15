@@ -46,4 +46,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 data/
 
 # trained classifier model + training pipeline (local, do not upload)
+# serve.py and requirements.serve.txt are needed for Docker build — keep them tracked
 scripts/train-router/
+!scripts/train-router/serve.py
+!scripts/train-router/requirements.serve.txt
