@@ -347,12 +347,41 @@ export function buildSupervisorNode(
       logger.debug({ subAgentResultSnippet: subAgentResult.slice(0, 120) }, "composing final reply");
 
       const t0 = Date.now();
+
+      // capabilities 节点传来的快照加了 [capabilities-snapshot] 前缀标记。
+      // 识别后去掉标记，并注入额外约束：以清单为唯一事实来源，不要用对话历史推断能力。
+      const isCapabilitiesResult = subAgentResult.startsWith("[capabilities-snapshot]\n");
+      const cleanedSubAgentResult = isCapabilitiesResult
+        ? subAgentResult.slice("[capabilities-snapshot]\n".length)
+        : subAgentResult;
+      const capabilitiesExtra = isCapabilitiesResult
+        ? "\n- 以上清单是运行时注册表的实时数据，是唯一可信的能力来源。不要用对话历史里的失败经验、上下文推断、或自己的训练知识来判断能力是否可用——以清单为准。\n- 用户问的是反思性问题（如『缺什么』『不足在哪』），请基于清单内容作出判断和分析，不要只罗列清单。"
+        : "";
+
+      // compose 阶段不应用第 7 条护栏（严禁描述能力）—— capabilities agent
+      // 传来的 subAgentResult 正是运行时能力快照，LLM 需要引用它来回答用户问题。
+      // 第 7 条护栏只适用于 chat 直接回复（LLM 凭记忆编造工具清单的场景）。
+      const composeGuardrails = isCapabilitiesResult
+        ? REPLY_GUARDRAILS
+            .split("\n")
+            .filter((line) => !line.includes("严禁】描述自身能力") && !line.includes("工具、MCP、集成、插件"))
+            .join("\n")
+            .trim()
+        : REPLY_GUARDRAILS;
+
+      // capabilities 场景不传对话历史：用户问的是系统当前状态，历史里的
+      // 失败/成功记录会干扰 LLM 对清单的判断，让它用"经验"覆盖"事实"。
+      const historyMsgs = isCapabilitiesResult ? [] : historyForPrompt(messages);
       const finalReply = await llm.invoke([
         systemMsg(
-          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。只陈述子 Agent 结果中有证据支撑的内容，没有的不说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。只陈述子 Agent 结果中有证据支撑的内容，没有的不说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${composeGuardrails}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。${capabilitiesExtra}`
         ),
-        ...historyForPrompt(messages),
-        humanMsg(`子 Agent 执行结果：\n${subAgentResult}`),
+        ...historyMsgs,
+        // capabilities 场景：在结果前补回用户的原始问题，让 LLM 知道要回答什么
+        ...(isCapabilitiesResult && lastHuman
+          ? [humanMsg(typeof lastHuman.content === "string" ? lastHuman.content : "")]
+          : []),
+        humanMsg(`子 Agent 执行结果：\n${cleanedSubAgentResult}`),
       ]);
       const safeFinalReply = sanitizeReply(finalReply);
       const tokens = extractTokenUsage(safeFinalReply);

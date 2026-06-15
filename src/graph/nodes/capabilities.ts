@@ -47,7 +47,9 @@ export function buildCapabilitiesNode(
       durationMs: Date.now() - t0,
     }, "capabilities snapshot built");
 
-    return { finalReply: report };
+    // 前缀标记让 supervisor compose 阶段识别来源，注入"以清单为准"约束，
+    // 避免 LLM 用对话历史里的失败经验来推断能力状态。
+    return { subAgentResult: `[capabilities-snapshot]\n${report}` };
   };
 }
 

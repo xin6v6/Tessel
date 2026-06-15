@@ -22,7 +22,7 @@ if (serverNames.length === 0) {
 const restartIdx = process.argv.indexOf("--restart");
 const restartTarget = restartIdx !== -1 ? process.argv[restartIdx + 1] : null;
 
-if (restartTarget !== null && restartTarget !== "all" && !serverNames.includes(restartTarget)) {
+if (restartTarget !== null && restartTarget !== "all" && !serverNames.includes(restartTarget as string)) {
   console.error(`❌  未知 server：${restartTarget}`);
   console.error(`    可用：${serverNames.join(", ")}`);
   process.exit(1);
@@ -32,7 +32,7 @@ const targets = restartTarget === null
   ? serverNames                                          // check all
   : restartTarget === "all"
     ? serverNames                                        // restart all
-    : [restartTarget];                                   // restart one
+    : [restartTarget as string];                          // restart one
 
 const mode = restartTarget !== null ? "重启" : "检查";
 console.log(`${mode} ${targets.length} 个 MCP server...\n`);
