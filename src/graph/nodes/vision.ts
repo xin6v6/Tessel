@@ -18,7 +18,7 @@ const logger = createLogger("vision-agent");
 // 配置：
 //   VISION_MODEL      视觉模型名，如 gpt-4o / qwen-vl-plus（必填，否则回退主模型）
 //   VISION_BASE_URL   视觉模型 API 地址（可选，不填则与主模型同）
-//   VISION_API_KEY    视觉模型 API Key（可选，不填则复用 OPENAI_API_KEY）
+//   VISION_API_KEY    视觉模型 API Key（可选，不填则复用 LLM_API_KEY）
 // ----------------------------------------------------------------
 
 /** 从 HumanMsg.additional_kwargs.imageUrls 取附件列表（Slack 路径注入）。 */
@@ -143,8 +143,10 @@ export function buildVisionClient(fallback: { apiKey: string; baseURL?: string; 
     maxTokens: 2048,
     maxRetries: 1,
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 60000),
-    // 禁用推理模型的 thinking 输出，减少延迟
-    modelKwargs: { thinking: { type: "disabled" } },
+    // thinking 只传给 DeepSeek 系推理模型；DashScope 等不认识该字段会 400
+    ...(process.env.VISION_BASE_URL?.includes("deepseek")
+      ? { modelKwargs: { thinking: { type: "disabled" } } }
+      : {}),
   };
   return new LLMClient(cfg);
 }

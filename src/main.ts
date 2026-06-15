@@ -249,7 +249,7 @@ async function main() {
   // 2. 构建 graph
   graph = buildGraph({
     baseURL:      process.env.LLM_BASE_URL,
-    apiKey:       process.env.OPENAI_API_KEY,
+    apiKey:       process.env.LLM_API_KEY,
     model:        process.env.LLM_MODEL,
     toolRegistry,
     integrations,

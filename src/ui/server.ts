@@ -339,7 +339,7 @@ async function initChatGraph(): Promise<void> {
     const toolRegistry = await chatIntegrations.initialize();
     chatGraph = buildGraph({
       baseURL: process.env.LLM_BASE_URL,
-      apiKey:  process.env.OPENAI_API_KEY,
+      apiKey:  process.env.LLM_API_KEY,
       model:   process.env.LLM_MODEL,
       toolRegistry,
       integrations: chatIntegrations,
