@@ -3,7 +3,7 @@ import {
   aiMsg, humanMsg, systemMsg, isHuman, stripName,
   type Message, type AIMsg,
 } from "../../llm/messages.ts";
-import type { GraphStateType, SubAgentName } from "../state.ts";
+import type { GraphStateType, SubAgentName, RouteIntent } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext, type Source } from "../../observability/context.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
@@ -15,6 +15,9 @@ import {
 } from "../capabilities-snapshot.ts";
 import { getSpeaker } from "../speaker.ts";
 import { workflowAgentDescription } from "../../workflows/recipe-store.ts";
+import { repoForChannel } from "../../workflows/repo-map.ts";
+import { snapshotForRoutingPrompt } from "../capabilities-snapshot.ts";
+import { logRoutingSuccess, logRoutingUnknown } from "../routing-log.ts";
 const logger = createLogger("supervisor");
 
 // ----------------------------------------------------------------
@@ -174,6 +177,13 @@ function currentSpeakerLine(messages: Message[]): string {
   return "";
 }
 
+/** 当前频道绑定的仓库信息，注入 system prompt 让 LLM 知道"这个频道管哪个仓库"。 */
+function channelRepoLine(channel: string | undefined): string {
+  const repo = repoForChannel(channel);
+  if (!repo) return "";
+  return `当前 Slack 频道绑定的开发仓库路径为：${repo}。用户在此频道发起的开发任务都针对这个仓库。\n`;
+}
+
 function currentDateTimeLine(): string {
   const now = new Date();
   const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -235,20 +245,38 @@ export function buildSupervisorNode(
       ? lastHuman.content.slice(0, 120)
       : "";
 
-    // ── 视觉快速路径：消息携带图片 → 直接路由到 vision agent，跳过意图分类 ──
+    // ── 视觉注入：消息携带图片时，将 vision 合并进候选集 ──
     //
-    // 检测条件：additional_kwargs.imageUrls 有值（Slack 附件）或 content 中包含
-    // 可识别的图片 URL（http...jpg/png/gif/webp）。
-    // 此快速路径只在初始路由时（!subAgentResult && !finalReply && !pendingPlan）生效，
-    // 避免 vision 回来后被再次路由到 vision，也避免覆盖已有的多步计划。
+    // 只在初始路由时（无 subAgentResult/finalReply/pendingPlan）检测图片，
+    // 避免 vision 返回后重复注入，也避免覆盖已有的多步计划。
+    // 注入后不 return，直接 fall-through 到 B0 处理 candidateAgents。
+    let effectiveCandidates: RouteIntent[] = state.candidateAgents ?? [];
     if (!subAgentResult && !finalReply && !state.pendingPlan?.length && lastHuman) {
       const attachedUrls = lastHuman.additional_kwargs?.["imageUrls"] as string[] | undefined;
       const hasAttachedImages = Array.isArray(attachedUrls) && attachedUrls.length > 0;
       const hasInlineImageUrl = typeof lastHuman.content === "string" &&
         /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)/i.test(lastHuman.content);
-      if (hasAttachedImages || hasInlineImageUrl) {
-        logger.info({ hasAttachedImages, hasInlineImageUrl }, "routing: vision fast-path");
-        return { next: "vision", intent: "unknown" };
+      let hasImage = hasAttachedImages || hasInlineImageUrl;
+
+      if (!hasImage) {
+        // 当前消息无图，但意图是 vision 或 unknown 时，往历史找最近一条带图消息
+        const routerSaysVisionOrUnknown = state.intent === "vision" || state.intent === "unknown";
+        if (routerSaysVisionOrUnknown) {
+          const reversed = [...messages].reverse();
+          for (let i = 1; i < reversed.length; i++) {
+            const m = reversed[i]!;
+            if (!isHuman(m)) continue;
+            const histUrls = m.additional_kwargs?.["imageUrls"] as string[] | undefined;
+            hasImage = (Array.isArray(histUrls) && histUrls.length > 0) ||
+              (typeof m.content === "string" && /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)/i.test(m.content));
+            break; // 只看前一条，避免跨话题误触发
+          }
+        }
+      }
+
+      if (hasImage && !effectiveCandidates.includes("vision")) {
+        effectiveCandidates = [...new Set(["vision" as RouteIntent, ...effectiveCandidates])];
+        logger.info({ effectiveCandidates, hasAttachedImages, hasInlineImageUrl }, "vision injected into candidates");
       }
     }
 
@@ -297,11 +325,36 @@ export function buildSupervisorNode(
             attachmentPaths: accPaths,
           };
         }
-        // 计划全部完成 → 最后一步 agent 的输出就是最终回复，直接结束
+        // 计划全部完成
         logger.info({ totalSteps: state.pendingPlan?.length }, "plan: all steps done");
-        const cleaned = stripThinking(currentResult);
+        const cleanedFinal = stripThinking(currentResult);
+        // finalReply 类（文件生成等已成稿内容）直接 passthrough，不再 LLM compose
+        const lastStepIsFinalReply = Boolean(finalReply && finalReply.trim());
+        if (lastStepIsFinalReply) {
+          return {
+            messages: [aiMsg(cleanedFinal)],
+            next: "__end__",
+            pendingPlan: [],
+            planContext: "",
+            subAgentResult: "",
+            finalReply: "",
+            attachmentPaths: state.attachmentPaths,
+            attachmentUrls: state.attachmentUrls,
+          };
+        }
+        // subAgentResult 类 → 用 LLM compose 整理成自然语言，避免原始输出直接暴露给用户
+        const tCompose = Date.now();
+        const composedMsg = await llm.invoke([
+          systemMsg(
+            `你是一个个人助手。根据子 Agent 的执行结果，用自然语言给用户一个清晰、友好的回复。只陈述子 Agent 结果中有证据支撑的内容，没有的不说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}\n\n额外要求：\n- 子 Agent 的结果是本次回复唯一可引用的事实来源。\n- 如子 Agent 结果为空、报错或不完整，如实告诉用户，不要替它补充内容。`
+          ),
+          ...historyForPrompt(messages),
+          humanMsg(`子 Agent 执行结果：\n${cleanedFinal}`),
+        ]);
+        const safeComposed = sanitizeReply(composedMsg);
+        logger.info({ durationMs: Date.now() - tCompose }, "plan: all steps done, composed");
         return {
-          messages: [aiMsg(cleaned)],
+          messages: [safeComposed],
           next: "__end__",
           pendingPlan: [],
           planContext: "",
@@ -347,6 +400,75 @@ export function buildSupervisorNode(
       logger.debug({ subAgentResultSnippet: subAgentResult.slice(0, 120) }, "composing final reply");
 
       const t0 = Date.now();
+
+      // ── capabilities unknown_lookup 分支：用快照让 LLM 选出最合适的 agent 来处理 ──
+      //
+      // 当 capabilitiesReason === "unknown_lookup" 时，capabilities 是作为 "全量工具查找" 被调用的：
+      // 拿到快照后用 LLM 从中选出最合适的 agent 执行用户请求；
+      // 找到了 → 路由 + logRoutingSuccess；
+      // 找不到 → logRoutingUnknown + chat 回复（告知用户无对应工具）。
+      if (state.capabilitiesReason === "unknown_lookup" && subAgentResult.startsWith("[capabilities-snapshot]\n")) {
+        const snapshot = subAgentResult.slice("[capabilities-snapshot]\n".length);
+
+        interface AgentSelectResult { agent: string; reason: string }
+        const selectResult = await llm.invokeStructured<AgentSelectResult>(
+          [
+            systemMsg(
+              `你是一个任务路由助手。根据用户请求和当前可用 agent 清单，选出最合适的 agent 来处理。
+规则：
+1. 只能从清单中选择，不能选 [STUB · 不要选] 标记的 agent。
+2. 如果清单中没有任何 agent 能处理该请求，将 agent 字段返回空字符串 ""。
+3. agent 字段只填 agent 名称（如 "slack"、"file"），不要加其他内容。`
+            ),
+            humanMsg(`用户请求：${inputSnippet || "（无文字内容）"}\n\n可用 agent 清单：\n${snapshot}`),
+          ],
+          {
+            parse(raw: unknown) {
+              const r = raw as Record<string, unknown>;
+              return { agent: String(r["agent"] ?? ""), reason: String(r["reason"] ?? "") };
+            },
+          },
+          {
+            name: "select_agent",
+            description: "从清单中选出最合适的 agent",
+            parameters: {
+              type: "object",
+              properties: {
+                agent: { type: "string", description: "选中的 agent 名称，找不到时为空字符串" },
+                reason: { type: "string", description: "选择理由（一句话）" },
+              },
+              required: ["agent", "reason"],
+            },
+          },
+        );
+
+        const chosenAgent = selectResult.agent.trim();
+        if (chosenAgent && (KNOWN_AGENTS as string[]).includes(chosenAgent)) {
+          logger.info({ chosenAgent, reason: selectResult.reason }, "unknown_lookup → agent selected by LLM");
+          // 异步记录成功样本，不阻塞路由
+          void logRoutingSuccess(inputSnippet, chosenAgent);
+          return {
+            subAgentResult: "",
+            capabilitiesReason: "",
+            next: chosenAgent as SubAgentName,
+            pendingPlan: [chosenAgent as RouteIntent],
+            intent: "unknown",
+            candidateAgents: [],
+          };
+        }
+
+        // 没找到合适 agent
+        logger.info({ inputSnippet }, "unknown_lookup → no agent found, logging unknown");
+        void logRoutingUnknown(inputSnippet, source);
+        const noAgentMsg = aiMsg("抱歉，没有找到能处理这个请求的工具。如果你有更具体的需求（如操作 Slack、读写文件、生成图片等），可以告诉我。");
+        return {
+          messages: [noAgentMsg],
+          next: "__end__",
+          subAgentResult: "",
+          capabilitiesReason: "",
+          intent: "unknown",
+        };
+      }
 
       // capabilities 节点传来的快照加了 [capabilities-snapshot] 前缀标记。
       // 识别后去掉标记，并注入额外约束：以清单为唯一事实来源，不要用对话历史推断能力。
@@ -407,13 +529,95 @@ export function buildSupervisorNode(
       };
     }
 
+    // ── 阶段 B0：candidateAgents 处理 ──
+    //
+    // effectiveCandidates = state.candidateAgents + 视觉注入（若有图片）。
+    // Router 识别出多个候选 agent（无序集合）→ 交给 LLM 决定执行顺序生成 pendingPlan。
+    // capabilities 返回后 subAgentResult 非空，走阶段 A 整合，不会再次进这里。
+    if (effectiveCandidates.length > 0 && !state.pendingPlan?.length) {
+      const userId = getContext()?.userId ?? "";
+      // workflow 白名单门控
+      if (effectiveCandidates.includes("workflow") && !workflowAllowed(userId)) {
+        logger.warn({ source, userId }, "workflow in candidates but user not in allowlist — removing");
+        effectiveCandidates = effectiveCandidates.filter((a) => a !== "workflow") as RouteIntent[];
+        if (effectiveCandidates.length === 0) {
+          const noPermMsg = aiMsg("抱歉，你没有权限触发工作流。");
+          return { messages: [noPermMsg], next: "__end__", intent: "unknown", candidateAgents: [] };
+        }
+      }
+
+      // 单个 candidate：不需要 LLM 排序，直接路由
+      if (effectiveCandidates.length === 1) {
+        const sole = effectiveCandidates[0] as RouteIntent;
+        logger.info({ candidate: sole }, "candidateAgents → single, direct route");
+        return { intent: "unknown", candidateAgents: [], pendingPlan: [sole], next: sole as SubAgentName };
+      }
+
+      // 多个 candidates：用 LLM 决定执行顺序
+      const requestDesc = inputSnippet || "（用户发送了图片，无文字说明）";
+      const agentDescLines = effectiveCandidates
+        .map((a) => `- ${a}: ${SUB_AGENTS[a as keyof typeof SUB_AGENTS] ?? ""}`)
+        .join("\n");
+
+      interface PlanResult { plan: string[] }
+      const planResult = await llm.invokeStructured<PlanResult>(
+        [
+          systemMsg(
+            `你是一个任务编排助手。给定候选 agent 列表和用户请求，决定最合理的执行顺序。
+规则：
+1. 只使用候选列表中的 agent，不要添加新的。
+2. 如果某个 agent 的结果是下一个 agent 的输入（如先识别图片再写文件），则先排识别再排写入。
+3. 最终汇报给用户的 agent（如 slack）一般放最后。
+4. 返回字段 plan 是有序 agent 名数组。`
+          ),
+          humanMsg(
+            `用户请求：${requestDesc}\n\n候选 agent：\n${agentDescLines}`
+          ),
+        ],
+        {
+          parse(raw: unknown) {
+            const r = raw as Record<string, unknown>;
+            if (!Array.isArray(r["plan"])) throw new Error("plan must be array");
+            return { plan: (r["plan"] as unknown[]).map(String) };
+          },
+        },
+        {
+          name: "set_execution_plan",
+          description: "设置 agent 执行顺序",
+          parameters: {
+            type: "object",
+            properties: {
+              plan: {
+                type: "array",
+                items: { type: "string", enum: effectiveCandidates },
+                description: "按执行顺序排列的 agent 名数组",
+              },
+            },
+            required: ["plan"],
+          },
+        },
+      );
+
+      // 过滤掉不在候选集里的（防止 LLM 幻觉）
+      const orderedPlan = planResult.plan.filter((a) =>
+        (effectiveCandidates as string[]).includes(a)
+      ) as RouteIntent[];
+
+      if (orderedPlan.length === 0) {
+        logger.warn({ candidates: effectiveCandidates }, "LLM returned empty plan — falling back to capabilities");
+        return { intent: "unknown", candidateAgents: [], pendingPlan: [], next: "capabilities" };
+      }
+
+      logger.info({ candidates: effectiveCandidates, orderedPlan }, "candidateAgents → plan ordered by LLM");
+      return { intent: "unknown", candidateAgents: [], pendingPlan: orderedPlan, next: orderedPlan[0] as SubAgentName };
+    }
+
     // ── 阶段 B：路由 ──
     //
     // router ONNX 直接输出节点级 intent（slack/file/vision/imagegen/workflow/capabilities/chat）。
     // supervisor 消费后直接路由，不再跑第二轮 LLM。
     //
     // fallback 策略：
-    //   unknown  → 分类置信度不足或 server 不可达，当作 chat 回复并提示用户
     //   chat     → 直接 LLM 对话
     //   其他节点  → 直接路由（workflow 再加白名单二次校验）
     const routerIntent = state.intent;
@@ -434,30 +638,31 @@ export function buildSupervisorNode(
     // ── 节点级 intent 直接路由 ──
     if (ROUTABLE_INTENTS.has(routerIntent)) {
       logger.info({ intent: routerIntent, source }, `intent → ${routerIntent}`);
+      // 异步记录成功路由样本（用于扩充 ONNX 训练数据）
+      void logRoutingSuccess(inputSnippet, routerIntent);
       return { next: routerIntent as SubAgentName, intent: "unknown" };
     }
 
-    // ── unknown fallback：提示用户没找到对应工具，走 chat 回复 ──
-    const isUnknown = routerIntent === "unknown";
-    if (isUnknown) {
-      logger.info({ source }, "intent unknown — falling back to chat with hint");
+    // ── unknown → 路由到 capabilities 做全量工具查找 ──
+    //
+    // 不直接 chat fallback：先让 capabilities 节点列出实时工具清单，
+    // 再由 LLM 从清单里选出最合适的 agent（阶段 A capabilities unknown_lookup 分支）。
+    // 找不到时才 chat 回复并写 routing-unknown.jsonl。
+    if (routerIntent === "unknown") {
+      logger.info({ inputSnippet, source }, "intent unknown — routing to capabilities for agent lookup");
+      return { next: "capabilities", capabilitiesReason: "unknown_lookup", intent: "unknown" };
     }
 
-    // ── chat / unknown → 直接 LLM 回复 ──
+    // ── chat → 直接 LLM 回复 ──
+    const channel = getContext()?.channel;
     const t1 = Date.now();
-    const chatBase = `你是一个有帮助的个人助手。只基于对话中已有的事实回答用户的问题；没有证据支撑的内容不要说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${REPLY_GUARDRAILS}`;
+    const chatBase = `你是一个有帮助的个人助手。只基于对话中已有的事实回答用户的问题；没有证据支撑的内容不要说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${channelRepoLine(channel)}${REPLY_GUARDRAILS}`;
     const chatSystem = skills
       ? skills.promptFor("supervisor", chatBase, inputSnippet)
       : chatBase;
 
-    // unknown 时在对话历史前插入一条提示，告知用户没找到对应工具
-    const extraHint = isUnknown
-      ? [systemMsg("提示（只在本次回复末尾自然地加一句）：没有找到能直接处理这个请求的专项工具，如果你有更具体的需求（如操作 Slack、读写文件、生成图片等），可以告诉我。")]
-      : [];
-
     const directReply = await llm.invoke([
       systemMsg(chatSystem),
-      ...extraHint,
       ...historyForPrompt(messages),
     ]);
     const safeDirectReply = sanitizeReply(directReply);
