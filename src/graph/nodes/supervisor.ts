@@ -410,6 +410,13 @@ export function buildSupervisorNode(
       if (state.capabilitiesReason === "unknown_lookup" && subAgentResult.startsWith("[capabilities-snapshot]\n")) {
         const snapshot = subAgentResult.slice("[capabilities-snapshot]\n".length);
 
+        // 频道绑定仓库提示：本地文件仓库操作应走 file agent，不要误选 mcp
+        const channel = getContext()?.channel;
+        const boundRepo = repoForChannel(channel);
+        const repoContext = boundRepo
+          ? `\n补充上下文：当前频道绑定了本地仓库 ${boundRepo}，涉及该仓库的读写/查看操作应选 file agent，而非 mcp（mcp 用于远程 API，如 Bitbucket/Jira）。`
+          : "";
+
         interface AgentSelectResult { agent: string; reason: string }
         const selectResult = await llm.invokeStructured<AgentSelectResult>(
           [
@@ -418,7 +425,8 @@ export function buildSupervisorNode(
 规则：
 1. 只能从清单中选择，不能选 [STUB · 不要选] 标记的 agent。
 2. 如果清单中没有任何 agent 能处理该请求，将 agent 字段返回空字符串 ""。
-3. agent 字段只填 agent 名称（如 "slack"、"file"），不要加其他内容。`
+3. agent 字段只填 agent 名称（如 "slack"、"file"），不要加其他内容。
+4. file agent 用于本地文件/仓库的读写操作；mcp agent 用于通过 API 操作远程服务（Bitbucket、Jira 等）。${repoContext}`
             ),
             humanMsg(`用户请求：${inputSnippet || "（无文字内容）"}\n\n可用 agent 清单：\n${snapshot}`),
           ],
