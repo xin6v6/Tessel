@@ -42,6 +42,8 @@ export interface InvokeOpts {
   tools?: ToolSpec[];
   toolChoice?: "auto" | { type: "function"; function: { name: string } };
   signal?: AbortSignal;
+  /** 调用时临时覆盖 modelKwargs（用于 invokeStructured 需要剥 thinking 的场景）。 */
+  overrideModelKwargs?: Record<string, unknown> | null;
 }
 
 /** 最小 zod-like 校验接口（schema.parse(x) → T 或抛错）。zod 的 ZodSchema 满足它。 */
@@ -154,8 +156,34 @@ export class LLMClient {
       if (opts.toolChoice) body.tool_choice = opts.toolChoice;
     }
     // modelKwargs 展开到顶层（thinking 透传等）
-    if (this.cfg.modelKwargs) Object.assign(body, this.cfg.modelKwargs);
+    // overrideModelKwargs=null 表示调用方要求完全跳过 modelKwargs（如 invokeStructured 剥 thinking）
+    if (opts?.overrideModelKwargs !== undefined) {
+      if (opts.overrideModelKwargs !== null) Object.assign(body, opts.overrideModelKwargs);
+    } else if (this.cfg.modelKwargs) {
+      Object.assign(body, this.cfg.modelKwargs);
+    }
     return body;
+  }
+
+  /**
+   * 当前配置是否处于 thinking 模式。
+   *
+   * 判断优先级：
+   *   1. modelKwargs.thinking.type === "disabled" → 明确关闭，返回 false
+   *   2. modelKwargs.thinking 存在且非 disabled → 明确开启，返回 true
+   *   3. 无 kwargs → 按模型名推断：deepseek-v3 以上 / qwq / deepseek-r 系列默认开启
+   */
+  isThinkingMode(): boolean {
+    const t = this.cfg.modelKwargs?.["thinking"] as Record<string, unknown> | undefined;
+    if (t) return t["type"] !== "disabled";
+    // 无显式配置时按模型名推断
+    const m = this.cfg.model.toLowerCase();
+    return (
+      /deepseek-v[4-9]/.test(m) ||
+      /deepseek-r\d/.test(m) ||
+      /qwq/.test(m) ||
+      /deepseek-prover/.test(m)
+    );
   }
 
   /** 复刻 ChatOpenAI.invoke(messages, {timeout}) → AIMsg。 */
@@ -182,16 +210,58 @@ export class LLMClient {
   }
 
   /**
-   * 复刻 withStructuredOutput：用 function calling 强制模型输出一个结构。
-   * 构造单个 function、tool_choice 强制它，解析 arguments 后用 schema 校验。
+   * 强制结构化输出。
+   *
+   * 优先路径：function calling（tool_choice: required）——标准做法，解析 tool_call.args。
+   *
+   * Thinking 模式回退：DeepSeek / QwQ 等推理模型开启 thinking 时，tool_choice 强制调用
+   * 会被 provider 拒绝（400）。此时改走 JSON prompt 方案：
+   *   1. 在最后一条 system/human 消息后追加指令，要求模型只输出 JSON。
+   *   2. 临时 strip modelKwargs（去掉 thinking），避免 provider 冲突。
+   *   3. 从 content 里提取第一个 {...} 块，用 schema.parse 校验。
    */
-  async invokeStructured<T>(messages: Message[], schema: Parseable<T>, meta: { name: string; description?: string; parameters: Record<string, unknown> }): Promise<T> {
-    const reply = await this.invoke(messages, {
-      tools: [{ name: meta.name, description: meta.description ?? "", parameters: meta.parameters }],
-      toolChoice: { type: "function", function: { name: meta.name } },
+  async invokeStructured<T>(
+    messages: Message[],
+    schema: Parseable<T>,
+    meta: { name: string; description?: string; parameters: Record<string, unknown> },
+  ): Promise<T> {
+    // ── 非 thinking 模式：标准 function calling ──
+    if (!this.isThinkingMode()) {
+      const reply = await this.invoke(messages, {
+        tools: [{ name: meta.name, description: meta.description ?? "", parameters: meta.parameters }],
+        toolChoice: { type: "function", function: { name: meta.name } },
+      });
+      const call = reply.tool_calls?.[0];
+      if (!call) throw new Error("structured output: 模型未返回 tool_call");
+      return schema.parse(call.args);
+    }
+
+    // ── Thinking 模式：JSON prompt 方案 ──
+    const schemaStr = JSON.stringify(meta.parameters, null, 2);
+    const jsonInstruction = `\n\n请严格按照以下 JSON Schema 输出一个合法的 JSON 对象，不要输出任何其他内容（不要代码块标记、不要解释）：\n${schemaStr}`;
+
+    // 在消息列表末尾追加 JSON 格式指令
+    const { systemMsg, humanMsg } = await import("./messages.ts");
+    const augmented: Message[] = [
+      ...messages,
+      humanMsg(jsonInstruction),
+    ];
+
+    const reply = await this.invoke(augmented, {
+      // 剥掉 thinking kwargs，避免 provider 在非 tool_choice 路径也报错
+      overrideModelKwargs: null,
     });
-    const call = reply.tool_calls?.[0];
-    if (!call) throw new Error("structured output: 模型未返回 tool_call");
-    return schema.parse(call.args);
+
+    const content = reply.content ?? "";
+    // 从 content 里提取第一个完整 JSON 对象
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`structured output (json-prompt): 未能从回复中提取 JSON。内容：${content.slice(0, 200)}`);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(match[0]);
+    } catch {
+      throw new Error(`structured output (json-prompt): JSON.parse 失败。内容：${match[0].slice(0, 200)}`);
+    }
+    return schema.parse(parsed);
   }
 }

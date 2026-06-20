@@ -7,20 +7,41 @@ import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { SkillContext } from "../../skills/context.ts";
 import { createLogger } from "../../observability/logger.ts";
+import { getContext } from "../../observability/context.ts";
+import { repoForChannel } from "../../workflows/repo-map.ts";
 
 const logger = createLogger("file-agent");
 
 // ----------------------------------------------------------------
-// 安全路径校验 —— 限制在 FILE_AGENT_ROOT（默认 /tmp）下，
-// 防止路径穿越（../../../etc/passwd）。
+// 安全路径校验 —— 限制在允许目录内，防止路径穿越（../../../etc/passwd）。
+//
+// 允许目录 = FILE_AGENT_ROOT（默认 tmp/）
+//           + CODING_REPOS 里所有绑定仓库路径（让 file agent 能读写频道绑定的代码仓库）
 // ----------------------------------------------------------------
 
 const ROOT = path.resolve(process.env.FILE_AGENT_ROOT ?? import.meta.dir + "/../../../tmp");
 
+function getAllowedRoots(): string[] {
+  const roots = [ROOT];
+  const reposEnv = process.env.CODING_REPOS ?? "";
+  for (const entry of reposEnv.split(",")) {
+    const colonIdx = entry.indexOf(":");
+    if (colonIdx > 0) {
+      const repoPath = entry.slice(colonIdx + 1).trim();
+      if (repoPath) roots.push(path.resolve(repoPath));
+    }
+  }
+  return roots;
+}
+
 function safePath(userPath: string): string {
   const resolved = path.resolve(ROOT, userPath);
-  if (!resolved.startsWith(ROOT + path.sep) && resolved !== ROOT) {
-    throw new Error(`路径越界：${userPath} 不在允许目录 ${ROOT} 内`);
+  const allowedRoots = getAllowedRoots();
+  const allowed = allowedRoots.some(
+    (r) => resolved === r || resolved.startsWith(r + path.sep)
+  );
+  if (!allowed) {
+    throw new Error(`路径越界：${userPath} 不在允许目录内（允许：${allowedRoots.join(", ")}）`);
   }
   return resolved;
 }
@@ -33,7 +54,7 @@ const ALLOWED_COMMANDS = [
   "pandoc", "python3", "python", "node", "bun",
   "libreoffice", "convert", "ffmpeg",
   "cat", "ls", "mkdir", "cp", "mv", "rm",
-  "echo", "tee", "head", "tail", "grep", "sed", "awk",
+  "echo", "tee", "head", "tail", "wc", "grep", "sed", "awk",
   "zip", "unzip", "tar",
 ];
 
@@ -61,7 +82,7 @@ const fileTools: ReactTool[] = [
     name: "shell_exec",
     description:
       "执行命令。参数必须拆成数组传入（args），不要拼成单字符串，这样 JSON 参数里的空格才不会被误分割。" +
-      "可用命令（args[0]）：python3、cat、ls、mkdir、cp、mv、rm、echo、tee、head、tail、grep、sed、awk、zip、unzip、tar、pandoc、node、bun、libreoffice、convert、ffmpeg。",
+      "可用命令（args[0]）：python3、cat、ls、mkdir、cp、mv、rm、echo、tee、head、tail、wc、grep、sed、awk、zip、unzip、tar、pandoc、node、bun、libreoffice、convert、ffmpeg。",
     parameters: {
       type: "object",
       properties: {
@@ -213,6 +234,7 @@ const FILE_GEN_SCRIPTS = path.resolve(import.meta.dir, "../../../scripts/file-ge
 
 const SYSTEM_PROMPT =
   "你是一个文件操作专项助手。你负责执行本地文件的读取、写入、编辑、目录列表操作，以及生成各种格式的文件（PDF、docx、xlsx、图片等）。\n" +
+  "【重要】读取/浏览/查看文件或目录时，只使用 file_read、file_list 工具，绝对禁止用 shell_exec 写 Python 脚本来读文件——直接调工具即可。\n" +
   "对于纯文本文件，优先使用 file_read/file_write/file_edit/file_list 工具。\n" +
   "对于需要生成特定格式文件，【必须优先使用下面的预制脚本】，通过 shell_exec 调用，不要现场写代码：\n" +
   "\n" +
@@ -237,6 +259,80 @@ const SYSTEM_PROMPT =
   "文件生成完成后，在 generatedPaths 中返回文件的完整绝对路径，后续流程会负责将文件发送给用户。\n" +
   `工作根目录：${ROOT}`;
 
+// ----------------------------------------------------------------
+// planContext 快速路径：vision 等上游 agent 返回结构化表格 JSON 时，
+// 直接调用 gen_xlsx.py，不经过 LLM ReAct 循环（LLM 容易丢 rows 数据）
+// ----------------------------------------------------------------
+
+interface TableJson {
+  type: "table";
+  headers: string[];
+  rows: unknown[][];
+}
+
+function tryParseTableJson(text: string): TableJson | null {
+  // 从文本中提取第一个 {...} 块
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as Record<string, unknown>;
+    if (
+      parsed["type"] === "table" &&
+      Array.isArray(parsed["headers"]) &&
+      Array.isArray(parsed["rows"])
+    ) {
+      return parsed as unknown as TableJson;
+    }
+  } catch { /* not json */ }
+  return null;
+}
+
+async function fastPathXlsx(
+  tableJson: TableJson,
+  userInputText: string,
+  scripts: string,
+  root: string,
+): Promise<{ finalReply: string; attachmentPaths: string[] } | null> {
+  // 从用户需求里推断输出文件名
+  const nameMatch = userInputText.match(/[^\s，。！？、]+\.xlsx/i);
+  const outputName = nameMatch ? nameMatch[0] : "表格数据.xlsx";
+
+  const xlsxArg = JSON.stringify({
+    output: outputName,
+    sheets: [{
+      name: "数据",
+      headers: tableJson.headers,
+      rows: tableJson.rows,
+    }],
+  });
+
+  logger.info({ outputName, rowCount: tableJson.rows.length, headers: tableJson.headers }, "fast-path xlsx");
+
+  const proc = Bun.spawn(["python3", path.join(scripts, "gen_xlsx.py"), xlsxArg], {
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  await proc.exited;
+
+  if (stderr.trim()) {
+    logger.error({ stderr }, "fast-path xlsx failed");
+    return null; // 让 ReAct 兜底
+  }
+
+  const filePath = stdout.trim();
+  if (!filePath) return null;
+
+  return {
+    finalReply: `✅ 文件已生成（${outputName}），正在发送！`,
+    attachmentPaths: [filePath],
+  };
+}
+
 export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
   return async function fileAgentNode(
     state: GraphStateType
@@ -257,14 +353,33 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
       msgCount: state.messages.length,
     }, "started");
 
+    // ── 快速路径：planContext 是结构化表格 JSON + 用户要求生成 xlsx/excel ──
+    const wantsXlsx = /excel|xlsx|表格|spreadsheet/i.test(userInputText);
+    if (state.planContext && wantsXlsx) {
+      const tableJson = tryParseTableJson(state.planContext);
+      if (tableJson && tableJson.rows.length > 0) {
+        const fast = await fastPathXlsx(tableJson, userInputText, FILE_GEN_SCRIPTS, ROOT);
+        if (fast) {
+          logger.info({ durationMs: Date.now() - nodeStart }, "fast-path xlsx completed");
+          return fast;
+        }
+      }
+    }
+
     const systemPrompt = skills
       ? skills.promptFor("file", SYSTEM_PROMPT, userInputText)
       : SYSTEM_PROMPT;
 
+    // 当前频道绑定的仓库路径（如有），注入任务消息让 LLM 知道去哪里读
+    const channelRepo = repoForChannel(getContext()?.channel);
+    const repoHint = channelRepo
+      ? `\n\n【当前频道绑定仓库】：${channelRepo}。如果用户要求查看/浏览仓库内容，从这个路径开始读取目录和文件。`
+      : "";
+
     // 多步计划：把上游结果拼进 human message，且不传历史消息（避免模型被历史对话干扰）
     const taskMessage = state.planContext
-      ? `用户原始需求：${userInputText}\n\n上一步处理结果（直接基于此内容完成任务，不要询问确认）：\n${state.planContext}`
-      : userInputText;
+      ? `用户原始需求：${userInputText}\n\n上一步处理结果（请直接基于此内容完成任务，不要询问确认）：\n${state.planContext}\n\n【重要】把上述结果里的所有数据条目提取出来，完整填入 gen_xlsx.py 的 rows 字段，不能留空、不能只写示例、不能截断。`
+      : userInputText + repoHint;
 
     try {
       const result = await runReactAgent({
@@ -337,7 +452,14 @@ export function buildFileAgentNode(llm: LLMClient, skills?: SkillContext) {
         finalReplySnippet: finalReply.slice(0, 120),
       }, "completed");
 
-      return { subAgentResult: reactOutput, finalReply, attachmentPaths: generatedPaths };
+      // 只有真正生成了文件才用 finalReply（passthrough）；
+      // 纯读取/探索任务走 subAgentResult → supervisor compose，详细内容会存进对话历史
+      const hasFinalFiles = generatedPaths.length > 0;
+      return {
+        subAgentResult: hasFinalFiles ? reactOutput : (reactOutput || toolOutputs),
+        finalReply: hasFinalFiles ? finalReply : "",
+        attachmentPaths: generatedPaths,
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ durationMs: Date.now() - nodeStart, err: msg }, "failed");

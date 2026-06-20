@@ -22,8 +22,10 @@ function stateOf(text: string) {
     attachmentUrls: [],
     attachmentPaths: [],
     workflowProgress: null,
+    candidateAgents: [],
     pendingPlan: [],
     planContext: "",
+    capabilitiesReason: "" as const,
   };
 }
 
@@ -67,17 +69,19 @@ describe("router — single-step classifier result", () => {
 });
 
 describe("router — multi-step plan", () => {
-  it("vision→file→slack plan → pendingPlan set, intent unknown", async () => {
+  it("vision→file→slack plan → candidateAgents set (unordered), pendingPlan empty, intent unknown", async () => {
     const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file", "slack"], confidence: 0.92 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片做成excel发给我")));
     expect(out.intent).toBe("unknown");
-    expect(out.pendingPlan).toEqual(["vision", "file", "slack"]);
+    expect(out.candidateAgents).toEqual(["vision", "file", "slack"]);
+    expect(out.pendingPlan).toEqual([]);
   });
 
-  it("vision→file plan → pendingPlan set", async () => {
+  it("vision→file plan → candidateAgents set, pendingPlan empty", async () => {
     const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file"], confidence: 0.89 }) });
     const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片然后存成文件")));
-    expect(out.pendingPlan).toEqual(["vision", "file"]);
+    expect(out.candidateAgents).toEqual(["vision", "file"]);
+    expect(out.pendingPlan).toEqual([]);
   });
 });
 

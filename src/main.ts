@@ -32,6 +32,9 @@ const integrations = new IntegrationRegistry();
 
 // graph 在 integrations.initialize() 之后才构建
 let graph: ReturnType<typeof buildGraph> | null = null;
+// 进程启动时间（秒级 Unix 时间戳）。早于此时间的 Slack 消息一律丢弃，
+// 避免进程重启后把积压的旧消息当新消息处理。
+const BOOT_TIME_SEC = Math.floor(Date.now() / 1000);
 
 if (process.env.SLACK_BOT_TOKEN) {
   const socketMode = Boolean(process.env.SLACK_APP_TOKEN);
@@ -41,6 +44,7 @@ if (process.env.SLACK_BOT_TOKEN) {
     eventHandler: socketMode
       ? {
             onMention: async ({ textClean, user, channel, ts, threadTs, imageUrls }) => {
+              if (parseFloat(ts) < BOOT_TIME_SEC) return; // 启动前的积压消息，丢弃
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();
@@ -133,6 +137,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               });
             },
             onMessage: async ({ text, user, channel, ts, imageUrls }) => {
+              if (parseFloat(ts) < BOOT_TIME_SEC) return; // 启动前的积压消息，丢弃
               if (!graph) return "系统尚未就绪，请稍后再试。";
               const sessionId = newSessionId();
               const startTime = Date.now();

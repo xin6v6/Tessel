@@ -80,11 +80,30 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
       return { subAgentResult: "未找到用户消息，无法识别图片。" };
     }
 
-    // 收集图片 URL：附件（Slack 注入）+ 文本里的链接
+    // 收集图片 URL：附件（Slack 注入）+ 文本里的链接。
+    // 当前消息没有图片时，向历史回溯找最近一条带图的 HumanMsg（用户说"重新尝试"等场景）。
     // Slack 附件走私有 url_private（files.slack.com），不走 isSafeImageUrl 过滤，
     // 因为它必须用 token 访问且来源可信；只对文本里提取的公开 URL 做 SSRF 校验。
-    const attachedUrls = extractImageUrls(lastUserMsg);
-    const textUrls = extractUrlsFromText(lastUserMsg.content).filter(isSafeImageUrl);
+    let attachedUrls = extractImageUrls(lastUserMsg);
+    let textUrls = extractUrlsFromText(lastUserMsg.content).filter(isSafeImageUrl);
+
+    if (attachedUrls.length === 0 && textUrls.length === 0) {
+      // 当前消息无图，向历史回溯（跳过最后一条，从倒数第二条开始）
+      const reversed = [...state.messages].reverse();
+      for (let i = 1; i < reversed.length; i++) {
+        const m = reversed[i]!;
+        if (!isHuman(m)) continue;
+        const histAttached = extractImageUrls(m);
+        const histText = extractUrlsFromText(m.content).filter(isSafeImageUrl);
+        if (histAttached.length > 0 || histText.length > 0) {
+          attachedUrls = histAttached;
+          textUrls = histText;
+          logger.info({ foundAt: i, urlCount: histAttached.length + histText.length }, "image found in history");
+          break;
+        }
+      }
+    }
+
     const allUrls = [...new Set([...attachedUrls, ...textUrls])];
 
     if (allUrls.length === 0) {
@@ -104,6 +123,17 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
       }
 
       const userPrompt = lastUserMsg.content.trim() || "请描述这张图片的内容。";
+
+      // 如果后续还有 file/slack 等处理步骤，提示 vision 输出结构化数据而非散文
+      const pendingPlan = state.pendingPlan ?? [];
+      const hasDownstreamFileStep = pendingPlan.slice(1).some((s) => s === "file" || s === "slack");
+      const structuredHint = hasDownstreamFileStep
+        ? "\n\n【结构化输出要求】本次识别结果将被下游步骤（文件生成/发送）直接使用。" +
+          "如果图片包含表格、列表或结构化数据，必须以 JSON 格式输出，格式为：\n" +
+          '{"type":"table","headers":["列1","列2",...],"rows":[["值1","值2",...],...]}\n' +
+          "如果图片内容无法结构化，则输出纯文本描述。不要在 JSON 外加任何解释。"
+        : "";
+
       const visionMsg = humanMsgWithImages(userPrompt, resolvedUrls);
 
       const reply = await visionClient.invoke([
@@ -112,7 +142,8 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
           "如果用户没有特定问题，默认描述图片的主要内容、场景和关键信息。\n\n" +
           "【硬性约束】如果你没有看到任何图片，或图片加载失败、内容不可见，" +
           "必须回复「图片加载失败，无法识别，请重新上传」，绝对禁止猜测或编造图片内容。\n\n" +
-          "【输出约束】直接输出结果，不要输出 <think>、<thinking> 等内部推理过程。",
+          "【输出约束】直接输出结果，不要输出 <think>、<thinking> 等内部推理过程。" +
+          structuredHint,
         ),
         visionMsg,
       ]);
@@ -124,7 +155,7 @@ export function buildVisionAgentNode(visionClient: LLMClient) {
         outputSnippet: output.slice(0, 120),
       }, "completed");
 
-      return { finalReply: output };
+      return { subAgentResult: output };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ durationMs: Date.now() - nodeStart, err: msg }, "vision failed");

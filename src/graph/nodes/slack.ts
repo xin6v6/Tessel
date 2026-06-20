@@ -88,13 +88,15 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
     const inputSnippet = userInputText.slice(0, 120);
     logger.info({ inputSnippet }, "started");
 
-    // skill 选择性注入:绑定给 slack 的 skill 进 menu,命中的注入正文。
-    // 没绑定 / 没命中 → 等价于原 SYSTEM_PROMPT,正常对话零影响。
-    const systemPrompt = skills
-      ? skills.promptFor("slack", SYSTEM_PROMPT, userInputText)
-      : SYSTEM_PROMPT;
-
     const ctx = getContext();
+    // 把当前用户的 Slack ID 注入 system prompt，让 LLM 能回答"我的 ID 是什么"
+    const callerIdLine = ctx?.externalId
+      ? `\n\n当前向你发指令的用户 Slack ID 是：${ctx.externalId}。被问到"我的 Slack ID / user ID 是什么"时直接告知。`
+      : "";
+    const basePrompt = SYSTEM_PROMPT + callerIdLine;
+    const systemPrompt = skills
+      ? skills.promptFor("slack", basePrompt, userInputText)
+      : basePrompt;
 
     // 多步计划模式：跳过 ReAct 循环，只返回通知文字（由入口层作为文件 initialComment 发出）
     if (state.planContext && ctx?.channel) {

@@ -52,8 +52,10 @@ function freshState(text: string): GraphStateType {
     attachmentUrls: [],
     attachmentPaths: [],
     workflowProgress: null,
+    candidateAgents: [],
     pendingPlan: [],
     planContext: "",
+    capabilitiesReason: "" as const,
   };
 }
 
