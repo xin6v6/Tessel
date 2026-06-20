@@ -63,23 +63,23 @@ export function buildRouterNode({ classifier = new ClassifierClient() }: RouterD
       return { intent: "chat", pendingPlan: [] };
     }
 
-    // 单步计划：走旧路径（intent），保持 supervisor 兼容
+    // 单步：走旧路径（intent），supervisor 直接路由
     if (rawPlan.length === 1) {
       const intent = rawPlan[0]!;
       logger.info(
         { intent, confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
         `router → ${intent}`,
       );
-      return { intent, pendingPlan: [] };
+      return { intent, candidateAgents: [], pendingPlan: [] };
     }
 
-    // 多步计划：写入 pendingPlan，intent 置 unknown（supervisor 读 pendingPlan 优先）
+    // 多步：写入 candidateAgents（无序集合），让 supervisor LLM 决定执行顺序
     if (rawPlan.length > 1) {
       logger.info(
-        { plan: rawPlan, confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
-        `router → plan [${rawPlan.join("→")}]`,
+        { candidates: rawPlan, confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
+        `router → candidates [${rawPlan.join(",")}]`,
       );
-      return { intent: "unknown", pendingPlan: rawPlan };
+      return { intent: "unknown", candidateAgents: rawPlan, pendingPlan: [] };
     }
 
     // 分类失败 fallback
@@ -87,6 +87,6 @@ export function buildRouterNode({ classifier = new ClassifierClient() }: RouterD
       { confidence: result?.confidence, durationMs: Date.now() - start, snippet: text.slice(0, 80) },
       "router → unknown (fallback)",
     );
-    return { intent: "unknown", pendingPlan: [] };
+    return { intent: "unknown", candidateAgents: [], pendingPlan: [] };
   };
 }

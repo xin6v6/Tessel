@@ -465,12 +465,22 @@ export function buildSupervisorNode(
           };
         }
 
-        // 没找到合适 agent
-        logger.info({ inputSnippet }, "unknown_lookup → no agent found, logging unknown");
+        // 没找到合适 agent → fallback 到 chat 直接回复（普通对话问题不应静默失败）
+        logger.info({ inputSnippet }, "unknown_lookup → no agent found, falling back to chat");
         void logRoutingUnknown(inputSnippet, source);
-        const noAgentMsg = aiMsg("抱歉，没有找到能处理这个请求的工具。如果你有更具体的需求（如操作 Slack、读写文件、生成图片等），可以告诉我。");
+        const fallbackChannel = getContext()?.channel;
+        const chatFallbackBase = `你是一个有帮助的个人助手。只基于对话中已有的事实回答用户的问题；没有证据支撑的内容不要说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${channelRepoLine(fallbackChannel)}${REPLY_GUARDRAILS}`;
+        const chatFallbackSystem = skills
+          ? skills.promptFor("supervisor", chatFallbackBase, inputSnippet)
+          : chatFallbackBase;
+        const chatFallbackReply = await llm.invoke([
+          systemMsg(chatFallbackSystem),
+          ...historyForPrompt(messages),
+        ]);
+        const safeChatFallback = sanitizeReply(chatFallbackReply);
+        logger.info({ replySnippet: typeof safeChatFallback.content === "string" ? safeChatFallback.content.slice(0, 120) : "" }, "unknown_lookup → chat fallback composed");
         return {
-          messages: [noAgentMsg],
+          messages: [safeChatFallback],
           next: "__end__",
           subAgentResult: "",
           capabilitiesReason: "",
