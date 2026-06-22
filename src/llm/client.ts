@@ -182,7 +182,8 @@ export class LLMClient {
       /deepseek-v[4-9]/.test(m) ||
       /deepseek-r\d/.test(m) ||
       /qwq/.test(m) ||
-      /deepseek-prover/.test(m)
+      /deepseek-prover/.test(m) ||
+      /qwen3/.test(m)
     );
   }
 

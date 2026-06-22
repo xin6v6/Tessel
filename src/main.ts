@@ -1,6 +1,7 @@
 import { buildGraph } from "./graph/index.ts";
 import {
   invokeOrResume,
+  resumeWithBotReply,
   extractReply,
   extractTokens,
   extractRoute,
@@ -229,6 +230,29 @@ if (process.env.SLACK_BOT_TOKEN) {
                   return "❌ 处理出错，请稍后重试";
                 }
               });
+            },
+            onBotMessage: async ({ text, channel, threadTs, ts }) => {
+              if (!graph) return;
+              // 先用 thread 精确匹配，找不到再按 channel 扫描 workflow_wait
+              const threadId = threadTs
+                ? `slack:thread:${channel}:${threadTs}`
+                : `slack:channel:${channel}`;
+              const cleanText = text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
+              logger.info({ threadId, replySnippet: cleanText.slice(0, 80), ts }, "slack:bot_reply received");
+              const result = await resumeWithBotReply(graph, threadId, cleanText, channel, ts);
+              if (!result) return;
+              // workflow 跑完后把结果发回原始 thread
+              const reply = extractReply(result);
+              logger.info({ replySnippet: reply.slice(0, 120), hasInterrupt: !!result.__interrupt__ }, "onBotMessage: reply extracted");
+              if (reply && reply !== "（无回复）") {
+                const replyThreadTs = threadTs ?? ts;
+                await slackIntegration.getClient().sendMessage({
+                  channel,
+                  threadTs: replyThreadTs,
+                  text: reply,
+                });
+                logger.info({ channel, replyThreadTs }, "onBotMessage: reply sent to slack");
+              }
             },
           }
         : undefined,

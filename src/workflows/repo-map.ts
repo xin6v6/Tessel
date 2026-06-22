@@ -48,3 +48,41 @@ export function repoForChannel(channel: string | undefined): string | undefined 
   if (!channel) return undefined;
   return parseRepoMap(process.env.CODING_REPOS).get(channel);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 频道 → recipe tag 映射
+//
+// 配置：WORKFLOW_CHANNELS="<channelId>:<recipeTag>,<channelId>:<recipeTag>"
+//   例：WORKFLOW_CHANNELS="C0AMM0FLV0B:test,C0123ABC:coding"
+// ────────────────────────────────────────────────────────────────────────────
+
+export function parseWorkflowChannels(raw: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!raw) return map;
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(":");
+    if (sep <= 0) {
+      logger.warn({ entry: trimmed }, "WORKFLOW_CHANNELS 条目格式错误（应为 channelId:recipeTag），已跳过");
+      continue;
+    }
+    const channel = trimmed.slice(0, sep).trim();
+    const tag = trimmed.slice(sep + 1).trim();
+    if (!channel || !tag) {
+      logger.warn({ entry: trimmed }, "WORKFLOW_CHANNELS 条目 channel/tag 为空，已跳过");
+      continue;
+    }
+    map.set(channel, tag);
+  }
+  return map;
+}
+
+/**
+ * 按频道 id 查对应的 recipe tag。查不到返回 undefined。
+ * 每次读 process.env 重新解析，避免缓存导致改 env 不生效。
+ */
+export function recipeTagForChannel(channel: string | undefined): string | undefined {
+  if (!channel) return undefined;
+  return parseWorkflowChannels(process.env.WORKFLOW_CHANNELS).get(channel);
+}

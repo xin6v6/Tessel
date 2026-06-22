@@ -8,6 +8,8 @@ export interface SlackEventHandler {
   onMessage?: (event: SlackMessageEvent) => Promise<string | void>;
   /** 收到 App Mention（@Bot）时触发 */
   onMention?: (event: SlackMentionEvent) => Promise<string | void>;
+  /** 收到来自特定 bot（如被测 agent）的消息时触发，用于 workflow_wait resume */
+  onBotMessage?: (event: SlackMessageEvent) => Promise<void>;
 }
 
 export interface SlackMessageEvent {
@@ -100,24 +102,43 @@ export class SlackReceiver {
         if (
           !("user" in message) ||
           !message.user ||
-          message.subtype === "bot_message" ||
           message.user === this.botUserId
         ) {
           return;
         }
 
         const rawMsg = message as unknown as Record<string, unknown>;
-        const event: SlackMessageEvent = {
-          text: ("text" in message ? message.text : "") ?? "",
-          user: message.user as string,
-          channel: message.channel,
-          ts: message.ts,
-          threadTs: ("thread_ts" in message ? (message.thread_ts as string) : undefined) ?? undefined,
-          imageUrls: this.extractImageUrls(rawMsg),
-        };
+        const text = ("text" in message ? (message.text as string) : "") ?? "";
+        const channel = message.channel as string;
+        const ts = message.ts as string;
+        const threadTs = ("thread_ts" in message ? (message.thread_ts as string) : undefined) ?? undefined;
+        const imageUrls = this.extractImageUrls(rawMsg);
 
-        logger.debug({ user: event.user, channel: event.channel, text: event.text, imageCount: event.imageUrls?.length ?? 0 }, "assistant message received");
+        // assistant channel 里用户发的消息：如果包含 @botId 则走 onMention，否则走 onMessage（DM 语义）
+        const mentionPattern = this.botUserId ? new RegExp(`<@${this.botUserId}>`) : null;
+        if (mentionPattern && mentionPattern.test(text)) {
+          const textClean = text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
+          const mentionEvent: SlackMentionEvent = {
+            text,
+            textClean,
+            user: message.user as string,
+            channel,
+            ts,
+            threadTs,
+            imageUrls,
+          };
+          logger.debug({ user: mentionEvent.user, text: textClean }, "mention received (via assistant channel)");
+          await setStatus("评估中...");
+          const reply = await this.handler.onMention?.(mentionEvent);
+          await setStatus("");
+          if (reply) {
+            await say({ text: reply });
+          }
+          return;
+        }
 
+        const event: SlackMessageEvent = { text, user: message.user as string, channel, ts, threadTs, imageUrls };
+        logger.debug({ user: event.user, channel: event.channel, text: event.text }, "assistant message received");
         await setStatus("评估中...");
         const reply = await this.handler.onMessage?.(event);
         await setStatus("");
@@ -133,6 +154,26 @@ export class SlackReceiver {
     // 尝试用 assistant.threads.setStatus 显示原生状态气泡（需要频道已配置为 Assistant channel）。
     // 若 API 返回错误则静默忽略，不影响正常回复流程。
     this.app.event("app_mention", async ({ event, client }) => {
+      const evRaw = event as unknown as Record<string, unknown>;
+      // Slack 在 assistant channel 里会给所有消息（包括用户发的）附上 bot_profile，
+      // 所以不能单靠 bot_profile 判断是否来自 bot。
+      // 真正来自 bot 的消息：没有 user 字段，或者 user 等于 bot 自己。
+      // 用户发的 mention：有 user 字段且不等于 bot 自己。
+      const isFromBot = !event.user || event.user === this.botUserId;
+      if (isFromBot) {
+        // 来自其他 bot 的 mention → onBotMessage（workflow_wait resume）
+        if (evRaw["bot_profile"] && this.handler.onBotMessage) {
+          await this.handler.onBotMessage({
+            text: event.text ?? "",
+            user: event.user ?? "unknown",
+            channel: event.channel,
+            ts: event.ts,
+            threadTs: event.thread_ts ?? undefined,
+          });
+        }
+        return;
+      }
+
       // 去掉 <@BOTID> 前缀
       const textClean = event.text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
       const threadTs = event.thread_ts ?? event.ts;

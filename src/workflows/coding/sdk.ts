@@ -102,6 +102,8 @@ export async function runStageTask(opts: StageTaskOptions): Promise<StageTaskRes
         allowDangerouslySkipPermissions: true,
         maxTurns,
         abortController: abort,
+        // 优先用 SDK_MODEL env，否则回退 ANTHROPIC_MODEL，最后默认 claude-haiku-4-5
+        model: process.env.SDK_MODEL ?? process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001",
       },
     })) {
       if (msg.type === "result") {
