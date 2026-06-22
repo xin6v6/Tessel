@@ -3,21 +3,15 @@ import {
   X, User, Bot, BrainCircuit, MessageSquare, Search, Wrench, Settings2,
   Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck, ThumbsUp,
   GitBranch, Database, ScrollText, ChevronRight, Code2, Split, Puzzle, Cpu,
+  ChevronLeft, CheckCircle2, RefreshCw, Pause,
 } from 'lucide-react';
 
 // ────────────────────────────────────────────────────────────────────────────
-// 分层纵向 DAG（Mermaid / n8n 风格）。
+// 分层纵向 DAG。主图只展示 6 层架构（无 workflow stages）。
+// 点击 Recipe 库节点展开侧面板，列出所有 recipe 及其 stages。
 //
-// 每个节点声明 { layer, col }，坐标由布局引擎按"层 → y、列 → x"自动计算，
-// 边用正交折线（曼哈顿布线）连接，避免手摆坐标导致的斜穿与交叉。
-//
-// 架构要点（用户反馈后定稿）：
-//   · Supervisor 只对话/路由/整合，保持纯粹。
-//   · Workflow Runner 是【通用】多阶段调度器，不绑定"开发"。coding 只是它的
-//     一份 workflow 定义（stages + 审批点 + 重试规则）。以后加新流程只需加
-//     一份定义，无需新增节点 / 改图。
-//   · 当前装载的 coding workflow：需求 → 编程 → 测试 → 审核 → 提交，
-//     仅在"需求"后停一次等人工确认，之后自动连跑。
+// Recipe 系统设计为可扩展：RECIPES 数组 → 每条 recipe 独立描述
+//   stages / approveAfter / retryTo / maxRetries。
 // ────────────────────────────────────────────────────────────────────────────
 
 type NodeType =
@@ -29,10 +23,12 @@ interface GNode {
   type: NodeType;
   label: string;
   sub?: string;
-  layer: number;      // 行（从 0 顶部往下）
-  col: number;        // 列内位置（用于同层水平分布，单位：列槽）
+  layer: number;
+  col: number;
   Icon: React.ComponentType<{ size?: number; className?: string }>;
   prompt?: string;
+  /** true = clicking opens the recipes drawer instead of detail panel */
+  isRecipeLib?: boolean;
 }
 
 interface GEdge {
@@ -42,10 +38,66 @@ interface GEdge {
   label?: string;
 }
 
+// ─── Recipe 数据（可扩展）────────────────────────────────────────────────────
+
+interface RecipeStage {
+  id: string;
+  label: string;
+  sub: string;
+  Icon: React.ComponentType<{ size?: number; className?: string }>;
+  readonly?: boolean;
+  isPlan?: boolean;
+}
+
+interface RecipeDef {
+  name: string;
+  tag: string;
+  color: string;
+  description: string;
+  stages: RecipeStage[];
+  approveAfter: string[];
+  retryTo?: Record<string, string>;
+  maxRetries: number;
+}
+
+const RECIPES: RecipeDef[] = [
+  {
+    name: 'coding',
+    tag: 'coding',
+    color: '#0ea5e9',
+    description: '在指定仓库执行开发任务：看需求、改代码、跑测试、自审，经人工确认需求后自动完成。适用于改 bug、加功能、重构等需要真实读写代码的请求。',
+    approveAfter: ['requirement'],
+    retryTo: { test: 'code', review: 'code' },
+    maxRetries: 2,
+    stages: [
+      { id: 'requirement', label: '需求分析', sub: '只读 · 产出 plan', Icon: ClipboardList, readonly: true, isPlan: true },
+      { id: 'code',        label: '编程',     sub: '读写文件',          Icon: FileCode },
+      { id: 'test',        label: '测试',     sub: '只跑不改',          Icon: FlaskConical, readonly: true },
+      { id: 'review',      label: '审核',     sub: '自审 diff',         Icon: ShieldCheck, readonly: true },
+      { id: 'commit',      label: '提交推送', sub: 'branch + push',     Icon: GitBranch },
+    ],
+  },
+  {
+    name: 'testing',
+    tag: 'testing',
+    color: '#8b5cf6',
+    description: '针对已有代码编写或完善测试：分析覆盖率、补充测试用例、运行验证，无需改动业务代码。',
+    approveAfter: ['analysis'],
+    retryTo: { verify: 'write' },
+    maxRetries: 2,
+    stages: [
+      { id: 'analysis', label: '覆盖率分析', sub: '只读 · 找缺口', Icon: ClipboardList, readonly: true, isPlan: true },
+      { id: 'write',    label: '编写测试',   sub: '只写测试文件',  Icon: FileCode },
+      { id: 'verify',   label: '验证通过',   sub: '跑全套测试',    Icon: FlaskConical, readonly: true },
+      { id: 'commit',   label: '提交推送',   sub: 'branch + push', Icon: GitBranch },
+    ],
+  },
+];
+
 // ─── 节点 ────────────────────────────────────────────────────────────────────
 
 const NODES: GNode[] = [
-  // L0 — 入口 / 出口（居中）
+  // L0 — 入口 / 出口
   { id: 'slack_in', type: 'entry', label: '用户消息', sub: 'Slack / CLI REPL',
     layer: 0, col: 3.5, Icon: User,
     prompt:
@@ -76,7 +128,7 @@ CLI REPL
 
 文件  src/integrations/slack/*、src/main.ts` },
 
-  // L1 — 状态（右侧）
+  // L1 — State（右侧）
   { id: 'state', type: 'state', label: 'Graph State', sub: 'Graph State + Store',
     layer: 1, col: 6.8, Icon: Database,
     prompt:
@@ -163,9 +215,9 @@ Router 自动回退 chat —— 服务挂掉不影响主流程。
 
 文件  src/graph/nodes/supervisor.ts` },
 
-  // L3 — sub-agent 横排（slack / web / mcp / capabilities / workflow）
+  // L3 — sub-agents
   { id: 'slack_agent', type: 'agent', label: 'Slack Agent', sub: 'ReAct + Finalizer',
-    layer: 3, col: 0.5, Icon: MessageSquare,  // agents: 0.5 / 1.8 / 3.1 / 4.4 / 6.2
+    layer: 3, col: 0.5, Icon: MessageSquare,
     prompt:
 `Slack 工具 Agent（ReAct）
 
@@ -204,68 +256,67 @@ Router 自动回退 chat —— 服务挂掉不影响主流程。
     prompt:
 `Workflow Runner —— 【通用】多阶段任务调度器
 
-不绑定"开发"
+不绑定任何具体流程
   本节点不认识"编程 / 测试"这些具体阶段。它只做通用的事：
-    · 从 Recipe 库取一份已记录好的流程（不再每次靠 LLM 临时决定顺序）
+    · 从 Recipe 库取一份已记录好的流程
     · 按 recipe 依次调度 stage sub-agent
     · 判断各 stage 结果（pass / fail）、管重试计数
     · 在 recipe 指定的 stage 后 interrupt() 等人工审批
 
-recipe = 一份可复用、可进化的流程配方
-  { tag, stages: [...], approveAfter: [...], maxRetries }
-  · LLM 只判断任务属于哪个 tag → 取对应 recipe；命不中才临时决策
-  · coding 只是【第一个】recipe；加新流程 = 加一份 recipe，不改图
-  · 运行时按成败自动优化（如某 stage 老失败 → 提高重试上限）
-
-触发
-  Supervisor 路由 next = workflow；仅白名单用户放行。
+加新流程 = 新建一份 recipe 文件，不改本节点。
 
 目标仓库 = 按频道选（一频道一项目）
-  CODING_REPOS="<channelId>:<repoPath>,…"，runner 用
-  repoForChannel(ctx.channel) 选仓库。没映射的频道（含 DM）
-  直接拒绝、不回退默认 —— 避免在错频道误改。
-
-拆成两个节点（避免审批 resume 重跑）
-  本节点跑 stage，遇审批 plan stage 就落盘 workflowProgress 并
-  return，交给 workflow_approval 做 interrupt。中途暂停的节点
-  resume 时会从头重跑，拆开后 plan 产出已落盘 → 不重跑。
-
-跨后端
-  stage sub-agent 底层用 Claude Agent SDK（headless）。
-  本地真 Claude；生产 DeepSeek（ANTHROPIC_BASE_URL 切换）。
+  CODING_REPOS="<channelId>:<repoPath>,…"
 
 文件  src/graph/nodes/workflow-runner.ts
-      src/workflows/recipe-store.ts、src/workflows/repo-map.ts` },
+      src/workflows/recipe-store.ts` },
+
+  // L2 — Recipe 库（Supervisor 右侧，与 workflow 连线）
   { id: 'recipes', type: 'state', label: 'Recipe 库', sub: '流程配方 · 可复用',
     layer: 2, col: 6.8, Icon: ClipboardList,
+    isRecipeLib: true,
+    prompt: '' },
+];
+
+// ─── 边 ──────────────────────────────────────────────────────────────────────
+
+const EDGES: GEdge[] = [
+  { from: 'slack_in',   to: 'router',      kind: 'flow',   label: 'invoke' },
+  { from: 'router',     to: 'classifier',  kind: 'aux',    label: 'classify' },
+  { from: 'classifier', to: 'router',      kind: 'aux',    label: 'label+conf' },
+  { from: 'router',     to: 'supervisor',  kind: 'flow',   label: 'intent' },
+  { from: 'supervisor', to: 'slack_out',   kind: 'flow',   label: 'next=__end__' },
+  { from: 'state',      to: 'supervisor',  kind: 'aux',    label: '读写 State' },
+
+  { from: 'supervisor', to: 'slack_agent',  kind: 'route' },
+  { from: 'supervisor', to: 'web_agent',    kind: 'route' },
+  { from: 'supervisor', to: 'mcp_agent',    kind: 'route' },
+  { from: 'supervisor', to: 'capabilities', kind: 'route' },
+  { from: 'supervisor', to: 'workflow',     kind: 'route' },
+  { from: 'workflow',   to: 'supervisor',   kind: 'return' },
+
+  { from: 'slack_agent', to: 'slack_tools', kind: 'aux', label: 'tool' },
+
+  { from: 'slack_agent', to: 'skills', kind: 'aux', label: 'skill 注入' },
+  { from: 'web_agent',   to: 'skills', kind: 'aux' },
+  { from: 'mcp_agent',   to: 'skills', kind: 'aux' },
+  { from: 'supervisor',  to: 'skills', kind: 'aux' },
+
+  { from: 'recipes', to: 'workflow', kind: 'aux', label: '取 recipe' },
+];
+
+// ─── Tool 层（Slack Agent 下方，Skills 同层）────────────────────────────────
+
+const TOOL_NODES: GNode[] = [
+  { id: 'slack_tools', type: 'tool', label: 'Slack Tools', sub: 'API wrappers',
+    layer: 4, col: 0.5, Icon: Wrench,
     prompt:
-`Recipe 库 —— 记录好的流程，供复用
+`Slack 工具集（挂在 Slack Agent）
 
-为什么有它
-  Workflow Runner 早期靠 LLM 临时决定阶段顺序。把跑通的好流程
-  记录下来，下次同类任务直接复用 —— 省 LLM 决策、稳定可靠。
+  slack_send_message / get_messages / list_channels /
+  search_messages / notify / list_contacts …
 
-一份 recipe（src/workflows/recipes/*.ts，进版本控制、可手改）
-  { tag: 'bugfix' | 'feature' | …,    // 任务类型标签，用于匹配
-    stages: ['需求','编程','测试','审核'],
-    approveAfter: ['需求'],            // 哪些 stage 后停下等人工审批
-    maxRetries: 2 }
-
-匹配
-  LLM 只判断任务属于哪个 tag → 取对应 recipe；命不中才临时决策。
-
-统计观测（不自动改 recipe）
-  每次运行把各 stage 的成功 / 重试 / 耗时记录到
-  data/workflow-stats.sqlite（纯观测、不进版本控制）。
-
-⚠ 本期不做自动优化
-  "哪步该优化"的判断策略尚未定 —— 先只攒统计数据，
-  要优化就人工改 recipes/*.ts。将来想清楚再决定是否加自动优化。
-
-文件  src/workflows/recipe-store.ts
-      src/workflows/recipes/*.ts` },
-
-  // L4 — Skill 层（agent 中间正下方）
+文件  src/integrations/slack/tools.ts` },
   { id: 'skills', type: 'skill', label: 'SkillContext', sub: '选择性注入',
     layer: 4, col: 2.5, Icon: Puzzle,
     prompt:
@@ -279,176 +330,21 @@ recipe = 一份可复用、可进化的流程配方
        → 当轮把该 skill 完整正文注入 system prompt
     3. 未命中 → 仅菜单，零额外 token，不污染正常对话
 
-SKILL.md 格式
-  ---
-  name: code-review
-  description: 审查 git diff，找正确性 bug。当需要审代码改动时使用。
-  ---
-  # 正文（命中时才用到的完整指令）
-  你是一个严格的代码审核员。……
-
 _bindings.json
   { "supervisor": ["commit-msg"], "slack": ["code-review"] }
-  未列出的 agent 看不到任何 skill。
-
-Workflow 的 skill
-  stage 通过 StageDef.skills 无条件注入，不走 bindings。
-  skill 缺失时跳过（记日志），是增强不是依赖。
 
 UI 管理
   /skills 页面：CRUD + agent×skill 绑定矩阵，改完即时生效（热重载）。
 
-文件  src/skills/registry.ts、inject.ts、bindings.ts
-      skills/*/SKILL.md（真相源）
-      skills/_bindings.json` },
-
-  // L4 — 工具层（Slack Agent 正下方）
-  { id: 'slack_tools', type: 'tool', label: 'Slack Tools', sub: 'API wrappers',
-    layer: 4, col: 0.5, Icon: Wrench,
-    prompt:
-`Slack 工具集（挂在 Slack Agent）
-
-  slack_send_message / get_messages / list_channels /
-  search_messages / notify / list_contacts …
-
-文件  src/integrations/slack/tools.ts` },
-
-  // L5 — coding workflow 的 stages
-  { id: 'wf_requirement', type: 'stage', label: '需求分析', sub: 'stage · 只读',
-    layer: 5, col: 3.8, Icon: ClipboardList,
-    prompt:
-`Stage · 需求分析（只读）
-
-allowedTools  Read / Glob / Grep
-产出  plan → 回 Runner
-
-唯一人工审批点
-  本 stage 跑完，Runner interrupt() 把 plan 发回 Slack 等你
-  确认需求。同意后才进编程；之后自动连跑不再打断。
-
-为什么先审需求
-  需求理解错，后面全白做 —— 先对齐再动手。
-
-文件  src/graph/nodes/workflow/stage-runner.ts` },
-  { id: 'wf_code', type: 'stage', label: '编程', sub: 'stage · 改文件',
-    layer: 5, col: 4.9, Icon: FileCode,
-    prompt:
-`Stage · 编程（真实改文件）
-
-allowedTools  Read / Edit / Write / Bash / Glob / Grep
-cwd  按触发频道选（CODING_REPOS 映射，落盘 workflowProgress.cwd）
-护栏  屏蔽 rm -rf / dd / git push（push 受控自跑，不交 SDK）
-
-产出  codeResult → 回 Runner
-回退  测试/审核失败时 Runner 再次派到本 stage（retry < 2）` },
-  { id: 'wf_test', type: 'stage', label: '测试', sub: 'stage · 不改文件',
-    layer: 5, col: 6, Icon: FlaskConical,
-    prompt:
-`Stage · 测试
-
-allowedTools  Read / Bash / Glob / Grep
-跑  bun test 等项目测试命令
-
-结果 → Runner 判断：
-  失败 & retry<2 → 回编程；超限 → 报告；通过 → 审核` },
-  { id: 'wf_review', type: 'stage', label: '审核', sub: 'stage · 自审 diff',
-    layer: 5, col: 7.1, Icon: ShieldCheck,
-    prompt:
-`Stage · 审核
-
-allowedTools  Read / Bash / Glob / Grep
-审  diff + 测试结果，给 verdict
-
-结果 → Runner 判断：
-  不过 & retry<2 → 回编程；通过 → 提交（不再二次审批）` },
-
-  // L5 — 审批 + 提交
-  { id: 'wf_approval', type: 'approval', label: 'workflow_approval', sub: '独立节点 · interrupt',
-    layer: 6, col: 3.8, Icon: ThumbsUp,
-    prompt:
-`审批节点（唯一人工审批点）—— 独立的 graph 节点
-
-为什么独立成节点（不在 workflow 里 interrupt）
-  节点中途暂停时 state 不落盘、resume 时节点从头重跑。
-  若在 workflow 节点里"跑需求→interrupt"，
-  审批后会重跑需求分析（~$0.5-0.8）。拆出本节点：workflow 跑完
-  落盘后交给它，它只做 interrupt（无昂贵操作，重入无副作用）。
-
-机制
-  workflow 落盘 workflowProgress(phase=awaiting_approval) → 本节点
-  interrupt()，图暂停、plan 经 Supervisor 发回 Slack。
-
-恢复（跨两条 Slack 消息）
-  你下一条消息：含"同意/确认/yes" → resume(approved) → 路由回
-  workflow 续跑（已完成 stage 跳过）；否则 → aborted → 放弃。
-
-文件  src/graph/nodes/workflow-runner.ts（buildWorkflowApprovalNode）
-      src/main.ts（审批恢复）` },
-  { id: 'wf_commit', type: 'stage', label: '提交推送', sub: 'branch + push',
-    layer: 6, col: 7.1, Icon: GitBranch,
-    prompt:
-`提交推送（审核通过后由 Runner 触发，无需再审批）
-
-受控 git（Bun.$ 自跑，不交 SDK）
-  checkout -b → add -A → commit（绝不带 Co-Authored-By）→ push -u
-
-目标  新分支 + push，不动 main、不自动开 PR
-结果  分支 / push URL → Runner → Supervisor → Slack
-
-文件  src/workflows/coding/git.ts` },
+文件  src/skills/registry.ts、inject.ts、bindings.ts` },
 ];
 
-// ─── 边 ──────────────────────────────────────────────────────────────────────
+const ALL_NODES = [...NODES, ...TOOL_NODES];
 
-const EDGES: GEdge[] = [
-  // 主流程纵向：入口先过 router 快速分类，再进 supervisor
-  { from: 'slack_in',   to: 'router',      kind: 'flow',   label: 'invoke' },
-  { from: 'router',     to: 'classifier',  kind: 'aux',    label: 'classify' },
-  { from: 'classifier', to: 'router',      kind: 'aux',    label: 'label+conf' },
-  { from: 'router',     to: 'supervisor',  kind: 'flow',   label: 'intent' },
-  { from: 'supervisor', to: 'slack_out',  kind: 'flow',   label: 'next=__end__' },
-  { from: 'state',      to: 'supervisor', kind: 'aux',    label: '读写 State' },
-
-  // Supervisor → sub-agent
-  { from: 'supervisor', to: 'slack_agent',  kind: 'route' },
-  { from: 'supervisor', to: 'web_agent',    kind: 'route' },
-  { from: 'supervisor', to: 'mcp_agent',    kind: 'route' },
-  { from: 'supervisor', to: 'capabilities', kind: 'route' },
-  { from: 'supervisor', to: 'workflow',     kind: 'route' },
-  { from: 'workflow',   to: 'supervisor',   kind: 'return' },
-
-  // agent → 工具
-  { from: 'slack_agent', to: 'slack_tools', kind: 'aux', label: 'tool' },
-
-  // agents → SkillContext（选择性注入）
-  { from: 'slack_agent', to: 'skills', kind: 'aux', label: 'skill 注入' },
-  { from: 'web_agent',   to: 'skills', kind: 'aux' },
-  { from: 'mcp_agent',   to: 'skills', kind: 'aux' },
-  { from: 'supervisor',  to: 'skills', kind: 'aux' },
-
-  // Recipe 库 → Runner（取流程配方）
-  { from: 'recipes', to: 'workflow', kind: 'aux', label: '取 recipe' },
-
-  // Runner → stages（调度）
-  { from: 'workflow', to: 'wf_requirement', kind: 'route', label: '①' },
-  { from: 'workflow', to: 'wf_code',        kind: 'route', label: '②' },
-  { from: 'workflow', to: 'wf_test',        kind: 'route', label: '③' },
-  { from: 'workflow', to: 'wf_review',      kind: 'route', label: '④' },
-
-  // 需求审批：workflow 落盘后交给 workflow_approval（独立节点）interrupt，
-  // 审批通过后路由回 workflow 续跑（已完成 stage 跳过、不重跑）。
-  { from: 'wf_requirement', to: 'wf_approval', kind: 'approval', label: '落盘→审批' },
-  { from: 'wf_approval',    to: 'workflow',    kind: 'return',   label: '同意↩ 续跑' },
-  { from: 'wf_review',      to: 'wf_commit',   kind: 'flow',     label: '通过' },
-  { from: 'wf_test',        to: 'wf_code',     kind: 'retry',    label: '失败↺' },
-  { from: 'wf_review',      to: 'wf_code',     kind: 'retry',    label: '不过↺' },
-];
-
-// ─── 布局引擎（层 → y，列 → x；正交折线）─────────────────────────────────────
-// L0 I/O  L1 Router+Classifier  L2 Supervisor  L3 Agents  L4 Skills  L5 Stages  L6 审批/提交
+// ─── 布局（5 层主图 + tools/skills 层）──────────────────────────────────────
 
 const CANVAS_W = 1400;
-const LAYER_Y = [80, 220, 370, 520, 660, 810, 960];  // 7 层
+const LAYER_Y = [80, 220, 370, 500, 630];  // 5 层
 const COL_W = 160;
 const COL_X0 = 120;
 
@@ -461,21 +357,19 @@ const NODE_R: Record<NodeType, number> = {
   runner: 54, stage: 44, approval: 38, router: 44, skill: 44, classifier: 38,
 };
 
-// ─── 配色（扁平、克制）────────────────────────────────────────────────────────
-
 const FILL: Record<NodeType, string> = {
   entry:      '#3f4756',
   exit:       '#3f4756',
-  supervisor: '#6366f1',  // indigo
-  agent:      '#10b981',  // emerald
-  tool:       '#64748b',  // slate
-  state:      '#06b6d4',  // cyan
-  runner:     '#0ea5e9',  // sky — 通用调度器
-  stage:      '#3b82f6',  // blue — workflow stage
-  approval:   '#ec4899',  // pink — 人工
-  router:     '#a855f7',  // purple — 前置分类
-  skill:      '#f59e0b',  // amber — skill 注入层
-  classifier: '#78716c',  // stone — 本地推理服务
+  supervisor: '#6366f1',
+  agent:      '#10b981',
+  tool:       '#64748b',
+  state:      '#06b6d4',
+  runner:     '#0ea5e9',
+  stage:      '#3b82f6',
+  approval:   '#ec4899',
+  router:     '#a855f7',
+  skill:      '#f59e0b',
+  classifier: '#78716c',
 };
 
 const EDGE_COLOR: Record<GEdge['kind'], string> = {
@@ -497,16 +391,12 @@ const LEGEND_NODES = [
   { c: FILL.agent,      t: 'Sub-Agent' },
   { c: FILL.skill,      t: 'Skill（选择性注入）' },
   { c: FILL.runner,     t: 'Workflow Runner' },
-  { c: FILL.stage,      t: 'Workflow Stage' },
-  { c: FILL.approval,   t: '人工审批' },
   { c: FILL.state,      t: 'State' },
 ];
 const LEGEND_EDGES = [
-  { c: EDGE_COLOR.flow,     dash: false, t: '主流程' },
-  { c: EDGE_COLOR.route,    dash: true,  t: '调度' },
-  { c: EDGE_COLOR.return,   dash: true,  t: '返回' },
-  { c: EDGE_COLOR.retry,    dash: true,  t: '回退重试' },
-  { c: EDGE_COLOR.approval, dash: false, t: '审批' },
+  { c: EDGE_COLOR.flow,   dash: false, t: '主流程' },
+  { c: EDGE_COLOR.route,  dash: true,  t: '调度' },
+  { c: EDGE_COLOR.return, dash: true,  t: '返回' },
 ];
 
 const TYPE_LABEL: Record<NodeType, string> = {
@@ -517,15 +407,12 @@ const TYPE_LABEL: Record<NodeType, string> = {
 };
 
 // ─── 正交折线 ─────────────────────────────────────────────────────────────────
-// 纵向相邻层：竖→横→竖的曼哈顿折线，在中点换列。
-// 同层或反向（retry/return/aux）：带圆角的侧向折线。
 
 function orthPath(
   a: { x: number; y: number }, ra: number,
   b: { x: number; y: number }, rb: number,
   kind: GEdge['kind'],
 ): { d: string; mx: number; my: number } {
-  // 同层横向：retry 弓出曲线，其余直线
   if (Math.abs(a.y - b.y) < 4) {
     const y = a.y;
     const dir = b.x > a.x ? 1 : -1;
@@ -539,26 +426,214 @@ function orthPath(
     const d = `M${x1},${y} L${x2},${y}`;
     return { d, mx: (x1 + x2) / 2, my: y - 10 };
   }
-  // 纵向：a 在上，b 在下（或反向 return）
   const goingDown = b.y > a.y;
   const y1 = a.y + (goingDown ? ra : -ra);
   const y2 = b.y - (goingDown ? rb : -rb);
-  // return 边把中线略微上移，并让竖直段错开一点，避免与同列的 route 边重叠
   const lift = kind === 'return' ? -22 : 0;
   const xOff = kind === 'return' ? 14 : 0;
   const ax = a.x + xOff, bx = b.x + xOff;
   const midY = (y1 + y2) / 2 + lift;
-  // 竖 → 到中线 → 横到目标列 → 竖
   const d = `M${ax},${y1} L${ax},${midY} L${bx},${midY} L${bx},${y2}`;
   return { d, mx: (ax + bx) / 2, my: midY };
 }
 
-// ─── 组件 ─────────────────────────────────────────────────────────────────────
+// ─── Recipe 详情面板 ─────────────────────────────────────────────────────────
+
+function RecipeStageRow({ stage, isApproveAfter, retryTarget }: {
+  stage: RecipeStage;
+  isApproveAfter: boolean;
+  retryTarget?: string;
+}) {
+  return (
+    <div className="relative">
+      <div className="flex items-start gap-3 py-3">
+        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5"
+          style={{ background: stage.readonly ? '#1e293b' : '#0f2035', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <stage.Icon size={15} className={stage.readonly ? 'text-slate-400' : 'text-sky-400'} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-white">{stage.label}</span>
+            <span className="text-[10px] text-slate-500 bg-slate-800/60 px-1.5 py-0.5 rounded">{stage.sub}</span>
+            {stage.readonly && (
+              <span className="text-[10px] text-slate-500 bg-slate-800/40 px-1.5 py-0.5 rounded">只读</span>
+            )}
+            {stage.isPlan && (
+              <span className="text-[10px] text-amber-400/80 bg-amber-500/10 px-1.5 py-0.5 rounded">plan</span>
+            )}
+          </div>
+          {retryTarget && (
+            <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-400/70">
+              <RefreshCw size={10} />失败 → 回退至 <span className="font-medium">{retryTarget}</span>
+            </div>
+          )}
+        </div>
+        {isApproveAfter && (
+          <div className="flex items-center gap-1 text-[11px] text-pink-400 flex-shrink-0 mt-1">
+            <Pause size={11} />人工审批
+          </div>
+        )}
+      </div>
+      {/* connector line */}
+      <div className="absolute left-4 top-12 bottom-0 w-px bg-slate-800" />
+    </div>
+  );
+}
+
+function RecipeCard({ recipe, expanded, onToggle }: {
+  recipe: RecipeDef;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-800/80 overflow-hidden mb-3"
+      style={{ borderLeftColor: recipe.color, borderLeftWidth: 3 }}>
+      <button
+        className="w-full text-left px-4 py-3.5 flex items-center gap-3 hover:bg-slate-800/30 transition"
+        onClick={onToggle}
+      >
+        <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: recipe.color }} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-white">{recipe.name}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-mono"
+              style={{ color: recipe.color, background: `${recipe.color}18` }}>
+              tag:{recipe.tag}
+            </span>
+            <span className="text-[10px] text-slate-500 ml-auto">
+              {recipe.stages.length} stages · max {recipe.maxRetries} retries
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{recipe.description}</p>
+        </div>
+        <ChevronRight size={14} className={`text-slate-500 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+      </button>
+
+      {expanded && (
+        <div className="px-4 pb-1 border-t border-slate-800/60 bg-slate-900/30">
+          <p className="text-[11px] text-slate-400 py-3 leading-relaxed">{recipe.description}</p>
+          <div className="relative">
+            {recipe.stages.map((stage, i) => (
+              <RecipeStageRow
+                key={stage.id}
+                stage={stage}
+                isApproveAfter={recipe.approveAfter.includes(stage.id)}
+                retryTarget={recipe.retryTo?.[stage.id]}
+              />
+            ))}
+          </div>
+          {/* Legend row */}
+          <div className="flex items-center gap-4 py-3 mt-1 border-t border-slate-800/40 text-[10px] text-slate-500">
+            <span className="flex items-center gap-1"><Pause size={9} className="text-pink-400" /> 人工审批点</span>
+            <span className="flex items-center gap-1"><RefreshCw size={9} className="text-amber-400" /> 失败回退</span>
+            <span className="flex items-center gap-1"><CheckCircle2 size={9} className="text-emerald-400" /> 完成提交</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecipesDrawer({ onClose }: { onClose: () => void }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  return (
+    <div className="fixed right-0 top-0 h-full w-[420px] bg-[#0e1119]/97 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60 flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-cyan-500/15 border border-cyan-500/30">
+            <ClipboardList size={18} className="text-cyan-400" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-white leading-tight">Recipe 库</h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">可复用的多阶段流程配方</p>
+          </div>
+        </div>
+        <button onClick={onClose} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition">
+          <X size={16} />
+        </button>
+      </div>
+
+      {/* Intro */}
+      <div className="px-6 py-4 border-b border-slate-800/40 flex-shrink-0">
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          每份 recipe 描述一类任务的完整阶段流程（stages、审批点、重试规则）。
+          Workflow Runner 通用，不绑定任何具体流程 ——
+          加新流程只需在 <span className="font-mono text-slate-300">src/workflows/recipes/</span> 新建文件。
+        </p>
+      </div>
+
+      {/* Recipe list */}
+      <div className="flex-1 overflow-auto px-5 py-4">
+        {RECIPES.map(r => (
+          <RecipeCard
+            key={r.name}
+            recipe={r}
+            expanded={expanded === r.name}
+            onToggle={() => setExpanded(expanded === r.name ? null : r.name)}
+          />
+        ))}
+        <div className="mt-2 px-3 py-3 rounded-lg border border-dashed border-slate-700/50 text-center">
+          <p className="text-[11px] text-slate-600">
+            + 新建 <span className="font-mono">src/workflows/recipes/&lt;name&gt;.ts</span><br/>
+            实现 <span className="font-mono">Recipe</span> 接口后自动注册
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 节点详情面板 ─────────────────────────────────────────────────────────────
+
+function DetailPanel({ node, onClose }: { node: GNode; onClose: () => void }) {
+  return (
+    <div className="fixed right-0 top-0 h-full w-96 bg-[#0e1119]/96 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col">
+      <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: FILL[node.type] }}>
+            <node.Icon size={18} className="text-white" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-white leading-tight">{node.label}</h2>
+            <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-0.5">{TYPE_LABEL[node.type]}</p>
+          </div>
+        </div>
+        <button onClick={onClose} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="px-6 py-5 flex-1 overflow-auto">
+        <pre className="text-xs leading-relaxed text-slate-300 whitespace-pre-wrap font-mono bg-[#080a11] border border-slate-800/80 rounded-xl p-4"
+          style={{ borderLeftColor: FILL[node.type], borderLeftWidth: 2 }}>
+          {node.prompt ?? '该节点暂无说明'}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+// ─── 主组件 ───────────────────────────────────────────────────────────────────
 
 export default function AgentGraph() {
   const [sel, setSel] = useState<string | null>(null);
-  const byId = useMemo(() => Object.fromEntries(NODES.map(n => [n.id, n])), []);
+  const [showRecipes, setShowRecipes] = useState(false);
+
+  const byId = useMemo(() => Object.fromEntries(ALL_NODES.map(n => [n.id, n])), []);
   const selected = sel ? byId[sel] : null;
+
+  function handleNodeClick(n: GNode) {
+    if (n.isRecipeLib) {
+      setShowRecipes(true);
+      setSel(null);
+    } else {
+      setSel(sel === n.id ? null : n.id);
+      setShowRecipes(false);
+    }
+  }
+
+  const CANVAS_H = LAYER_Y[LAYER_Y.length - 1]! + 130;
 
   return (
     <div className="w-full h-screen bg-[#0b0e16] text-slate-200 font-sans flex flex-col overflow-hidden">
@@ -595,7 +670,7 @@ export default function AgentGraph() {
 
       {/* Canvas */}
       <div className="flex-1 overflow-auto flex justify-center">
-        <svg width={CANVAS_W} height={LAYER_Y[LAYER_Y.length - 1]! + 130} className="overflow-visible">
+        <svg width={CANVAS_W} height={CANVAS_H} className="overflow-visible">
           <defs>
             {Object.entries(EDGE_COLOR).map(([k, c]) => (
               <marker key={k} id={`mk-${k}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
@@ -604,10 +679,10 @@ export default function AgentGraph() {
             ))}
           </defs>
 
-          {/* 层带分区标签（最左 gutter 内，水平，不与节点重叠） */}
+          {/* Layer labels */}
           {[
             { i: 0, t: 'I/O' }, { i: 1, t: 'ROUTER' }, { i: 2, t: '调度' },
-            { i: 3, t: 'AGENTS' }, { i: 4, t: 'SKILLS' }, { i: 5, t: 'STAGES' }, { i: 6, t: '审批' },
+            { i: 3, t: 'AGENTS' }, { i: 4, t: 'TOOLS' },
           ].map(({ i, t }) => (
             <text key={t} x={14} y={LAYER_Y[i]! + 4} className="select-none"
               fill="#3a4658" fontSize="10" fontWeight="700" letterSpacing="1">{t}</text>
@@ -635,28 +710,38 @@ export default function AgentGraph() {
           })}
 
           {/* Nodes */}
-          {NODES.map(n => {
+          {ALL_NODES.map(n => {
             const { x, y } = nodeXY(n);
             const r = NODE_R[n.type];
             const isSel = sel === n.id;
+            const isRecipeSel = showRecipes && n.isRecipeLib;
             const fill = FILL[n.type];
             return (
-              <g key={n.id} onClick={() => setSel(isSel ? null : n.id)} style={{ cursor: 'pointer' }}>
-                {isSel && <circle cx={x} cy={y} r={r + 7} fill="none" stroke={fill} strokeWidth="2" opacity="0.5" />}
-                <circle cx={x} cy={y} r={r} fill={fill} opacity={isSel ? 1 : 0.92}
-                  stroke={isSel ? '#fff' : 'rgba(255,255,255,0.12)'} strokeWidth={isSel ? 1.5 : 1} />
-                {/* 图标:圆内偏上 */}
+              <g key={n.id} onClick={() => handleNodeClick(n)} style={{ cursor: 'pointer' }}>
+                {(isSel || isRecipeSel) && (
+                  <circle cx={x} cy={y} r={r + 7} fill="none" stroke={fill} strokeWidth="2" opacity="0.5" />
+                )}
+                <circle cx={x} cy={y} r={r} fill={fill} opacity={(isSel || isRecipeSel) ? 1 : 0.92}
+                  stroke={(isSel || isRecipeSel) ? '#fff' : 'rgba(255,255,255,0.12)'}
+                  strokeWidth={(isSel || isRecipeSel) ? 1.5 : 1} />
+                {n.isRecipeLib && (
+                  <circle cx={x} cy={y} r={r - 4} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" strokeDasharray="3,3" />
+                )}
                 <foreignObject x={x - 13} y={y - r * 0.52} width={26} height={26} style={{ pointerEvents: 'none' }}>
-                  <div className="flex justify-center text-white/95"><n.Icon size={n.type === 'supervisor' || n.type === 'runner' ? 24 : 20} /></div>
+                  <div className="flex justify-center text-white/95">
+                    <n.Icon size={n.type === 'supervisor' || n.type === 'runner' ? 24 : 20} />
+                  </div>
                 </foreignObject>
-                {/* 主标题:圆内居中偏下 */}
                 <text x={x} y={y + r * 0.42} textAnchor="middle"
                   fontSize={n.type === 'supervisor' || n.type === 'runner' ? 13 : 11.5}
                   fontWeight="700" fill="#fff" style={{ pointerEvents: 'none' }}>{n.label}</text>
-                {/* 副标题:移到圆外下方,不再挤在圆内 */}
                 {n.sub && (
                   <text x={x} y={y + r + 15} textAnchor="middle" fontSize="10"
                     fill="rgba(148,163,184,0.85)" style={{ pointerEvents: 'none' }}>{n.sub}</text>
+                )}
+                {n.isRecipeLib && (
+                  <text x={x} y={y + r + 28} textAnchor="middle" fontSize="9"
+                    fill="rgba(6,182,212,0.6)" style={{ pointerEvents: 'none' }}>点击查看详情</text>
                 )}
               </g>
             );
@@ -667,36 +752,16 @@ export default function AgentGraph() {
       {/* Hint */}
       <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
         <div className="flex items-center gap-1.5 text-[11px] text-slate-500 bg-[#11141f] border border-slate-800/60 px-3.5 py-1.5 rounded-full">
-          <ChevronRight size={12} className="text-indigo-400" />点击节点查看详情
+          <ChevronRight size={12} className="text-indigo-400" />点击节点查看详情 · 点击 Recipe 库查看所有流程配方
         </div>
       </div>
 
-      {/* Detail panel */}
-      <div className={`fixed right-0 top-0 h-full w-96 bg-[#0e1119]/96 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col transition-transform duration-300 ${selected ? 'translate-x-0' : 'translate-x-full'}`}>
-        {selected && (
-          <>
-            <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: FILL[selected.type] }}>
-                  <selected.Icon size={18} className="text-white" />
-                </div>
-                <div>
-                  <h2 className="text-base font-semibold text-white leading-tight">{selected.label}</h2>
-                  <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-0.5">{TYPE_LABEL[selected.type]}</p>
-                </div>
-              </div>
-              <button onClick={() => setSel(null)} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition"><X size={16} /></button>
-            </div>
-            <div className="px-6 py-5 flex-1 overflow-auto">
-              <pre className="text-xs leading-relaxed text-slate-300 whitespace-pre-wrap font-mono bg-[#080a11] border border-slate-800/80 rounded-xl p-4"
-                style={{ borderLeftColor: FILL[selected.type], borderLeftWidth: 2 }}>{selected.prompt ?? '该节点暂无说明'}</pre>
-            </div>
-          </>
-        )}
-      </div>
+      {/* Panels */}
+      {showRecipes && <RecipesDrawer onClose={() => setShowRecipes(false)} />}
+      {selected && !showRecipes && <DetailPanel node={selected} onClose={() => setSel(null)} />}
     </div>
   );
 }
 
-// 保留 Code2 引用以备后用（详情图标候选）
 void Code2;
+void ChevronLeft;
