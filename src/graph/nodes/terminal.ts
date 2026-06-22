@@ -70,7 +70,7 @@ const SAFE_COMMANDS = new Set([
   // 容器/编排（查看类子命令由 docker/kubectl 校验逻辑处理）
   "docker", "docker-compose", "podman", "nerdctl",
   "kubectl", "helm",
-  // 运行时版本查询
+  // 运行时（只查版本，-e/-c 等代码执行参数由专项校验处理）
   "node", "bun", "deno", "python3", "python", "ruby", "go", "rustc", "java",
   "npm", "yarn", "pnpm", "pip", "pip3", "gem", "cargo",
   "brew", "apt", "apt-get", "dpkg", "rpm",
@@ -108,7 +108,7 @@ const SAFE_KUBECTL_SUBCOMMANDS = new Set([
   "--version", "--help", "help",
 ]);
 
-// curl/wget 危险 flag（写操作/上传）— 仅匹配独立 token，等号形式由前缀检查处理
+// curl/wget 危险 flag（写操作/上传）— 仅匹配独立 token，等号/无空格形式由前缀/正则检查处理
 const CURL_WRITE_FLAGS = new Set([
   "-X", "--request",       // POST/PUT/DELETE 等
   "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
@@ -123,6 +123,9 @@ const CURL_WRITE_PREFIXES = [
   "--request=", "--data=", "--data-raw=", "--data-binary=", "--data-urlencode=",
   "--json=", "--upload-file=", "--output=",
 ];
+
+// curl -XPOST / -XPUT / -XDELETE 等无空格拼接形式
+const CURL_SHORT_METHOD_RE = /^-X[A-Z]/;
 
 // npm/yarn/pip 等包管理器：只允许查询类子命令（run 执行任意脚本，故排除）
 const SAFE_PKG_SUBCOMMANDS = new Set([
@@ -211,6 +214,24 @@ function validateCommand(input: string): { ok: true } | { ok: false; reason: str
     return { ok: true };
   }
 
+  // find：拒绝 -exec / -execdir（可执行任意命令）
+  if (bin === "find") {
+    if (args.some((a) => a === "-exec" || a === "-execdir" || a === "-ok" || a === "-okdir")) {
+      return { ok: false, reason: "find -exec/-execdir 可执行任意命令，已被拒绝。" };
+    }
+    return { ok: true };
+  }
+
+  // 运行时：只允许版本查询，拒绝代码执行参数
+  if (["node", "bun", "deno", "python3", "python", "ruby", "go", "rustc", "java"].includes(bin)) {
+    const RUNTIME_SAFE_ARGS = new Set(["--version", "-v", "-V", "version", "help", "--help"]);
+    const first = args[0] ?? "";
+    if (args.length > 0 && !RUNTIME_SAFE_ARGS.has(first)) {
+      return { ok: false, reason: `${bin} ${first} 可执行任意代码，已被拒绝。只允许查询版本（--version）。` };
+    }
+    return { ok: true };
+  }
+
   // curl / wget：拒绝写操作 flag
   if (bin === "curl") {
     for (const flag of args) {
@@ -220,13 +241,17 @@ function validateCommand(input: string): { ok: true } | { ok: false; reason: str
       if (CURL_WRITE_PREFIXES.some((p) => flag.startsWith(p))) {
         return { ok: false, reason: `curl ${flag} 属于写/上传操作，已被拒绝。只允许 GET 请求。` };
       }
+      if (CURL_SHORT_METHOD_RE.test(flag)) {
+        return { ok: false, reason: `curl ${flag} 属于非 GET 请求，已被拒绝。` };
+      }
     }
     return { ok: true };
   }
   if (bin === "wget") {
     if (args.some((a) =>
-      a === "-O" || a === "--output-document" ||
-      a.startsWith("--output-document=") ||
+      a === "-O" || a === "-o" ||
+      a === "--output-document" || a.startsWith("--output-document=") ||
+      a === "--output-file"   || a.startsWith("--output-file=") ||
       a.startsWith("--post") || a === "--method=POST"
     )) {
       return { ok: false, reason: "wget 写文件/POST 操作已被拒绝。" };
