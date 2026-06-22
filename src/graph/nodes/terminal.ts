@@ -38,8 +38,8 @@ const SAFE_COMMANDS = new Set([
   "ls", "ll", "la", "dir", "tree",
   "cat", "head", "tail", "less", "more", "bat",
   "pwd",
-  // 文本处理
-  "grep", "rg", "ag", "awk", "sed", "cut", "sort", "uniq", "wc", "tr", "tee", "echo",
+  // 文本处理（tee 写文件故意排除；sed/awk 有 -i 原地写，由各自校验处理）
+  "grep", "rg", "ag", "awk", "sed", "cut", "sort", "uniq", "wc", "tr", "echo",
   "diff", "cmp",
   "jq", "yq", "xmllint",
   // 文件查找
@@ -57,9 +57,9 @@ const SAFE_COMMANDS = new Set([
   "ping", "traceroute", "tracert", "mtr",
   "nslookup", "dig", "host", "whois",
   "netstat", "ss", "ifconfig", "ip", "arp",
-  "curl", "wget",   // 允许 GET 请求查看；--data/-X POST 等写操作由 agent 层拦截
-  // 环境/路径
-  "env", "printenv", "set",
+  "curl", "wget",   // 允许 GET 请求查看；写操作 flag 由下方专项校验拦截
+  // 环境/路径（set 是 shell builtin，Bun.spawn 调不到，故排除）
+  "env", "printenv",
   "which", "whereis", "type", "where",
   // 系统信息
   "sw_vers", "lsb_release", "sysctl",
@@ -108,20 +108,26 @@ const SAFE_KUBECTL_SUBCOMMANDS = new Set([
   "--version", "--help", "help",
 ]);
 
-// curl/wget 危险 flag（写操作/上传）
+// curl/wget 危险 flag（写操作/上传）— 仅匹配独立 token，等号形式由前缀检查处理
 const CURL_WRITE_FLAGS = new Set([
   "-X", "--request",       // POST/PUT/DELETE 等
   "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+  "--json",                // curl ≥ 7.82 POST 简写
   "--upload-file", "-T",
   "--output", "-o",        // 写文件
   "-O",                    // 写文件（远程名）
 ]);
 
-// npm/yarn/pip 等包管理器：只允许查询类子命令
+// curl 危险 flag 的等号前缀形式（--request=POST 等）
+const CURL_WRITE_PREFIXES = [
+  "--request=", "--data=", "--data-raw=", "--data-binary=", "--data-urlencode=",
+  "--json=", "--upload-file=", "--output=",
+];
+
+// npm/yarn/pip 等包管理器：只允许查询类子命令（run 执行任意脚本，故排除）
 const SAFE_PKG_SUBCOMMANDS = new Set([
   "list", "ls", "info", "show", "view", "search", "outdated",
   "--version", "-v", "version", "help", "--help",
-  "run",  // npm run（查看脚本）—— 实际执行脚本由目标命令校验
 ]);
 
 function parseCommand(input: string): { bin: string; args: string[] } | null {
@@ -189,17 +195,40 @@ function validateCommand(input: string): { ok: true } | { ok: false; reason: str
     return { ok: true };
   }
 
+  // sed：拒绝 -i（原地写文件）
+  if (bin === "sed") {
+    if (args.some((a) => a === "-i" || a.startsWith("-i") || a === "--in-place")) {
+      return { ok: false, reason: "sed -i 会原地修改文件，已被拒绝。" };
+    }
+    return { ok: true };
+  }
+
+  // awk：拒绝重定向写文件（print > / print >>）—— 无 shell，无法做到，但提前拦截
+  if (bin === "awk") {
+    if (args.some((a) => a.includes(">") || a.includes(">>") || a === "-i" || a === "--inplace")) {
+      return { ok: false, reason: "awk 写文件操作已被拒绝。" };
+    }
+    return { ok: true };
+  }
+
   // curl / wget：拒绝写操作 flag
   if (bin === "curl") {
     for (const flag of args) {
       if (CURL_WRITE_FLAGS.has(flag)) {
         return { ok: false, reason: `curl ${flag} 属于写/上传操作，已被拒绝。只允许 GET 请求。` };
       }
+      if (CURL_WRITE_PREFIXES.some((p) => flag.startsWith(p))) {
+        return { ok: false, reason: `curl ${flag} 属于写/上传操作，已被拒绝。只允许 GET 请求。` };
+      }
     }
     return { ok: true };
   }
   if (bin === "wget") {
-    if (args.some((a) => a === "-O" || a === "--output-document" || a.startsWith("--post"))) {
+    if (args.some((a) =>
+      a === "-O" || a === "--output-document" ||
+      a.startsWith("--output-document=") ||
+      a.startsWith("--post") || a === "--method=POST"
+    )) {
       return { ok: false, reason: "wget 写文件/POST 操作已被拒绝。" };
     }
     return { ok: true };
