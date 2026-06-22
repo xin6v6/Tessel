@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { createLogger } from "../observability/logger.ts";
 import type { Recipe } from "./recipes/types.ts";
 import { codingRecipe } from "./recipes/coding.ts";
+import { testRecipe } from "./recipes/test.ts";
 
 const logger = createLogger("recipe-store");
 
@@ -17,7 +18,7 @@ const logger = createLogger("recipe-store");
 // ────────────────────────────────────────────────────────────────────────────
 
 // 已注册的基线 recipe（加新流程 = import 一份新 recipe 加进来）。
-const RECIPES: Recipe[] = [codingRecipe];
+const RECIPES: Recipe[] = [codingRecipe, testRecipe];
 
 /** 按 tag 取 recipe；找不到返回 undefined（Runner 回退 LLM 临时决策）。 */
 export function recipeByTag(tag: string): Recipe | undefined {

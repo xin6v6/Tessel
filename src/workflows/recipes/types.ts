@@ -41,6 +41,25 @@ export interface StageDef {
    * skill 不存在则跳过(记日志),不影响 stage 执行。
    */
   skills?: string[];
+  /**
+   * 用 Tessel 原生 ReAct loop（runReactAgent + ToolRegistry）而不是 Claude Agent SDK 跑本 stage。
+   * 需要调用 Tessel 内部工具（如 Slack tools）时设为 true。
+   * allowedTools 此时作为工具名前缀过滤器（如 ["slack_"] 只保留 slack_* 工具）。
+   */
+  useReact?: boolean;
+  /**
+   * useReact=true 时的运行时约束，由 runner 在构建工具 handler 时注入。
+   * 避免把业务约束写进 prompt，改在工具调用层强制执行。
+   */
+  reactConfig?: {
+    /** slack_send_message / slack_get_messages / slack_get_thread_replies 强制使用的 channel ID。 */
+    slackChannel?: string;
+  };
+  /**
+   * stage 执行完后，暂停等待外部 bot 回复（通过 workflow_wait 节点 interrupt）。
+   * resume 时 workflowProgress.botReply 里会有回复内容（"__TIMEOUT__" = 超时）。
+   */
+  waitForReply?: boolean;
 }
 
 /** buildPrompt 可用的上下文。 */
