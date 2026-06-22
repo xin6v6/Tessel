@@ -114,18 +114,6 @@ export class SlackReceiver {
         const threadTs = ("thread_ts" in message ? (message.thread_ts as string) : undefined) ?? undefined;
         const imageUrls = this.extractImageUrls(rawMsg);
 
-        // 来自其他 bot（bot_message）：交给 onBotMessage 处理（workflow_wait resume）
-        // 注意：assistant channel 里用 user token 发的消息也会被 Slack 附上 bot_profile，
-        // 所以必须同时检查 "user" 字段是否存在——有 user 字段说明是真实用户发的，不是 bot 消息。
-        const isRealBotMessage = (rawMsg["bot_profile"] || message.subtype === "bot_message") && !message.user;
-        if (isRealBotMessage) {
-          if (this.handler.onBotMessage) {
-            const botUser = (rawMsg["bot_id"] as string) ?? "bot";
-            await this.handler.onBotMessage({ text, user: botUser, channel, ts, threadTs, imageUrls });
-          }
-          return;
-        }
-
         // assistant channel 里用户发的消息：如果包含 @botId 则走 onMention，否则走 onMessage（DM 语义）
         const mentionPattern = this.botUserId ? new RegExp(`<@${this.botUserId}>`) : null;
         if (mentionPattern && mentionPattern.test(text)) {

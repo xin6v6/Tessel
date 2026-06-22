@@ -243,7 +243,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               if (!result) return;
               // workflow 跑完后把结果发回原始 thread
               const reply = extractReply(result);
-              logger.info({ replySnippet: reply.slice(0, 120), hasInterrupt: !!(result as any).__interrupt__ }, "onBotMessage: reply extracted");
+              logger.info({ replySnippet: reply.slice(0, 120), hasInterrupt: !!result.__interrupt__ }, "onBotMessage: reply extracted");
               if (reply && reply !== "（无回复）") {
                 const replyThreadTs = threadTs ?? ts;
                 await slackIntegration.getClient().sendMessage({
