@@ -20,6 +20,8 @@ export type SubAgentName =
   | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
   | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
                        // 让 interrupt 前的 stage 产出已落盘、resume 不重跑）
+  | "workflow_wait"    // 等待外部 bot 回复节点（interrupt + 5min 超时）
+  | "workflow_child"   // 子测试 run 节点：单个测试用例的多轮对话循环
   | "supervisor"       // workflow 完成/放弃后回 supervisor 整合结果（workflow 出边用）
   | "__end__";         // 直接回复，无需子 Agent
 
@@ -61,9 +63,22 @@ export interface WorkflowProgress {
   plan?: string;           // isPlan stage 的产出（已确认的计划）
   pendingStageId?: string; // 正等待审批的 stage id（approval 节点据此构造提示）
   lastStageOutput?: string;// 最近一个 stage 的输出
+  /** wait_for_reply interrupt 时落盘的等待截止时间（ISO 字符串）；超时视为失败。 */
+  waitDeadline?: string;
+  /** resume 时注入的 bot 回复内容（由 workflow_wait 节点写入，供 workflow 读取）。 */
+  botReply?: string;
   snapshot?: string;       // 最近一次 workspace 快照（如 git diff）
   outputs: Record<string, string>; // 各 stage 的输出累积（stageId → output）
   attempt: number;         // 当前重试计数
+  // ── 并发子 run 支持（fan-out/join 模式）──
+  /** 本 run 是否是某父 run 的子 run（isChildRun=true 时 workflow_wait 路由回 workflow_child）。 */
+  isChildRun?: boolean;
+  /** 当前被测试用例的描述（子 run 独立携带）。 */
+  testCase?: string;
+  /** 子 run 对应的 Slack threadTs（bot 在这个 thread 里回复）。 */
+  slackThreadTs?: string;
+  /** 本轮对话历史（子 run 内的多轮 send-reply）。 */
+  conversationHistory?: Array<{ role: "tester" | "bot"; text: string }>;
 }
 
 // ----------------------------------------------------------------

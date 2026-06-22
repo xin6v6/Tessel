@@ -13,7 +13,7 @@ function nodeMap(overrides: Partial<NodeMap>): NodeMap {
   const noop = async (): Promise<NodeOutput> => ({});
   return {
     router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop, vision: noop, imagegen: noop, file: noop, terminal: noop,
-    capabilities: noop, workflow: noop, workflow_approval: noop,
+    capabilities: noop, workflow: noop, workflow_approval: noop, workflow_wait: noop, workflow_child: noop,
     ...overrides,
   };
 }
