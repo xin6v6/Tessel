@@ -10,6 +10,7 @@ import { buildMcpAgentNode } from "./nodes/mcp.ts";
 import { buildVisionAgentNode, buildVisionClient } from "./nodes/vision.ts";
 import { buildImageGenNode, buildImageGenClient } from "./nodes/imagegen.ts";
 import { buildFileAgentNode } from "./nodes/file.ts";
+import { buildTerminalAgentNode } from "./nodes/terminal.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
 import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/workflow-runner.ts";
 import type { ToolRegistry } from "../tools/index.ts";
@@ -96,6 +97,7 @@ export function buildGraph(params: {
   const visionAgentNode   = buildVisionAgentNode(visionClient);
   const imageGenNode      = buildImageGenNode(imageGenClient);
   const fileAgentNode     = buildFileAgentNode(mainClient, skills);
+  const terminalAgentNode = buildTerminalAgentNode();
   const capabilitiesNode  = buildCapabilitiesNode(
     params.toolRegistry,
     params.integrations,
@@ -120,6 +122,7 @@ export function buildGraph(params: {
     vision:            visionAgentNode,
     imagegen:          imageGenNode,
     file:              fileAgentNode,
+    terminal:          terminalAgentNode,
     capabilities:      capabilitiesNode,
     workflow:          workflowNode,
     workflow_approval: workflowApprovalNode,

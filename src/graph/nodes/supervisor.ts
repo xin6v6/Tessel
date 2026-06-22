@@ -93,6 +93,7 @@ export const SUB_AGENTS: Record<
   vision:       "识别图片内容：当用户上传图片或分享图片 URL 并希望描述/分析图片时使用",
   imagegen:     "根据文字描述生成图片：当用户说「帮我画…」「生成一张…」「画一个…」等文生图需求时使用",
   file:         "读取、写入、编辑本地文件：当用户需要查看文件内容、修改文件、新建文件、列目录等本地文件系统操作时使用",
+  terminal:     "执行只读终端命令（ls、ps、df、git status 等查看类命令）：当用户直接输入终端命令或说「执行/运行这条命令」时使用。危险命令（rm、sudo、curl 等）会被自动拒绝。",
   // workflow 是【通用】多阶段调度器，不绑定开发。描述由已注册 recipe 动态生成：
   // 现在只有 coding recipe 就只提开发；以后加 research/docs 等 recipe 自动扩展。
   workflow:     workflowAgentDescription(),
@@ -104,7 +105,7 @@ export const KNOWN_AGENTS = Object.keys(SUB_AGENTS) as Array<Exclude<SubAgentNam
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
 
 // router 输出的节点级 intent 可直接路由的集合（chat/unknown 不在此）。
-const ROUTABLE_INTENTS = new Set(["slack", "file", "vision", "imagegen", "web", "mcp", "workflow", "capabilities"]);
+const ROUTABLE_INTENTS = new Set(["slack", "file", "terminal", "vision", "imagegen", "web", "mcp", "workflow", "capabilities"]);
 
 
 // ----------------------------------------------------------------

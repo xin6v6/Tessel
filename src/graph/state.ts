@@ -15,6 +15,7 @@ export type SubAgentName =
   | "vision"           // Vision Agent：识别图片内容（Slack 附件 / 公开 URL）
   | "imagegen"         // Image Generation Agent：根据文字描述生成图片
   | "file"             // File Agent：读取、编辑、写入本地文件
+  | "terminal"         // Terminal Agent：执行只读终端命令（查看类）
   | "capabilities"     // 自省节点：列出当前真实可用的能力（tools + integrations）
   | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
   | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
@@ -39,6 +40,7 @@ export type RouteIntent =
   | "chat"         // 直接对话，无需工具
   | "slack"        // Slack 操作
   | "file"         // 文件读写编辑
+  | "terminal"     // 终端命令执行（只读查看类）
   | "vision"       // 图片识别
   | "imagegen"     // 图片生成
   | "web"          // 互联网搜索
