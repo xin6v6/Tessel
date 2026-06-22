@@ -88,6 +88,47 @@ export function isApproval(text: string): boolean {
 }
 
 /**
+ * 被测 bot 回复时调用：把 botReply 注入到挂起在 workflow_wait 的 run。
+ *
+ * 查找顺序：
+ *   1. 精确 threadId 匹配（bot 回复在同一 thread）
+ *   2. channel 级扫描（bot 开了新 thread，threadId 不同但 channel 相同）
+ *
+ * 返回 result（含 finalReply）供调用方发到 Slack；找不到 pending run 时返回 null。
+ */
+export async function resumeWithBotReply(
+  g: CompiledGraph,
+  threadId: string,
+  botReply: string,
+  channel?: string,
+  replyTs?: string,
+): Promise<InvokeResult | null> {
+  try {
+    // 尝试精确 threadId 匹配（只取 pendingNode=workflow_wait 且 deadline 未过期的）
+    let targetThreadId: string | undefined;
+    const snapshot = await g.getState(threadId);
+    const isValidWait = snapshot.pending &&
+      snapshot.pendingNode === "workflow_wait" &&
+      (!snapshot.waitDeadline || new Date(snapshot.waitDeadline) > new Date());
+    if (isValidWait) {
+      targetThreadId = threadId;
+    } else if (channel) {
+      // 回退：在该 channel 里找有没有 workflow_wait 挂起的 run
+      // 如果 bot 是在某个 thread 里回复，threadTs 就是子 run 发出消息的 ts
+      // 传入 replyTs 作为 slackThreadTs 优先精确匹配子 run
+      const slackThreadTs = threadId.startsWith("slack:thread:") ? threadId.split(":").at(3) : undefined;
+      targetThreadId = await g.findPendingWaitByChannel(channel, slackThreadTs ?? replyTs);
+    }
+
+    if (!targetThreadId) return null;
+    logger.info({ threadId: targetThreadId, replySnippet: botReply.slice(0, 80) }, "workflow_wait: resuming with bot reply");
+    return await g.invoke({ resume: { botReply, replyTs } }, { threadId: targetThreadId });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 调度图：若该 thread 有挂起的 workflow-approval 中断，则把本次消息当作审批
  * 回复用 resume 恢复；否则正常发起新一轮 invoke。
  */

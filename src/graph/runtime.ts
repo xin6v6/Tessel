@@ -28,7 +28,7 @@ export const END = "__end__" as const;
 /** run loop 可调度的节点名（不含 __end__）。 */
 export type NodeName =
   | "router" | "supervisor" | "slack" | "web" | "mcp" | "vision" | "imagegen" | "file" | "terminal"
-  | "capabilities" | "workflow" | "workflow_approval";
+  | "capabilities" | "workflow" | "workflow_approval" | "workflow_wait" | "workflow_child";
 
 /** 中断信息（透出给 main，形如 __interrupt__[].value）。 */
 export interface InterruptValue {
@@ -71,9 +71,18 @@ function routeFrom(node: NodeName, state: GraphState): NodeName | typeof END {
     case "supervisor":
       return state.next === "__end__" ? END : (state.next as NodeName);
     case "workflow":
-      return state.next === "workflow_approval" ? "workflow_approval" : "supervisor";
+      if ((state.next as string) === "workflow_approval") return "workflow_approval";
+      if ((state.next as string) === "workflow_wait") return "workflow_wait";
+      return "supervisor";
     case "workflow_approval":
       return "workflow";
+    case "workflow_wait":
+      // 子 run 的 workflow_wait 回到 workflow_child；父 run 的回到 workflow
+      return state.workflowProgress?.isChildRun ? "workflow_child" : "workflow";
+    case "workflow_child":
+      if ((state.next as string) === "workflow_wait") return "workflow_wait";
+      // 子 run 完成后路由到 __end__（子 graph run 独立结束）
+      return END;
   }
 }
 
@@ -84,11 +93,17 @@ export interface InvokeConfig { threadId: string; signal?: AbortSignal; }
 export interface RunResult extends GraphState {
   __interrupt__?: InterruptEnvelope[];
 }
-export interface PendingSnapshot { pending: boolean; }
+export interface PendingSnapshot {
+  pending: boolean;
+  pendingNode?: "workflow_approval" | "workflow_wait" | null;
+  waitDeadline?: string;
+}
 
 export interface CompiledGraph {
   invoke(input: InvokeInput | ResumeInput, config: InvokeConfig): Promise<RunResult>;
   getState(threadId: string): Promise<PendingSnapshot>;
+  /** 找出该 channel 下挂起在 workflow_wait 的 threadId（bot 回复在新 thread 时用）。 */
+  findPendingWaitByChannel(channel: string, slackThreadTs?: string): Promise<string | undefined>;
 }
 
 const MAX_STEPS = 50; // 防御节点 bug 导致的无限跳转（正常路径远小于此）
@@ -117,8 +132,11 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
         // 然后落盘 + 停机 + 透出。__interrupt__ 本身不进 state。
         const { __interrupt__, ...partial } = out;
         state = mergeState(state, partial);
-        store.save(cfg.threadId, { state, pendingNode: "workflow_approval", interrupt: __interrupt__ });
-        logger.info({ threadId: cfg.threadId, node: cur }, "interrupt — paused, awaiting resume");
+        // kind=wait_for_reply → 落盘 workflow_wait；其余 → workflow_approval
+        const kind = __interrupt__[0]?.value.kind;
+        const pendingNode = kind === "wait_for_reply" ? "workflow_wait" : "workflow_approval";
+        store.save(cfg.threadId, { state, pendingNode, interrupt: __interrupt__ });
+        logger.info({ threadId: cfg.threadId, node: cur, kind }, "interrupt — paused, awaiting resume");
         return { ...state, __interrupt__ };
       }
 
@@ -135,17 +153,21 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
   }
 
   return {
+    async findPendingWaitByChannel(channel, slackThreadTs) {
+      if (!store.findPendingWaitByChannel) return undefined;
+      const found = store.findPendingWaitByChannel(channel, slackThreadTs);
+      return found?.threadId;
+    },
+
     async invoke(input, cfg) {
       const saved = store.load(cfg.threadId);
 
       if ("resume" in input) {
-        // 恢复审批：从挂起节点续跑，注入 resume 值。
-        if (!saved || saved.pendingNode !== "workflow_approval") {
-          // 没有挂起的中断却收到 resume —— 兜底当作无操作返回当前/空状态。
+        if (!saved?.pendingNode) {
           logger.warn({ threadId: cfg.threadId }, "resume with no pending interrupt — ignoring");
           return saved?.state ?? defaultState();
         }
-        return run("workflow_approval", saved.state, cfg, input.resume);
+        return run(saved.pendingNode, saved.state, cfg, input.resume);
       }
 
       // 新消息：在已存历史上追加，从 router 起跑。
@@ -157,7 +179,11 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
 
     async getState(threadId) {
       const saved = store.load(threadId);
-      return { pending: saved?.pendingNode === "workflow_approval" };
+      return {
+        pending: saved?.pendingNode != null,
+        pendingNode: saved?.pendingNode,
+        waitDeadline: saved?.state.workflowProgress?.waitDeadline,
+      };
     },
   };
 }

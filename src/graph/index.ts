@@ -13,6 +13,8 @@ import { buildFileAgentNode } from "./nodes/file.ts";
 import { buildTerminalAgentNode } from "./nodes/terminal.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
 import { buildWorkflowRunnerNode, buildWorkflowApprovalNode } from "./nodes/workflow-runner.ts";
+import { buildWorkflowWaitNode } from "./nodes/workflow-wait.ts";
+import { buildWorkflowChildNode } from "./nodes/workflow-child.ts";
 import type { ToolRegistry } from "../tools/index.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 import { buildSkillContext, type SkillContext } from "../skills/context.ts";
@@ -104,8 +106,10 @@ export function buildGraph(params: {
     KNOWN_AGENTS,
     SUB_AGENTS,
   );
-  const workflowNode         = buildWorkflowRunnerNode(skills);
+  const workflowNode         = buildWorkflowRunnerNode(skills, mainClient, params.toolRegistry);
   const workflowApprovalNode = buildWorkflowApprovalNode();
+  const workflowWaitNode     = buildWorkflowWaitNode();
+  const workflowChildNode    = buildWorkflowChildNode(mainClient, params.toolRegistry);
 
   // 节点表 —— 拓扑（边）写死在 runtime.ts 的 routeFrom：
   //   START → router → supervisor
@@ -126,9 +130,15 @@ export function buildGraph(params: {
     capabilities:      capabilitiesNode,
     workflow:          workflowNode,
     workflow_approval: workflowApprovalNode,
+    workflow_wait:     workflowWaitNode,
+    workflow_child:    workflowChildNode,
   };
 
   const store = params.store ?? buildGraphStore();
+
+  // workflow runner 需要 store 来做 fan-out 子 run 管理
+  nodes.workflow = buildWorkflowRunnerNode(skills, mainClient, params.toolRegistry, store);
+
   return compileGraph(nodes, store);
 }
 

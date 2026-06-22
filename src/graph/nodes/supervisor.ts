@@ -15,7 +15,7 @@ import {
 } from "../capabilities-snapshot.ts";
 import { getSpeaker } from "../speaker.ts";
 import { workflowAgentDescription } from "../../workflows/recipe-store.ts";
-import { repoForChannel } from "../../workflows/repo-map.ts";
+import { repoForChannel, recipeTagForChannel } from "../../workflows/repo-map.ts";
 import { snapshotForRoutingPrompt } from "../capabilities-snapshot.ts";
 import { logRoutingSuccess, logRoutingUnknown } from "../routing-log.ts";
 const logger = createLogger("supervisor");
@@ -83,7 +83,7 @@ const REPLY_GUARDRAILS = `
 // SUB_AGENTS 只列 supervisor 可【选择】的子 agent：排除 __end__、内部循环节点
 // workflow_approval、以及 supervisor 自身（workflow 完成后回 supervisor 的路由值）。
 export const SUB_AGENTS: Record<
-  Exclude<SubAgentName, "__end__" | "workflow_approval" | "supervisor">,
+  Exclude<SubAgentName, "__end__" | "workflow_approval" | "workflow_wait" | "workflow_child" | "supervisor">,
   string
 > = {
   slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
@@ -411,8 +411,22 @@ export function buildSupervisorNode(
       if (state.capabilitiesReason === "unknown_lookup" && subAgentResult.startsWith("[capabilities-snapshot]\n")) {
         const snapshot = subAgentResult.slice("[capabilities-snapshot]\n".length);
 
-        // 频道绑定仓库提示：本地文件仓库操作应走 file agent，不要误选 mcp
+        // 频道绑定了 workflow recipe → 直接路由 workflow，不经 LLM 判断
         const channel = getContext()?.channel;
+        const boundRecipe = recipeTagForChannel(channel);
+        if (boundRecipe && workflowAllowed(getContext()?.userId ?? "")) {
+          logger.info({ channel, recipe: boundRecipe }, "unknown_lookup → channel bound to workflow recipe, routing directly");
+          return {
+            subAgentResult: "",
+            capabilitiesReason: "",
+            next: "workflow",
+            pendingPlan: ["workflow"],
+            intent: "workflow",
+            candidateAgents: [],
+          };
+        }
+
+        // 频道绑定仓库提示：本地文件仓库操作应走 file agent，不要误选 mcp
         const boundRepo = repoForChannel(channel);
         const repoContext = boundRepo
           ? `\n补充上下文：当前频道绑定了本地仓库 ${boundRepo}，涉及该仓库的读写/查看操作应选 file agent，而非 mcp（mcp 用于远程 API，如 Bitbucket/Jira）。`

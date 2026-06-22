@@ -22,14 +22,26 @@ const logger = createLogger("graph-store");
 export interface SavedRun {
   state: GraphState;
   /** 因审批挂起停在哪个节点；null = 正常终止、无挂起中断。 */
-  pendingNode: "workflow_approval" | null;
+  pendingNode: "workflow_approval" | "workflow_wait" | null;
   /** 挂起时透出的中断信息（__interrupt__ 形态）。 */
   interrupt: InterruptEnvelope[] | null;
+  /** 子 run 归属的 parent run threadId（并发测试用）。 */
+  parentThreadId?: string;
+  /** 子 run 状态。 */
+  childStatus?: "running" | "done";
+  /** 子 run 完成时写入的结论文本。 */
+  childResult?: string;
 }
 
 export interface GraphStore {
   load(threadId: string): SavedRun | undefined;
   save(threadId: string, run: SavedRun): void;
+  /** 找出该 channel 下挂起在 workflow_wait 的 run（用于 bot 回复 thread≠原 thread 时 resume）。 */
+  findPendingWaitByChannel(channel: string, slackThreadTs?: string): { threadId: string; run: SavedRun } | undefined;
+  /** 找出所有归属 parentThreadId 的子 run。 */
+  loadChildren(parentThreadId: string): Array<{ threadId: string; run: SavedRun }>;
+  /** 将子 run 标记为完成并写入结论。 */
+  updateChildResult(threadId: string, result: string): void;
 }
 
 /** bun:sqlite 实现：单表 runs(thread_id PK, data JSON)。 */
@@ -66,6 +78,76 @@ export class SqliteGraphStore implements GraphStore {
       "INSERT OR REPLACE INTO runs (thread_id, data, updated_at) VALUES (?, ?, ?)",
       [threadId, JSON.stringify(run), new Date().toISOString()],
     );
+  }
+
+  findPendingWaitByChannel(channel: string, slackThreadTs?: string): { threadId: string; run: SavedRun } | undefined {
+    // threadId 格式: slack:thread:<channel>:<ts> 或 slack:channel:<channel>
+    // 按 updated_at 降序取最新的，避免拿到旧的已过期 run
+    const rows = this.db
+      .query<{ thread_id: string; data: string }, [string]>(
+        "SELECT thread_id, data FROM runs WHERE thread_id LIKE ? ORDER BY updated_at DESC"
+      )
+      .all(`%${channel}%`);
+    const now = new Date();
+
+    // 如果提供了 slackThreadTs，优先找 wf.slackThreadTs 精确匹配的子 run
+    if (slackThreadTs) {
+      for (const row of rows) {
+        try {
+          const run = JSON.parse(row.data) as SavedRun;
+          if (run.pendingNode !== "workflow_wait") continue;
+          const deadline = run.state.workflowProgress?.waitDeadline;
+          if (deadline && new Date(deadline) < now) continue;
+          if (run.state.workflowProgress?.slackThreadTs === slackThreadTs) {
+            return { threadId: row.thread_id, run };
+          }
+        } catch {
+          // skip
+        }
+      }
+    }
+
+    // 回退：找任意 workflow_wait pending run（未过期）
+    for (const row of rows) {
+      try {
+        const run = JSON.parse(row.data) as SavedRun;
+        if (run.pendingNode !== "workflow_wait") continue;
+        // 过滤掉 deadline 已过期的旧 run
+        const deadline = run.state.workflowProgress?.waitDeadline;
+        if (deadline && new Date(deadline) < now) continue;
+        return { threadId: row.thread_id, run };
+      } catch {
+        // skip corrupt rows
+      }
+    }
+    return undefined;
+  }
+
+  loadChildren(parentThreadId: string): Array<{ threadId: string; run: SavedRun }> {
+    const rows = this.db
+      .query<{ thread_id: string; data: string }, []>(
+        "SELECT thread_id, data FROM runs ORDER BY updated_at ASC"
+      )
+      .all();
+    const result: Array<{ threadId: string; run: SavedRun }> = [];
+    for (const row of rows) {
+      try {
+        const run = JSON.parse(row.data) as SavedRun;
+        if (run.parentThreadId === parentThreadId) {
+          result.push({ threadId: row.thread_id, run });
+        }
+      } catch {
+        // skip
+      }
+    }
+    return result;
+  }
+
+  updateChildResult(threadId: string, result: string): void {
+    const saved = this.load(threadId);
+    if (!saved) return;
+    const updated: SavedRun = { ...saved, childStatus: "done", childResult: result };
+    this.save(threadId, updated);
   }
 }
 
