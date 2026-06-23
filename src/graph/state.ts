@@ -77,6 +77,10 @@ export interface WorkflowProgress {
   testCase?: string;
   /** 子 run 对应的 Slack threadTs（bot 在这个 thread 里回复）。 */
   slackThreadTs?: string;
+  /** 子 run 发消息的目标频道 ID（由 fanOut 从触发频道注入，避免硬编码）。 */
+  testChannel?: string;
+  /** 子 run 被测 bot 的 Slack user ID（由 fanOut 从 TEST_TARGETS 解析注入）。 */
+  targetBotId?: string;
   /** 本轮对话历史（子 run 内的多轮 send-reply）。 */
   conversationHistory?: Array<{ role: "tester" | "bot"; text: string }>;
   // ── fan-out / join ──

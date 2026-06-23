@@ -10,11 +10,10 @@ import type { ToolRegistry } from "../../tools/index.ts";
 import type { GraphStore } from "../store.ts";
 import type { SlotManager } from "../slot-manager.ts";
 import type { CompiledGraph } from "../index.ts";
+import { botIdForChannel } from "../../workflows/repo-map.ts";
 
 const logger = createLogger("workflow-child");
 
-const TEST_CHANNEL = process.env.TEST_CHANNEL ?? "C0AMM0FLV0B";
-const TARGET_BOT_ID = process.env.TARGET_BOT_ID ?? "U0A608U4ECC";
 const MAX_ROUNDS = 10;
 
 // 防止并发的 checkAndResumeParent 重复 resume 同一个父 run
@@ -79,6 +78,7 @@ async function concludeChildRun(
   childThreadId: string,
   conclusion: string,
   parentThreadId: string | undefined,
+  testChannel: string,
   store: GraphStore,
   slotManager: SlotManager,
   graph: CompiledGraph,
@@ -88,16 +88,16 @@ async function concludeChildRun(
   store.updateChildResult(childThreadId, conclusion);
 
   // 2. 释放槽位
-  slotManager.release(TEST_CHANNEL, childThreadId);
+  slotManager.release(testChannel, childThreadId);
 
   // 3. 从队列补发（如果有等待的 testCase）
   if (parentThreadId) {
-    await drainQueue(parentThreadId, store, slotManager, toolRegistry, graph);
+    await drainQueue(parentThreadId, testChannel, store, slotManager, toolRegistry, graph);
   }
 
   // 4. 检查是否所有子 run 都完成（包括刚从队列补发的）
   if (parentThreadId) {
-    await checkAndResumeParent(parentThreadId, store, slotManager, graph, toolRegistry);
+    await checkAndResumeParent(parentThreadId, testChannel, store, slotManager, graph, toolRegistry);
   }
 }
 
@@ -107,14 +107,22 @@ async function concludeChildRun(
  */
 async function drainQueue(
   parentThreadId: string,
+  testChannel: string,
   store: GraphStore,
   slotManager: SlotManager,
   toolRegistry: ToolRegistry,
   graph: CompiledGraph,
 ): Promise<void> {
   const placeholder = `placeholder:drain:${Date.now()}`;
-  const item = slotManager.dequeueAndAcquire(TEST_CHANNEL, placeholder);
+  const item = slotManager.dequeueAndAcquire(testChannel, placeholder);
   if (!item) return;
+
+  const targetBotId = botIdForChannel(item.channel);
+  if (!targetBotId) {
+    logger.error({ channel: item.channel }, "drainQueue: no targetBotId for channel, releasing slot");
+    slotManager.release(testChannel, placeholder);
+    return;
+  }
 
   logger.info({ testCase: item.testCase.slice(0, 60), groupIndex: item.groupIndex }, "drainQueue: sending queued case");
 
@@ -130,7 +138,7 @@ async function drainQueue(
     pdfUpload = { filePath, filename: filePath.split("/").at(-1) ?? "file.pdf" };
   }
 
-  const text = `<@${TARGET_BOT_ID}> ${userMsg}`;
+  const text = `<@${targetBotId}> ${userMsg}`;
   let ts: string | undefined;
 
   if (pdfUpload) {
@@ -139,7 +147,7 @@ async function drainQueue(
     const uploadResult = await toolRegistry.execute([{
       toolCallId: crypto.randomUUID(),
       name: "slack_upload_file",
-      input: { file_path: pdfUpload.filePath, filename: pdfUpload.filename, channel: TEST_CHANNEL, initial_comment: text },
+      input: { file_path: pdfUpload.filePath, filename: pdfUpload.filename, channel: item.channel, initial_comment: text },
     }]);
     try { ts = (JSON.parse(uploadResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
       logger.warn({ output: (uploadResult[0]?.output ?? "").slice(0, 100) }, "drainQueue: failed to parse ts from upload");
@@ -148,7 +156,7 @@ async function drainQueue(
     const sendResult = await toolRegistry.execute([{
       toolCallId: crypto.randomUUID(),
       name: "slack_send_message",
-      input: { channel: TEST_CHANNEL, text },
+      input: { channel: item.channel, text },
     }]);
     try { ts = (JSON.parse(sendResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
       logger.warn({ output: (sendResult[0]?.output ?? "").slice(0, 100) }, "drainQueue: failed to parse ts");
@@ -157,12 +165,12 @@ async function drainQueue(
 
   if (!ts) {
     logger.error({ testCase: item.testCase.slice(0, 60) }, "drainQueue: no ts, releasing slot and aborting");
-    slotManager.release(TEST_CHANNEL, placeholder);
+    slotManager.release(testChannel, placeholder);
     return;
   }
 
-  const childThreadId = `slack:thread:${TEST_CHANNEL}:${ts}`;
-  slotManager.updateThreadId(TEST_CHANNEL, placeholder, childThreadId);
+  const childThreadId = `slack:thread:${item.channel}:${ts}`;
+  slotManager.updateThreadId(testChannel, placeholder, childThreadId);
 
   const childWf: WorkflowProgress = {
     recipe: "test",
@@ -174,6 +182,8 @@ async function drainQueue(
     isChildRun: true,
     testCase: item.testCase,
     slackThreadTs: ts,
+    testChannel: item.channel,
+    targetBotId,
     parentThreadId: item.parentThreadId,
     childGroupLabel: item.groupLabel,
     childGroupIndex: item.groupIndex,
@@ -215,12 +225,13 @@ async function drainQueue(
  */
 async function checkAndResumeParent(
   parentThreadId: string,
+  testChannel: string,
   store: GraphStore,
   slotManager: SlotManager,
   graph: CompiledGraph,
   toolRegistry: ToolRegistry,
 ): Promise<void> {
-  const queueLen = slotManager.queueLength(TEST_CHANNEL);
+  const queueLen = slotManager.queueLength(testChannel);
   if (queueLen > 0) {
     logger.info({ parentThreadId, queueLen }, "checkAndResumeParent: queue not empty, waiting");
     return;
@@ -300,14 +311,20 @@ export function buildWorkflowChildNode(
     const testCase = wf.testCase ?? wf.requirement ?? "";
     const history = wf.conversationHistory ?? [];
     const round = history.filter((h) => h.role === "tester").length;
-    const childThreadId = wf.slackThreadTs
-      ? `slack:thread:${TEST_CHANNEL}:${wf.slackThreadTs}`
+    const testChannel = wf.testChannel ?? "";
+    const targetBotId = wf.targetBotId ?? "";
+    const childThreadId = wf.slackThreadTs && testChannel
+      ? `slack:thread:${testChannel}:${wf.slackThreadTs}`
       : "";
+
+    if (!testChannel || !targetBotId) {
+      logger.error({ testCase: testCase.slice(0, 60) }, "workflow_child: missing testChannel or targetBotId in wf state");
+    }
 
     // 公共结论处理（写结论 + 释放槽位 + 补发队列 + 检查 join）
     const conclude = async (conclusion: string): Promise<void> => {
-      if (store && graph && slotManager && childThreadId) {
-        await concludeChildRun(childThreadId, conclusion, wf.parentThreadId, store, slotManager, graph, toolRegistry);
+      if (store && graph && slotManager && childThreadId && testChannel) {
+        await concludeChildRun(childThreadId, conclusion, wf.parentThreadId, testChannel, store, slotManager, graph, toolRegistry);
       } else if (store && childThreadId) {
         store.updateChildResult(childThreadId, conclusion);
       }
@@ -392,15 +409,15 @@ export function buildWorkflowChildNode(
       }
 
       // 需要追问：发到同一 thread，必须带 @ 否则 bot 不会回复
-      const followUpWithMention = `<@${TARGET_BOT_ID}> ${followUp}`;
+      const followUpWithMention = `<@${targetBotId}> ${followUp}`;
       logger.info({ testCase: testCase.slice(0, 60), round: round + 1, followUp: followUp.slice(0, 80) }, "workflow_child: sending follow-up");
-      return await sendMessageAndWait(toolRegistry, updatedWf, newHistory, followUpWithMention, wf.slackThreadTs);
+      return await sendMessageAndWait(toolRegistry, updatedWf, newHistory, followUpWithMention, wf.slackThreadTs, testChannel);
     }
 
     // 不应该走到这里（子 run 由 fan_out 预先初始化），兜底处理
     logger.warn({ testCase: testCase.slice(0, 60) }, "workflow_child: entered without resume — unexpected");
-    const firstMessage = `<@${TARGET_BOT_ID}> ${testCase}`;
-    return await sendMessageAndWait(toolRegistry, wf, history, firstMessage, undefined);
+    const firstMessage = `<@${targetBotId}> ${testCase}`;
+    return await sendMessageAndWait(toolRegistry, wf, history, firstMessage, undefined, testChannel);
   };
 }
 
@@ -413,10 +430,11 @@ async function sendMessageAndWait(
   wf: WorkflowProgress,
   history: Array<{ role: "tester" | "bot"; text: string }>,
   messageToSend: string,
-  followUpTs?: string,
+  followUpTs: string | undefined,
+  testChannel: string,
 ): Promise<NodeOutput> {
   const input: Record<string, unknown> = {
-    channel: TEST_CHANNEL,
+    channel: testChannel,
     text: messageToSend,
   };
   if (followUpTs) {

@@ -260,6 +260,8 @@ async function sendChildMessage(
     isChildRun: true,
     testCase: userMsg,
     slackThreadTs: ts,
+    testChannel,
+    targetBotId,
     parentThreadId,
     childGroupLabel: groupLabel,
     childGroupIndex: groupIndex,
