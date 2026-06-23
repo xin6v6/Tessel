@@ -155,6 +155,12 @@ async function drainQueue(
     }
   }
 
+  if (!ts) {
+    logger.error({ testCase: item.testCase.slice(0, 60) }, "drainQueue: no ts, releasing slot and aborting");
+    slotManager.release(TEST_CHANNEL, placeholder);
+    return;
+  }
+
   const childThreadId = `slack:thread:${TEST_CHANNEL}:${ts}`;
   slotManager.updateThreadId(TEST_CHANNEL, placeholder, childThreadId);
 
