@@ -27,6 +27,7 @@ export interface RequestContext {
   userId?: string;         // composite: `<source>:<externalId>`
   channel?: string;        // 来源频道 id（Slack channel/DM id）。coding workflow 据此选目标仓库。
   agentName?: string;      // current agent handling request
+  threadId?: string;       // graph run threadId for this request (e.g. slack:thread:<channel>:<ts>)
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
