@@ -425,13 +425,18 @@ async function sendMessageAndWait(
 
   logger.info({ message: messageToSend.slice(0, 80), followUpTs }, "workflow_child: sending message directly");
 
-  const results = await toolRegistry.execute([{
-    toolCallId: crypto.randomUUID(),
-    name: "slack_send_message",
-    input,
-  }]);
+  let output = "";
+  try {
+    const results = await toolRegistry.execute([{
+      toolCallId: crypto.randomUUID(),
+      name: "slack_send_message",
+      input,
+    }]);
+    output = results[0]?.output ?? "";
+  } catch (err) {
+    logger.error({ err: String(err), message: messageToSend.slice(0, 80) }, "workflow_child: slack_send_message failed");
+  }
 
-  const output = results[0]?.output ?? "";
   let ts: string | undefined;
   try {
     const parsed = JSON.parse(output) as { ts?: string };
