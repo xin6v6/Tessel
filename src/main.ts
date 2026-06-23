@@ -1,4 +1,5 @@
 import { buildGraph } from "./graph/index.ts";
+import { buildGraphStore } from "./graph/store.ts";
 import {
   invokeOrResume,
   resumeWithBotReply,
@@ -278,13 +279,29 @@ async function main() {
   const toolRegistry = await integrations.initialize();
 
   // 2. 构建 graph
+  const store = buildGraphStore();
   graph = buildGraph({
     baseURL:      process.env.LLM_BASE_URL,
     apiKey:       process.env.LLM_API_KEY,
     model:        process.env.LLM_MODEL,
     toolRegistry,
     integrations,
+    store,
   });
+
+  // 定时扫描：对 waitDeadline 已过期的 workflow_wait 子 run 触发超时 resume，
+  // 防止 bot 不回复时子 run 永久卡住、父 run join 无法完成。
+  setInterval(async () => {
+    const expired = store.findExpiredWaits();
+    for (const { threadId } of expired) {
+      logger.info({ threadId }, "timeout-sweep: resuming expired workflow_wait");
+      try {
+        await graph!.invoke({ resume: { timedOut: true } }, { threadId });
+      } catch (err) {
+        logger.warn({ threadId, err: String(err) }, "timeout-sweep: resume failed");
+      }
+    }
+  }, 60_000); // 每分钟扫一次
 
   logger.info("──────────────────────────────");
   logger.info("Tessel started");

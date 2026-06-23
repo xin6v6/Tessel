@@ -44,6 +44,8 @@ export interface GraphStore {
   updateChildResult(threadId: string, result: string): void;
   /** 找出挂起在 workflow_children_join 且 parentThreadId 匹配的父 run。 */
   findPendingJoin(parentThreadId: string): { threadId: string; run: SavedRun } | undefined;
+  /** 找出所有 pendingNode=workflow_wait 且 waitDeadline 已过期的子 run。 */
+  findExpiredWaits(): Array<{ threadId: string; run: SavedRun }>;
 }
 
 /** bun:sqlite 实现：单表 runs(thread_id PK, data JSON)。 */
@@ -168,6 +170,29 @@ export class SqliteGraphStore implements GraphStore {
       // skip
     }
     return undefined;
+  }
+
+  findExpiredWaits(): Array<{ threadId: string; run: SavedRun }> {
+    const rows = this.db
+      .query<{ thread_id: string; data: string }, []>(
+        "SELECT thread_id, data FROM runs WHERE data LIKE '%workflow_wait%'"
+      )
+      .all();
+    const now = new Date();
+    const result: Array<{ threadId: string; run: SavedRun }> = [];
+    for (const row of rows) {
+      try {
+        const run = JSON.parse(row.data) as SavedRun;
+        if (run.pendingNode !== "workflow_wait") continue;
+        if (run.childStatus === "done") continue;
+        const deadline = run.state.workflowProgress?.waitDeadline;
+        if (!deadline || new Date(deadline) >= now) continue;
+        result.push({ threadId: row.thread_id, run });
+      } catch {
+        // skip corrupt rows
+      }
+    }
+    return result;
   }
 }
 
