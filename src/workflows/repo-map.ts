@@ -86,3 +86,43 @@ export function recipeTagForChannel(channel: string | undefined): string | undef
   if (!channel) return undefined;
   return parseWorkflowChannels(process.env.WORKFLOW_CHANNELS).get(channel);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 频道 → 被测 bot 映射（test workflow 专用）
+//
+// 配置：TEST_TARGETS="<channelId>:<botUserId>,<channelId>:<botUserId>"
+//   例：TEST_TARGETS="C0BCE1G1C8M:U0AN70R27DW,C0123ABC:U0BBBBBBBBB"
+//
+// test workflow 在哪个频道触发，就往哪个频道发测试消息并 @mention 对应的 bot。
+// 查不到映射时 runner 拒绝执行（不回退默认值）。
+// ────────────────────────────────────────────────────────────────────────────
+
+export function parseTestTargets(raw: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!raw) return map;
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sep = trimmed.indexOf(":");
+    if (sep <= 0) {
+      logger.warn({ entry: trimmed }, "TEST_TARGETS 条目格式错误（应为 channelId:botUserId），已跳过");
+      continue;
+    }
+    const channel = trimmed.slice(0, sep).trim();
+    const botId = trimmed.slice(sep + 1).trim();
+    if (!channel || !botId) {
+      logger.warn({ entry: trimmed }, "TEST_TARGETS 条目 channel/botId 为空，已跳过");
+      continue;
+    }
+    map.set(channel, botId);
+  }
+  return map;
+}
+
+/**
+ * 按触发频道查被测 bot 的 user ID。查不到返回 undefined（runner 据此拒绝执行）。
+ */
+export function botIdForChannel(channel: string | undefined): string | undefined {
+  if (!channel) return undefined;
+  return parseTestTargets(process.env.TEST_TARGETS).get(channel);
+}
