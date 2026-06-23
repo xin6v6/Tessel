@@ -82,6 +82,19 @@ export class SlackReceiver {
       .filter(Boolean);
   }
 
+  /**
+   * 频道白名单检查。
+   * SLACK_ALLOWED_CHANNELS 未设置 → 全部放行（向后兼容）。
+   * 设置后只允许列表内的频道 ID，DM（D 开头）始终放行。
+   */
+  private isAllowedChannel(channelId: string): boolean {
+    const raw = process.env.SLACK_ALLOWED_CHANNELS;
+    if (!raw) return true;
+    if (channelId.startsWith("D")) return true; // DM 始终允许
+    const allowed = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    return allowed.includes(channelId);
+  }
+
   private _registerHandlers() {
     // ---- DM 消息（Assistant thread）----
     //
@@ -111,6 +124,11 @@ export class SlackReceiver {
         const text = ("text" in message ? (message.text as string) : "") ?? "";
         const channel = message.channel as string;
         const ts = message.ts as string;
+
+        if (!this.isAllowedChannel(channel)) {
+          logger.debug({ channel }, "assistant message: channel not in allowlist, ignored");
+          return;
+        }
         const threadTs = ("thread_ts" in message ? (message.thread_ts as string) : undefined) ?? undefined;
         const imageUrls = this.extractImageUrls(rawMsg);
 
@@ -185,6 +203,11 @@ export class SlackReceiver {
           ts: event.ts,
           threadTs: event.thread_ts,
         });
+        return;
+      }
+
+      if (!this.isAllowedChannel(event.channel)) {
+        logger.debug({ channel: event.channel }, "app_mention: channel not in allowlist, ignored");
         return;
       }
 
