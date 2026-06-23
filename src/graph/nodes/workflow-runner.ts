@@ -472,25 +472,20 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
 
       // fan_out：fire-and-forget，立即 interrupt 挂起父 run
       if (stage.id === "fan_out" && toolRegistry && slotManager) {
-        // 优先使用 recipe.fixedTestCases（避免 LLM 篡改特殊格式如 __PDF_UPLOAD__）
+        // 从 plan stage 的 LLM 输出里解析 JSON 数组作为测试用例
         let testCases: string[] = [];
-        if (recipe.fixedTestCases && recipe.fixedTestCases.length > 0) {
-          testCases = recipe.fixedTestCases;
-          logger.info({ count: testCases.length }, "fan_out: using recipe.fixedTestCases");
-        } else {
-          const planOutput = wf.outputs["plan"] ?? "";
-          try {
-            const jsonMatch = planOutput.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              if (Array.isArray(parsed)) testCases = parsed.map(String);
-            }
-          } catch {
-            logger.warn({ planOutput: planOutput.slice(0, 200) }, "fan_out: failed to parse test cases from plan");
-            testCases = [wf.requirement];
+        const planOutput = wf.outputs["plan"] ?? "";
+        try {
+          const jsonMatch = planOutput.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(parsed)) testCases = parsed.map(String);
           }
-          if (testCases.length === 0) testCases = [wf.requirement];
+        } catch {
+          logger.warn({ planOutput: planOutput.slice(0, 200) }, "fan_out: failed to parse test cases from plan");
+          testCases = [wf.requirement];
         }
+        if (testCases.length === 0) testCases = [wf.requirement];
 
         logger.info({ count: testCases.length }, "fan_out: starting with slot control");
         const parentThreadId = ctx?.threadId ?? `slack:channel:${TEST_CHANNEL}`;
