@@ -148,9 +148,51 @@ export async function invokeOrResume(
   }
 
   if (pending) {
+    const snapshot = await g.getState(threadId);
+    // workflow_children_join 由子 run 完成后自动 resume，用户新消息不应触发它
+    // workflow_wait 由 bot 回复触发，用户新消息也不应触发它
+    // 只有 workflow_approval 才响应用户的审批消息
+    if (snapshot.pendingNode === "workflow_children_join" || snapshot.pendingNode === "workflow_wait") {
+      logger.info({ threadId, pendingNode: snapshot.pendingNode }, "workflow: pending join/wait — ignoring user message, starting fresh");
+      return g.invoke({ messages: [message] }, config);
+    }
     const approved = isApproval(rawText);
     logger.info({ threadId, approved }, "workflow: resuming from approval interrupt");
     return g.invoke({ resume: { approved } }, config);
   }
   return g.invoke({ messages: [message] }, config);
+}
+
+/**
+ * 检查所有兄弟子 run 是否都完成，全部完成则 resume 父 run（workflow_children_join）。
+ * 在每个子 run 写入 childResult 后调用。
+ */
+export async function checkAndResumeParent(
+  parentThreadId: string | undefined,
+  store: import("./store.ts").GraphStore,
+  graph: CompiledGraph,
+): Promise<void> {
+  if (!parentThreadId) return;
+  try {
+    const children = store.loadChildren(parentThreadId);
+    if (children.length === 0) {
+      logger.warn({ parentThreadId }, "checkAndResumeParent: no children found");
+      return;
+    }
+    const allDone = children.every((c) => c.run.childStatus === "done");
+    if (!allDone) {
+      const done = children.filter(c => c.run.childStatus === "done").length;
+      logger.info({ parentThreadId, total: children.length, done }, "checkAndResumeParent: not all done yet");
+      return;
+    }
+    const parent = store.findPendingJoin(parentThreadId);
+    if (!parent) {
+      logger.warn({ parentThreadId }, "checkAndResumeParent: all done but no pending join found");
+      return;
+    }
+    logger.info({ parentThreadId, childCount: children.length }, "checkAndResumeParent: all done — resuming parent");
+    await graph.invoke({ resume: { allDone: true } }, { threadId: parentThreadId });
+  } catch (err) {
+    logger.error({ parentThreadId, err: String(err) }, "checkAndResumeParent failed");
+  }
 }

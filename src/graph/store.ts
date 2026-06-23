@@ -22,7 +22,7 @@ const logger = createLogger("graph-store");
 export interface SavedRun {
   state: GraphState;
   /** 因审批挂起停在哪个节点；null = 正常终止、无挂起中断。 */
-  pendingNode: "workflow_approval" | "workflow_wait" | null;
+  pendingNode: "workflow_approval" | "workflow_wait" | "workflow_children_join" | null;
   /** 挂起时透出的中断信息（__interrupt__ 形态）。 */
   interrupt: InterruptEnvelope[] | null;
   /** 子 run 归属的 parent run threadId（并发测试用）。 */
@@ -42,6 +42,8 @@ export interface GraphStore {
   loadChildren(parentThreadId: string): Array<{ threadId: string; run: SavedRun }>;
   /** 将子 run 标记为完成并写入结论。 */
   updateChildResult(threadId: string, result: string): void;
+  /** 找出挂起在 workflow_children_join 且 parentThreadId 匹配的父 run。 */
+  findPendingJoin(parentThreadId: string): { threadId: string; run: SavedRun } | undefined;
 }
 
 /** bun:sqlite 实现：单表 runs(thread_id PK, data JSON)。 */
@@ -148,6 +150,24 @@ export class SqliteGraphStore implements GraphStore {
     if (!saved) return;
     const updated: SavedRun = { ...saved, childStatus: "done", childResult: result };
     this.save(threadId, updated);
+  }
+
+  findPendingJoin(parentThreadId: string): { threadId: string; run: SavedRun } | undefined {
+    const row = this.db
+      .query<{ thread_id: string; data: string }, [string]>(
+        "SELECT thread_id, data FROM runs WHERE thread_id = ?"
+      )
+      .get(parentThreadId);
+    if (!row) return undefined;
+    try {
+      const run = JSON.parse(row.data) as SavedRun;
+      if (run.pendingNode === "workflow_children_join") {
+        return { threadId: row.thread_id, run };
+      }
+    } catch {
+      // skip
+    }
+    return undefined;
   }
 }
 
