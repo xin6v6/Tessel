@@ -15,7 +15,7 @@ import {
 } from "../capabilities-snapshot.ts";
 import { getSpeaker } from "../speaker.ts";
 import { workflowAgentDescription } from "../../workflows/recipe-store.ts";
-import { repoForChannel } from "../../workflows/repo-map.ts";
+import { repoForChannel, recipeTagForChannel } from "../../workflows/repo-map.ts";
 import { snapshotForRoutingPrompt } from "../capabilities-snapshot.ts";
 import { logRoutingSuccess, logRoutingUnknown } from "../routing-log.ts";
 const logger = createLogger("supervisor");
@@ -641,6 +641,27 @@ export function buildSupervisorNode(
     //   其他节点  → 直接路由（workflow 再加白名单二次校验）
     const routerIntent = state.intent;
     logger.info({ inputSnippet, source, routerIntent }, "routing (intent)");
+
+    // ── WORKFLOW_CHANNELS 频道约束：只允许 workflow 和 chat ──
+    //
+    // 频道绑定了 recipe（WORKFLOW_CHANNELS）时，该频道只做两件事：
+    //   · workflow intent → 触发 workflow（继续走下面的白名单校验）
+    //   · 其他任何 intent → 直接 chat，跳过所有子 agent 和 unknown_lookup
+    // 避免在专用测试/开发频道里误触发 slack/file/terminal 等工具操作。
+    const currentChannel = getContext()?.channel;
+    if (recipeTagForChannel(currentChannel) && routerIntent !== "workflow") {
+      logger.info({ channel: currentChannel, routerIntent }, "workflow-channel: non-workflow intent → chat");
+      const chatChannelBase = `你是一个有帮助的个人助手。只基于对话中已有的事实回答用户的问题；没有证据支撑的内容不要说。\n\n${currentSpeakerLine(messages)}${source ? `用户通过「${source}」与你对话。\n` : ""}${currentDateTimeLine()}${channelRepoLine(currentChannel)}${REPLY_GUARDRAILS}`;
+      const chatChannelSystem = skills
+        ? skills.promptFor("supervisor", chatChannelBase, inputSnippet)
+        : chatChannelBase;
+      const chatChannelReply = await llm.invoke([
+        systemMsg(chatChannelSystem),
+        ...historyForPrompt(messages),
+      ]);
+      const safeChatChannelReply = sanitizeReply(chatChannelReply);
+      return { messages: [safeChatChannelReply], next: "__end__", intent: "unknown" };
+    }
 
     // ── workflow 白名单二次校验 ──
     if (routerIntent === "workflow") {

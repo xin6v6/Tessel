@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { LLMClient } from "../../llm/client.ts";
-import { humanMsg, systemMsg, isHuman, isTool, type Message } from "../../llm/messages.ts";
+import { humanMsg, systemMsg, isHuman, isTool, stripName, type Message } from "../../llm/messages.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
 import type { GraphStateType } from "../state.ts";
 import type { ToolRegistry } from "../../tools/index.ts";
@@ -89,11 +89,13 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
     logger.info({ inputSnippet }, "started");
 
     const ctx = getContext();
-    // 把当前用户的 Slack ID 注入 system prompt，让 LLM 能回答"我的 ID 是什么"
     const callerIdLine = ctx?.externalId
       ? `\n\n当前向你发指令的用户 Slack ID 是：${ctx.externalId}。被问到"我的 Slack ID / user ID 是什么"时直接告知。`
       : "";
-    const basePrompt = SYSTEM_PROMPT + callerIdLine;
+    const currentChannelLine = ctx?.channel
+      ? `\n当前对话所在的 Slack channel ID 是：${ctx.channel}。发消息时默认发到这个频道，除非用户明确指定其他频道。`
+      : "";
+    const basePrompt = SYSTEM_PROMPT + callerIdLine + currentChannelLine;
     const systemPrompt = skills
       ? skills.promptFor("slack", basePrompt, userInputText)
       : basePrompt;
@@ -119,12 +121,22 @@ export function buildSlackAgentNode(llm: LLMClient, toolRegistry: ToolRegistry, 
       ? `用户原始需求：${userInputText}${channelHint}\n\n上一步处理结果（直接基于此内容完成任务，不要询问确认）：\n${state.planContext}`
       : userInputText;
 
+    // 非多步计划时，把对话历史传给 ReAct，让 agent 能看到上下文（如之前提到的人名/对象）。
+    // planContext 模式不传历史，避免被历史干扰。窗口策略与 supervisor 一致：>20 条时取最近 20 条。
+    const HISTORY_KEEP = 20;
+    const priorHistory: Message[] = state.planContext
+      ? []
+      : state.messages
+          .slice(0, -1) // 去掉最后一条（即 lastUserMsg，会作为 taskMessage 单独传入）
+          .slice(-HISTORY_KEEP)
+          .map(stripName);
+
     try {
       const result = await runReactAgent({
         llm,
         tools,
         systemPrompt,
-        messages: [humanMsg(taskMessage)],
+        messages: [...priorHistory, humanMsg(taskMessage)],
       });
 
       const lastMsg = result.messages.at(-1);
