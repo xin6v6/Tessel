@@ -1,44 +1,35 @@
-import { useState, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   X, User, Bot, BrainCircuit, MessageSquare, Search, Wrench, Settings2,
-  Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck, ThumbsUp,
-  GitBranch, Database, ScrollText, ChevronRight, Code2, Split, Puzzle, Cpu,
-  ChevronLeft, CheckCircle2, RefreshCw, Pause,
+  Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck,
+  GitBranch, Database, ScrollText, ChevronRight, Split, Puzzle, Cpu,
+  CheckCircle2, RefreshCw, Pause, Eye, Image, FolderOpen, Terminal,
 } from 'lucide-react';
 
-// ────────────────────────────────────────────────────────────────────────────
-// 分层纵向 DAG。主图只展示 6 层架构（无 workflow stages）。
-// 点击 Recipe 库节点展开侧面板，列出所有 recipe 及其 stages。
-//
-// Recipe 系统设计为可扩展：RECIPES 数组 → 每条 recipe 独立描述
-//   stages / approveAfter / retryTo / maxRetries。
-// ────────────────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 type NodeType =
   | 'entry' | 'exit' | 'supervisor' | 'agent' | 'tool' | 'state'
-  | 'runner' | 'stage' | 'approval' | 'router' | 'skill' | 'classifier';
+  | 'runner' | 'router' | 'skill' | 'classifier';
 
 interface GNode {
   id: string;
   type: NodeType;
   label: string;
-  sub?: string;
-  layer: number;
-  col: number;
+  sub: string;
   Icon: React.ComponentType<{ size?: number; className?: string }>;
-  prompt?: string;
-  /** true = clicking opens the recipes drawer instead of detail panel */
+  detail: string;
   isRecipeLib?: boolean;
 }
 
 interface GEdge {
   from: string;
   to: string;
-  kind: 'flow' | 'route' | 'return' | 'aux' | 'retry' | 'approval';
+  kind: 'main' | 'route' | 'return' | 'aux';
   label?: string;
 }
 
-// ─── Recipe 数据（可扩展）────────────────────────────────────────────────────
+// ─── Recipe data ─────────────────────────────────────────────────────────────
 
 interface RecipeStage {
   id: string;
@@ -51,7 +42,6 @@ interface RecipeStage {
 
 interface RecipeDef {
   name: string;
-  tag: string;
   color: string;
   description: string;
   stages: RecipeStage[];
@@ -63,470 +53,259 @@ interface RecipeDef {
 const RECIPES: RecipeDef[] = [
   {
     name: 'coding',
-    tag: 'coding',
-    color: '#0ea5e9',
-    description: '在指定仓库执行开发任务：看需求、改代码、跑测试、自审，经人工确认需求后自动完成。适用于改 bug、加功能、重构等需要真实读写代码的请求。',
+    color: '#4f8ef7',
+    description: '在指定仓库执行开发任务：看需求、改代码、跑测试、自审，经人工确认需求后自动完成。',
     approveAfter: ['requirement'],
     retryTo: { test: 'code', review: 'code' },
     maxRetries: 2,
     stages: [
-      { id: 'requirement', label: '需求分析', sub: '只读 · 产出 plan', Icon: ClipboardList, readonly: true, isPlan: true },
-      { id: 'code',        label: '编程',     sub: '读写文件',          Icon: FileCode },
-      { id: 'test',        label: '测试',     sub: '只跑不改',          Icon: FlaskConical, readonly: true },
-      { id: 'review',      label: '审核',     sub: '自审 diff',         Icon: ShieldCheck, readonly: true },
-      { id: 'commit',      label: '提交推送', sub: 'branch + push',     Icon: GitBranch },
+      { id: 'requirement', label: '需求分析', sub: '只读 · plan', Icon: ClipboardList, readonly: true, isPlan: true },
+      { id: 'code',        label: '编程',     sub: '读写文件',    Icon: FileCode },
+      { id: 'test',        label: '测试',     sub: '只跑不改',    Icon: FlaskConical, readonly: true },
+      { id: 'review',      label: '审核',     sub: '自审 diff',   Icon: ShieldCheck, readonly: true },
+      { id: 'commit',      label: '提交推送', sub: 'branch+push', Icon: GitBranch },
     ],
   },
   {
-    name: 'testing',
-    tag: 'testing',
-    color: '#8b5cf6',
-    description: '针对已有代码编写或完善测试：分析覆盖率、补充测试用例、运行验证，无需改动业务代码。',
-    approveAfter: ['analysis'],
-    retryTo: { verify: 'write' },
-    maxRetries: 2,
+    name: 'test',
+    color: '#a78bfa',
+    description: '对已有 bot 并发功能测试：LLM 设计用例、并发派送、收集响应并评判结果。',
+    approveAfter: [],
+    retryTo: {},
+    maxRetries: 0,
     stages: [
-      { id: 'analysis', label: '覆盖率分析', sub: '只读 · 找缺口', Icon: ClipboardList, readonly: true, isPlan: true },
-      { id: 'write',    label: '编写测试',   sub: '只写测试文件',  Icon: FileCode },
-      { id: 'verify',   label: '验证通过',   sub: '跑全套测试',    Icon: FlaskConical, readonly: true },
-      { id: 'commit',   label: '提交推送',   sub: 'branch + push', Icon: GitBranch },
+      { id: 'plan',    label: '设计用例', sub: 'LLM 生成 JSON', Icon: ClipboardList, readonly: true, isPlan: true },
+      { id: 'fan_out', label: '并发测试', sub: '每维度子 run',   Icon: Split },
     ],
   },
 ];
 
-// ─── 节点 ────────────────────────────────────────────────────────────────────
+// ─── Node definitions ─────────────────────────────────────────────────────────
 
 const NODES: GNode[] = [
-  // L0 — 入口 / 出口
-  { id: 'slack_in', type: 'entry', label: '用户消息', sub: 'Slack / CLI REPL',
-    layer: 0, col: 3.5, Icon: User,
-    prompt:
-`消息入站（多平台）
-
-Slack（生产）
-  Socket Mode 收到 @mention / DM 事件
-  → SlackReceiver.onMention / onMessage
-  → 封装 HumanMessage + SpeakerMeta
-  → graph.invoke({ messages }, { thread_id })
-
-CLI REPL（本地调试）
-  bun run dev / bun run start
-  → stdin readline → graph.invoke
-
-文件  src/integrations/slack/*、src/main.ts` },
-  { id: 'slack_out', type: 'exit', label: '回复', sub: 'Slack / stdout',
-    layer: 0, col: 5.2, Icon: Bot,
-    prompt:
-`消息出站（多平台）
-
-Slack
-  Supervisor 生成最终 AIMessage（next = __end__）
-  → say() → chat.postMessage 回到原 Thread
-
-CLI REPL
-  → console.log 打印到终端
-
-文件  src/integrations/slack/*、src/main.ts` },
-
-  // L1 — State（右侧）
-  { id: 'state', type: 'state', label: 'Graph State', sub: 'Graph State + Store',
-    layer: 1, col: 6.8, Icon: Database,
-    prompt:
-`全局状态 + 持久化
-
-State 字段
-  messages / next / subAgentResult / finalReply
-
-Graph Store（data/graph-runs.db）
-  按 thread_id 持久化，支持多轮历史与 interrupt 跨消息恢复。
-  Workflow 的人工审批就靠它跨 Slack 消息暂停 / 恢复。
-
-文件  src/graph/state.ts、src/graph/store.ts` },
-
-  // L1 — Router + Classifier 同层
-  { id: 'router', type: 'router', label: 'Router', sub: '前置快速分类',
-    layer: 1, col: 3.5, Icon: Split,
-    prompt:
-`前置快速分类节点（supervisor 之前）
-
-只做一件事：把消息判成 chat / tool / workflow / capabilities，
-写进 state.intent，让 supervisor 跳过自己那一轮意图分类。
-
-分类机制（零 LLM 开销）
-  调 ClassifierClient → HTTP POST /classify
-  → { label, confidence }
-  confidence < CLASSIFIER_MIN_CONF（默认 0.7）或服务不可达 → null
-  → 兜底回退 chat（最安全）
-
-权限门
-  classifier 判 workflow 但用户不在白名单 → 降级为 tool
-
-配置
-  CLASSIFIER_URL        http://127.0.0.1:9876（本地）
-                        http://classifier:9876（Docker 内网）
-  CLASSIFIER_TIMEOUT    请求超时 ms（默认 200）
-  CLASSIFIER_MIN_CONF   置信度下限（默认 0.7）
-
-文件  src/graph/nodes/router.ts
-      src/router-classifier/client.ts` },
-
-  // L1 — ClassifierClient（Router 左侧紧邻）
-  { id: 'classifier', type: 'classifier', label: 'Classifier', sub: '本地 ONNX 推理',
-    layer: 1, col: 2.0, Icon: Cpu,
-    prompt:
-`本地 ONNX 判别模型推理服务
-
-ClassifierClient（src/router-classifier/client.ts）
-  HTTP POST /classify { text }
-  → { label: 'chat'|'tool'|'workflow'|'capabilities', confidence }
-
-置信度不足（< CLASSIFIER_MIN_CONF）或服务不可达时返回 null，
-Router 自动回退 chat —— 服务挂掉不影响主流程。
-
-推理服务部署
-  本地开发：cd scripts/train-router && python3 serve.py
-  Docker  ：classifier sidecar（Dockerfile.classifier），
-            模型文件挂载 tessel-model named volume，
-            仅暴露内网端口 9876。
-
-模型训练
-  cd scripts/train-router && python3 train.py
-  训练产物在本地，不提交到 git（.gitignore 忽略）。
-
-文件  src/router-classifier/client.ts
-      Dockerfile.classifier` },
-
-  // L2 — Supervisor（居中）
-  { id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '消费 intent / 选 agent / 整合',
-    layer: 2, col: 3.5, Icon: BrainCircuit,
-    prompt:
-`核心调度 Agent —— 保持纯粹
-
-职责
-  · 消费 Router 写的 state.intent：
-      chat → 直接回复 | capabilities → 自省节点
-      workflow → 白名单校验后直奔 workflow | tool → 按快照选 agent
-  · intent=unknown（router 被绕过/出错）时回退自带意图分类
-  · 整合子节点结果 → 最终回复
-
-刻意不做
-  分类前置到了 Router；多阶段任务的"分任务 / 判断结果 / 重试"
-  在 Workflow Runner —— 都不在这里，避免 Supervisor 被污染。
-
-文件  src/graph/nodes/supervisor.ts` },
-
-  // L3 — sub-agents
-  { id: 'slack_agent', type: 'agent', label: 'Slack Agent', sub: 'ReAct + Finalizer',
-    layer: 3, col: 0.5, Icon: MessageSquare,
-    prompt:
-`Slack 工具 Agent（ReAct）
-
-  阶段1 ReAct 循环 → 阶段2 Finalizer 收敛成稿
-  finalReply 写回 state，Supervisor 原样转发不重写。
-
-文件  src/graph/nodes/slack.ts` },
-  { id: 'web_agent', type: 'agent', label: 'Web Agent', sub: '占位 stub',
-    layer: 3, col: 1.8, Icon: Search,
-    prompt:
-`Web Search Agent（stub）
-
-  isStub=true，被两阶段路由从候选集过滤，永不被派到。
-  接入真实 Search API 后从 STUB_AGENTS 移除即可。
-
-文件  src/graph/nodes/web.ts` },
-  { id: 'mcp_agent', type: 'agent', label: 'MCP Agent', sub: '占位 stub',
-    layer: 3, col: 3.1, Icon: Wrench,
-    prompt:
-`MCP Tools Agent（stub）
-
-  同 web：isStub 过滤。接入 MCP adapter 后启用。
-
-文件  src/graph/nodes/mcp.ts` },
-  { id: 'capabilities', type: 'agent', label: 'Capabilities', sub: '自省节点',
-    layer: 3, col: 4.4, Icon: Settings2,
-    prompt:
-`自省节点（无 LLM）
-
-  读取 Integration/Tool Registry 真实状态，渲染能力清单。
-  与 Supervisor 路由用的是同一份 snapshot，视图永远一致。
-
-文件  src/graph/nodes/capabilities.ts` },
-  { id: 'workflow', type: 'runner', label: 'Workflow Runner', sub: '通用多阶段调度器',
-    layer: 3, col: 6.2, Icon: Workflow,
-    prompt:
-`Workflow Runner —— 【通用】多阶段任务调度器
-
-不绑定任何具体流程
-  本节点不认识"编程 / 测试"这些具体阶段。它只做通用的事：
-    · 从 Recipe 库取一份已记录好的流程
-    · 按 recipe 依次调度 stage sub-agent
-    · 判断各 stage 结果（pass / fail）、管重试计数
-    · 在 recipe 指定的 stage 后 interrupt() 等人工审批
-
-加新流程 = 新建一份 recipe 文件，不改本节点。
-
-目标仓库 = 按频道选（一频道一项目）
-  CODING_REPOS="<channelId>:<repoPath>,…"
-
-文件  src/graph/nodes/workflow-runner.ts
-      src/workflows/recipe-store.ts` },
-
-  // L2 — Recipe 库（Supervisor 右侧，与 workflow 连线）
-  { id: 'recipes', type: 'state', label: 'Recipe 库', sub: '流程配方 · 可复用',
-    layer: 2, col: 6.8, Icon: ClipboardList,
+  {
+    id: 'user', type: 'entry', label: 'Message In', sub: 'Slack · REPL', Icon: User,
+    detail: `Slack（生产）\n  Socket Mode @mention / DM\n  → SlackReceiver.onMention\n  → HumanMessage + SpeakerMeta\n  → graph.invoke()\n\nCLI REPL（本地调试）\n  stdin readline → graph.invoke\n\nsrc/integrations/slack/*\nsrc/main.ts`,
+  },
+  {
+    id: 'classifier', type: 'classifier', label: 'Classifier', sub: 'ONNX 推理', Icon: Cpu,
+    detail: `HTTP POST /classify { text }\n→ { label, confidence }\n\n标签：chat · tool · workflow · capabilities\n置信度 < 0.7 → null（Router 回退 unknown）\n\n本地：python3 scripts/train-router/serve.py\nDocker：classifier sidecar，内网端口 9876\n\nsrc/router-classifier/client.ts`,
+  },
+  {
+    id: 'router', type: 'router', label: 'Router', sub: '前置快速分类', Icon: Split,
+    detail: `前置分类节点，零 LLM 开销\n\n调 ClassifierClient → 写 state.intent\n让 Supervisor 跳过自带意图分类\n\n权限门：classifier 判 workflow\n但用户不在 CODING_ALLOWLIST → 降级 tool\n\n配置\n  CLASSIFIER_URL     http://127.0.0.1:9876\n  CLASSIFIER_TIMEOUT ms（默认 200）\n  CLASSIFIER_MIN_CONF 0–1（默认 0.7）\n\nsrc/graph/nodes/router.ts`,
+  },
+  {
+    id: 'supervisor', type: 'supervisor', label: 'Supervisor', sub: '调度 · 整合', Icon: BrainCircuit,
+    detail: `核心调度 Agent\n\n消费 intent\n  chat      → 直接 LLM 回复（带历史）\n  unknown   → Capabilities 全量查找 → LLM 选 agent\n  workflow  → 白名单二次校验 → workflow node\n  其他      → 直接路由对应 agent\n\n多步计划（pendingPlan）\n  按顺序调度多个 agent，透传 planContext\n\n视觉注入\n  消息带图时自动把 vision 加入候选集\n\n整合结果\n  finalReply → passthrough\n  subAgentResult → LLM compose\n\nsrc/graph/nodes/supervisor.ts`,
+  },
+  {
+    id: 'state', type: 'state', label: 'Graph State', sub: 'SQLite 持久化', Icon: Database,
+    detail: `State 字段\n  messages / next / intent\n  subAgentResult / finalReply\n  candidateAgents / pendingPlan / planContext\n  attachmentPaths / attachmentUrls\n\nSQLite Store（data/graph-runs.db）\n  按 thread_id 持久化\n  跨消息 interrupt/resume\n  Workflow 人工审批靠它暂停 / 恢复\n\nsrc/graph/state.ts\nsrc/graph/store.ts`,
+  },
+  // Agents
+  {
+    id: 'slack', type: 'agent', label: 'Slack', sub: 'ReAct + Finalizer', Icon: MessageSquare,
+    detail: `两阶段执行\n  1. ReAct 循环 → 调用 Slack 工具\n  2. Finalizer → invokeStructured 收敛成稿\n\nSystem prompt 注入\n  · caller Slack user ID（ctx.externalId）\n  · 当前频道 ID（ctx.channel）\n\n对话历史\n  非多步计划时传入最近 20 条历史，\n  让 agent 看到上下文（人名 / 频道等）\n\nfinalReply 写回 state，Supervisor 原样转发\n\n工具（9 个）\n  send_message · get_messages · get_thread_replies\n  list_channels · search_messages · get_user_info\n  upload_file · notify · list_contacts\n\nsrc/graph/nodes/slack.ts`,
+  },
+  {
+    id: 'web', type: 'agent', label: 'Web', sub: 'Bocha 搜索', Icon: Search,
+    detail: `使用 Bocha AI Search API 搜索互联网\n\n适用：新闻 · 最新版本 · 文档 · 实时数据\n\n配置  BOCHA_API_KEY\n\nsrc/graph/nodes/web.ts`,
+  },
+  {
+    id: 'mcp', type: 'agent', label: 'MCP', sub: 'MCP 协议工具', Icon: Wrench,
+    detail: `通过 MCP 协议操作外部服务\n\n典型：Bitbucket · Jira · Notion · 数据库\n启动日志可查已挂载 server（"MCP tools loaded"）\n\n注意：本地文件/仓库 → file agent\n      远程 API 服务  → mcp agent\n\nsrc/graph/nodes/mcp.ts\nsrc/integrations/mcp/`,
+  },
+  {
+    id: 'vision', type: 'agent', label: 'Vision', sub: '图片理解', Icon: Eye,
+    detail: `多模态 LLM 分析图片内容\n\n触发\n  · 消息含图片附件（imageUrls）\n  · 消息正文含图片 URL（.jpg/.png/.webp 等）\n\nSupervisor 自动检测并把 vision\n注入候选集（effectiveCandidates）\n\nsrc/graph/nodes/vision.ts`,
+  },
+  {
+    id: 'imagegen', type: 'agent', label: 'ImageGen', sub: '文生图', Icon: Image,
+    detail: `根据文字描述调用图像生成 API\n\n触发词\n  「帮我画…」「生成一张…」「画一个…」\n\nsrc/graph/nodes/imagegen.ts`,
+  },
+  {
+    id: 'file', type: 'agent', label: 'File', sub: '本地文件', Icon: FolderOpen,
+    detail: `读取 · 写入 · 编辑本地文件；列目录\n\nWorkflow coding recipe 产出的代码\n也走这里读取传递给后续 agent\n\n本地仓库操作  → file agent\n远程 API      → mcp agent\n\nsrc/graph/nodes/file.ts`,
+  },
+  {
+    id: 'terminal', type: 'agent', label: 'Terminal', sub: '只读命令', Icon: Terminal,
+    detail: `只读终端命令\n\n允许：ls · ps · df · git status · cat …\n拒绝：rm · sudo · curl · wget …（自动拦截）\n\nsrc/graph/nodes/terminal.ts`,
+  },
+  {
+    id: 'capabilities', type: 'agent', label: 'Capabilities', sub: '自省节点', Icon: Settings2,
+    detail: `无 LLM，读 Registry 实时状态渲染能力清单\n\nunknown_lookup 路径\n  Router 无法判断 → Supervisor 调此节点\n  → LLM 从清单选 agent → 执行\n  → 找不到 → chat 直接回复\n            + 写 routing-unknown.jsonl\n\nsrc/graph/nodes/capabilities.ts`,
+  },
+  {
+    id: 'workflow', type: 'runner', label: 'Workflow Runner', sub: '多阶段调度', Icon: Workflow,
+    detail: `通用多阶段任务调度器\n\n不绑定具体流程\n  · 从 Recipe 库取流程\n  · 按 recipe 依次调度 stage\n  · 管重试计数\n  · 在指定 stage 后 interrupt() 等人工审批\n\nfan_out 并发\n  test recipe 按维度并发启动子 run\n  每个子 run 通过 workflow_child 执行\n\n配置\n  CODING_REPOS   "<channelId>:<repoPath>,…"\n  TEST_TARGETS   "<channelId>:<botUserId>,…"\n\nsrc/graph/nodes/workflow-runner.ts\nsrc/workflows/recipe-store.ts`,
+  },
+  {
+    id: 'recipes', type: 'state', label: 'Recipe 库', sub: '2 个流程', Icon: ClipboardList,
     isRecipeLib: true,
-    prompt: '' },
+    detail: '',
+  },
+  {
+    id: 'skills', type: 'skill', label: 'SkillContext', sub: '选择性注入', Icon: Puzzle,
+    detail: `可插拔 system prompt 片段\n\n每轮调用\n  1. 所有绑定 skill 的 description 常驻底部\n     （skill menu，几十 token/skill）\n  2. 用户输入命中某 skill（规则/2-gram 匹配）\n     → 注入该 skill 完整正文\n  3. 未命中 → 仅菜单，零额外 token\n\n可绑定 agent\n  supervisor · slack · web · mcp\n\n管理：/skills 页面，改完即时热重载\n\nsrc/skills/registry.ts`,
+  },
+  {
+    id: 'out', type: 'exit', label: 'Reply', sub: 'Slack · stdout', Icon: Bot,
+    detail: `Slack\n  Supervisor next=__end__\n  → say() → chat.postMessage 回原 Thread\n\nCLI REPL\n  → console.log 打印到终端\n\nsrc/integrations/slack/*\nsrc/main.ts`,
+  },
 ];
 
-// ─── 边 ──────────────────────────────────────────────────────────────────────
+// ─── Layout: swimlane pipeline ────────────────────────────────────────────────
+// The graph is laid out as horizontal swimlanes (rows = logical tiers).
+// We define a position for each node as { row, col } and compute pixel coords
+// from a fixed row-height and col-width.
+
+type Lane = { id: string; label: string };
+
+const LANES: Lane[] = [
+  { id: 'io',        label: 'I / O' },
+  { id: 'classify',  label: 'CLASSIFY' },
+  { id: 'dispatch',  label: 'DISPATCH' },
+  { id: 'agents',    label: 'AGENTS' },
+  { id: 'infra',     label: 'INFRA' },
+];
+
+// node id → [lane index, col index within lane]
+const NODE_POS: Record<string, [number, number]> = {
+  user:         [0, 0],
+  out:          [0, 6],
+  classifier:   [1, 0],
+  router:       [1, 1],
+  supervisor:   [2, 3],
+  state:        [2, 6],
+  // agents: row 3, cols 0-7
+  slack:        [3, 0],
+  web:          [3, 1],
+  mcp:          [3, 2],
+  vision:       [3, 3],
+  imagegen:     [3, 4],
+  file:         [3, 5],
+  terminal:     [3, 6],
+  capabilities: [3, 7],
+  workflow:     [3, 8],
+  // infra
+  skills:       [4, 2],
+  recipes:      [4, 7],
+};
+
+const LANE_LABEL_W = 82;
+const COL_W = 138;
+const ROW_H = 148;
+const NODE_W = 118;
+const NODE_H = 62;
+const PAD_X = 24;
+const PAD_Y = 28;
+const CANVAS_W = LANE_LABEL_W + 9 * COL_W + PAD_X * 2 + 60;
+const CANVAS_H = 5 * ROW_H + PAD_Y * 2;
+
+function nodePos(id: string): { x: number; y: number; cx: number; cy: number } {
+  const [row, col] = NODE_POS[id] ?? [0, 0];
+  const x = LANE_LABEL_W + PAD_X + col * COL_W + (COL_W - NODE_W) / 2;
+  const y = PAD_Y + row * ROW_H + (ROW_H - NODE_H) / 2;
+  return { x, y, cx: x + NODE_W / 2, cy: y + NODE_H / 2 };
+}
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+
+const TYPE_ACCENT: Record<NodeType, string> = {
+  entry:      '#5a6578',
+  exit:       '#5a6578',
+  classifier: '#6b7280',
+  router:     '#a78bfa',
+  supervisor: '#4f8ef7',
+  agent:      '#34d399',
+  tool:       '#64748b',
+  state:      '#22d3ee',
+  runner:     '#f59e0b',
+  skill:      '#fb923c',
+};
+
+// ─── Edge definitions ─────────────────────────────────────────────────────────
 
 const EDGES: GEdge[] = [
-  { from: 'slack_in',   to: 'router',      kind: 'flow',   label: 'invoke' },
-  { from: 'router',     to: 'classifier',  kind: 'aux',    label: 'classify' },
-  { from: 'classifier', to: 'router',      kind: 'aux',    label: 'label+conf' },
-  { from: 'router',     to: 'supervisor',  kind: 'flow',   label: 'intent' },
-  { from: 'supervisor', to: 'slack_out',   kind: 'flow',   label: 'next=__end__' },
-  { from: 'state',      to: 'supervisor',  kind: 'aux',    label: '读写 State' },
+  { from: 'user',         to: 'router',       kind: 'main',   label: 'invoke' },
+  { from: 'router',       to: 'classifier',   kind: 'aux',    label: 'classify' },
+  { from: 'classifier',   to: 'router',       kind: 'aux',    label: 'conf' },
+  { from: 'router',       to: 'supervisor',   kind: 'main',   label: 'intent' },
+  { from: 'supervisor',   to: 'out',          kind: 'main',   label: '__end__' },
+  { from: 'supervisor',   to: 'state',        kind: 'aux',    label: 'read/write' },
 
-  { from: 'supervisor', to: 'slack_agent',  kind: 'route' },
-  { from: 'supervisor', to: 'web_agent',    kind: 'route' },
-  { from: 'supervisor', to: 'mcp_agent',    kind: 'route' },
+  { from: 'supervisor', to: 'slack',        kind: 'route' },
+  { from: 'supervisor', to: 'web',          kind: 'route' },
+  { from: 'supervisor', to: 'mcp',          kind: 'route' },
+  { from: 'supervisor', to: 'vision',       kind: 'route' },
+  { from: 'supervisor', to: 'imagegen',     kind: 'route' },
+  { from: 'supervisor', to: 'file',         kind: 'route' },
+  { from: 'supervisor', to: 'terminal',     kind: 'route' },
   { from: 'supervisor', to: 'capabilities', kind: 'route' },
   { from: 'supervisor', to: 'workflow',     kind: 'route' },
-  { from: 'workflow',   to: 'supervisor',   kind: 'return' },
 
-  { from: 'slack_agent', to: 'slack_tools', kind: 'aux', label: 'tool' },
+  { from: 'slack',        to: 'supervisor',  kind: 'return' },
+  { from: 'web',          to: 'supervisor',  kind: 'return' },
+  { from: 'mcp',          to: 'supervisor',  kind: 'return' },
+  { from: 'vision',       to: 'supervisor',  kind: 'return' },
+  { from: 'imagegen',     to: 'supervisor',  kind: 'return' },
+  { from: 'file',         to: 'supervisor',  kind: 'return' },
+  { from: 'terminal',     to: 'supervisor',  kind: 'return' },
+  { from: 'capabilities', to: 'supervisor',  kind: 'return' },
+  { from: 'workflow',     to: 'supervisor',  kind: 'return' },
 
-  { from: 'slack_agent', to: 'skills', kind: 'aux', label: 'skill 注入' },
-  { from: 'web_agent',   to: 'skills', kind: 'aux' },
-  { from: 'mcp_agent',   to: 'skills', kind: 'aux' },
-  { from: 'supervisor',  to: 'skills', kind: 'aux' },
+  { from: 'slack',    to: 'skills',   kind: 'aux', label: 'inject' },
+  { from: 'web',      to: 'skills',   kind: 'aux' },
+  { from: 'mcp',      to: 'skills',   kind: 'aux' },
+  { from: 'supervisor', to: 'skills', kind: 'aux' },
 
-  { from: 'recipes', to: 'workflow', kind: 'aux', label: '取 recipe' },
+  { from: 'recipes',  to: 'workflow', kind: 'aux', label: 'recipe' },
 ];
 
-// ─── Tool 层（Slack Agent 下方，Skills 同层）────────────────────────────────
+// ─── Detail / Recipe panels ───────────────────────────────────────────────────
 
-const TOOL_NODES: GNode[] = [
-  { id: 'slack_tools', type: 'tool', label: 'Slack Tools', sub: 'API wrappers',
-    layer: 4, col: 0.5, Icon: Wrench,
-    prompt:
-`Slack 工具集（挂在 Slack Agent）
-
-  slack_send_message / get_messages / list_channels /
-  search_messages / notify / list_contacts …
-
-文件  src/integrations/slack/tools.ts` },
-  { id: 'skills', type: 'skill', label: 'SkillContext', sub: '选择性注入',
-    layer: 4, col: 2.5, Icon: Puzzle,
-    prompt:
-`Skill 系统 —— 可插拔的 system prompt 片段
-
-工作方式（选择性注入）
-  每个 agent 绑定一组 skill（skills/_bindings.json）。
-  每轮调用：
-    1. description 常驻 system prompt 底部（skill menu，几十 token/skill）
-    2. 用户输入命中某 skill（规则/2-gram 匹配，零 LLM 开销）
-       → 当轮把该 skill 完整正文注入 system prompt
-    3. 未命中 → 仅菜单，零额外 token，不污染正常对话
-
-_bindings.json
-  { "supervisor": ["commit-msg"], "slack": ["code-review"] }
-
-UI 管理
-  /skills 页面：CRUD + agent×skill 绑定矩阵，改完即时生效（热重载）。
-
-文件  src/skills/registry.ts、inject.ts、bindings.ts` },
-];
-
-const ALL_NODES = [...NODES, ...TOOL_NODES];
-
-// ─── 布局（5 层主图 + tools/skills 层）──────────────────────────────────────
-
-const CANVAS_W = 1400;
-const LAYER_Y = [80, 220, 370, 500, 630];  // 5 层
-const COL_W = 160;
-const COL_X0 = 120;
-
-function nodeXY(n: GNode): { x: number; y: number } {
-  return { x: COL_X0 + n.col * COL_W, y: LAYER_Y[n.layer] ?? 70 };
-}
-
-const NODE_R: Record<NodeType, number> = {
-  entry: 38, exit: 38, supervisor: 54, agent: 44, tool: 36, state: 40,
-  runner: 54, stage: 44, approval: 38, router: 44, skill: 44, classifier: 38,
-};
-
-const FILL: Record<NodeType, string> = {
-  entry:      '#3f4756',
-  exit:       '#3f4756',
-  supervisor: '#6366f1',
-  agent:      '#10b981',
-  tool:       '#64748b',
-  state:      '#06b6d4',
-  runner:     '#0ea5e9',
-  stage:      '#3b82f6',
-  approval:   '#ec4899',
-  router:     '#a855f7',
-  skill:      '#f59e0b',
-  classifier: '#78716c',
-};
-
-const EDGE_COLOR: Record<GEdge['kind'], string> = {
-  flow:     '#94a3b8',
-  route:    '#6366f1',
-  return:   '#10b981',
-  aux:      '#475569',
-  retry:    '#f59e0b',
-  approval: '#ec4899',
-};
-const EDGE_DASH: Record<GEdge['kind'], string> = {
-  flow: 'none', route: '5,5', return: '5,5', aux: '3,4', retry: '5,4', approval: 'none',
-};
-
-const LEGEND_NODES = [
-  { c: FILL.router,     t: 'Router（前置分类）' },
-  { c: FILL.classifier, t: 'ONNX 推理服务' },
-  { c: FILL.supervisor, t: 'Supervisor' },
-  { c: FILL.agent,      t: 'Sub-Agent' },
-  { c: FILL.skill,      t: 'Skill（选择性注入）' },
-  { c: FILL.runner,     t: 'Workflow Runner' },
-  { c: FILL.state,      t: 'State' },
-];
-const LEGEND_EDGES = [
-  { c: EDGE_COLOR.flow,   dash: false, t: '主流程' },
-  { c: EDGE_COLOR.route,  dash: true,  t: '调度' },
-  { c: EDGE_COLOR.return, dash: true,  t: '返回' },
-];
-
-const TYPE_LABEL: Record<NodeType, string> = {
-  entry: 'Graph Entry', exit: 'Graph Exit', supervisor: 'Orchestrator',
-  agent: 'Sub-Agent', tool: 'Tool', state: 'State / Memory',
-  runner: 'Workflow Runner', stage: 'Workflow Stage', approval: 'Human Approval',
-  router: 'Router', skill: 'Skill Layer', classifier: 'ONNX Inference',
-};
-
-// ─── 正交折线 ─────────────────────────────────────────────────────────────────
-
-function orthPath(
-  a: { x: number; y: number }, ra: number,
-  b: { x: number; y: number }, rb: number,
-  kind: GEdge['kind'],
-): { d: string; mx: number; my: number } {
-  if (Math.abs(a.y - b.y) < 4) {
-    const y = a.y;
-    const dir = b.x > a.x ? 1 : -1;
-    const x1 = a.x + dir * ra, x2 = b.x - dir * rb;
-    if (kind === 'retry') {
-      const off = -54;
-      const my = y + off;
-      const d = `M${x1},${y} C${x1},${my} ${x2},${my} ${x2},${y}`;
-      return { d, mx: (x1 + x2) / 2, my: my * 0.5 + y * 0.5 };
-    }
-    const d = `M${x1},${y} L${x2},${y}`;
-    return { d, mx: (x1 + x2) / 2, my: y - 10 };
-  }
-  const goingDown = b.y > a.y;
-  const y1 = a.y + (goingDown ? ra : -ra);
-  const y2 = b.y - (goingDown ? rb : -rb);
-  const lift = kind === 'return' ? -22 : 0;
-  const xOff = kind === 'return' ? 14 : 0;
-  const ax = a.x + xOff, bx = b.x + xOff;
-  const midY = (y1 + y2) / 2 + lift;
-  const d = `M${ax},${y1} L${ax},${midY} L${bx},${midY} L${bx},${y2}`;
-  return { d, mx: (ax + bx) / 2, my: midY };
-}
-
-// ─── Recipe 详情面板 ─────────────────────────────────────────────────────────
-
-function RecipeStageRow({ stage, isApproveAfter, retryTarget }: {
-  stage: RecipeStage;
-  isApproveAfter: boolean;
-  retryTarget?: string;
-}) {
+function RecipeCard({ r, expanded, onToggle }: { r: RecipeDef; expanded: boolean; onToggle: () => void }) {
   return (
-    <div className="relative">
-      <div className="flex items-start gap-3 py-3">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5"
-          style={{ background: stage.readonly ? '#1e293b' : '#0f2035', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <stage.Icon size={15} className={stage.readonly ? 'text-slate-400' : 'text-sky-400'} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-semibold text-white">{stage.label}</span>
-            <span className="text-[10px] text-slate-500 bg-slate-800/60 px-1.5 py-0.5 rounded">{stage.sub}</span>
-            {stage.readonly && (
-              <span className="text-[10px] text-slate-500 bg-slate-800/40 px-1.5 py-0.5 rounded">只读</span>
-            )}
-            {stage.isPlan && (
-              <span className="text-[10px] text-amber-400/80 bg-amber-500/10 px-1.5 py-0.5 rounded">plan</span>
-            )}
-          </div>
-          {retryTarget && (
-            <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-400/70">
-              <RefreshCw size={10} />失败 → 回退至 <span className="font-medium">{retryTarget}</span>
-            </div>
-          )}
-        </div>
-        {isApproveAfter && (
-          <div className="flex items-center gap-1 text-[11px] text-pink-400 flex-shrink-0 mt-1">
-            <Pause size={11} />人工审批
-          </div>
-        )}
-      </div>
-      {/* connector line */}
-      <div className="absolute left-4 top-12 bottom-0 w-px bg-slate-800" />
-    </div>
-  );
-}
-
-function RecipeCard({ recipe, expanded, onToggle }: {
-  recipe: RecipeDef;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div className="rounded-xl border border-slate-800/80 overflow-hidden mb-3"
-      style={{ borderLeftColor: recipe.color, borderLeftWidth: 3 }}>
+    <div style={{ border: `1px solid #1e2530`, borderLeft: `2px solid ${r.color}`, borderRadius: 6, marginBottom: 10, overflow: 'hidden' }}>
       <button
-        className="w-full text-left px-4 py-3.5 flex items-center gap-3 hover:bg-slate-800/30 transition"
         onClick={onToggle}
+        style={{ width: '100%', background: 'none', border: 'none', padding: '12px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left' }}
       >
-        <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: recipe.color }} />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-white">{recipe.name}</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded font-mono"
-              style={{ color: recipe.color, background: `${recipe.color}18` }}>
-              tag:{recipe.tag}
-            </span>
-            <span className="text-[10px] text-slate-500 ml-auto">
-              {recipe.stages.length} stages · max {recipe.maxRetries} retries
-            </span>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">{recipe.description}</p>
-        </div>
-        <ChevronRight size={14} className={`text-slate-500 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: r.color, flexShrink: 0 }} />
+        <span style={{ flex: 1 }}>
+          <span style={{ color: '#e2e8f4', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, fontWeight: 600 }}>{r.name}</span>
+          <span style={{ color: '#5a6578', fontSize: 11, display: 'block', marginTop: 2 }}>{r.stages.length} stages · {r.maxRetries} retries max</span>
+        </span>
+        <ChevronRight size={13} style={{ color: '#5a6578', transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0 }} />
       </button>
-
       {expanded && (
-        <div className="px-4 pb-1 border-t border-slate-800/60 bg-slate-900/30">
-          <p className="text-[11px] text-slate-400 py-3 leading-relaxed">{recipe.description}</p>
-          <div className="relative">
-            {recipe.stages.map((stage, i) => (
-              <RecipeStageRow
-                key={stage.id}
-                stage={stage}
-                isApproveAfter={recipe.approveAfter.includes(stage.id)}
-                retryTarget={recipe.retryTo?.[stage.id]}
-              />
-            ))}
-          </div>
-          {/* Legend row */}
-          <div className="flex items-center gap-4 py-3 mt-1 border-t border-slate-800/40 text-[10px] text-slate-500">
-            <span className="flex items-center gap-1"><Pause size={9} className="text-pink-400" /> 人工审批点</span>
-            <span className="flex items-center gap-1"><RefreshCw size={9} className="text-amber-400" /> 失败回退</span>
-            <span className="flex items-center gap-1"><CheckCircle2 size={9} className="text-emerald-400" /> 完成提交</span>
+        <div style={{ borderTop: '1px solid #1e2530', padding: '10px 14px 14px' }}>
+          <p style={{ color: '#8898aa', fontSize: 11, lineHeight: 1.6, marginBottom: 12 }}>{r.description}</p>
+          {r.stages.map((s, i) => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, paddingBottom: 8, marginBottom: i < r.stages.length - 1 ? 4 : 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 4, background: s.readonly ? '#111418' : '#0f1f35', border: '1px solid #1e2530', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+                <span style={{ color: s.readonly ? '#5a6578' : '#4f8ef7', display: 'flex' }}><s.Icon size={13} /></span>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ color: '#e2e8f4', fontSize: 12, fontWeight: 500 }}>{s.label}</span>
+                  <span style={{ color: '#5a6578', fontSize: 10, background: '#111418', padding: '1px 6px', borderRadius: 3, border: '1px solid #1e2530' }}>{s.sub}</span>
+                  {s.isPlan && <span style={{ color: '#f59e0b', fontSize: 10, background: 'rgba(245,158,11,0.08)', padding: '1px 6px', borderRadius: 3 }}>plan</span>}
+                  {r.approveAfter.includes(s.id) && <span style={{ color: '#ec4899', fontSize: 10, display: 'flex', alignItems: 'center', gap: 3 }}><Pause size={9} />人工审批</span>}
+                </div>
+                {r.retryTo?.[s.id] && (
+                  <div style={{ color: '#f59e0b', fontSize: 10, marginTop: 3, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <RefreshCw size={9} />失败 → 回退至 {r.retryTo[s.id]}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          <div style={{ marginTop: 8, borderTop: '1px solid #1e2530', paddingTop: 8, display: 'flex', gap: 12, fontSize: 10, color: '#5a6578' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Pause size={9} style={{ color: '#ec4899' }} />审批点</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><RefreshCw size={9} style={{ color: '#f59e0b' }} />失败回退</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><CheckCircle2 size={9} style={{ color: '#34d399' }} />完成</span>
           </div>
         </div>
       )}
@@ -534,234 +313,352 @@ function RecipeCard({ recipe, expanded, onToggle }: {
   );
 }
 
-function RecipesDrawer({ onClose }: { onClose: () => void }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+function SidePanel({ node, onClose }: { node: GNode; onClose: () => void }) {
+  const [expandedRecipe, setExpandedRecipe] = useState<string | null>(null);
+  const accent = TYPE_ACCENT[node.type];
+  const isRecipes = node.isRecipeLib;
 
   return (
-    <div className="fixed right-0 top-0 h-full w-[420px] bg-[#0e1119]/97 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col">
+    <div style={{
+      position: 'fixed', right: 0, top: 0, bottom: 0, width: 380,
+      background: '#0e1119', borderLeft: '1px solid #1e2530',
+      display: 'flex', flexDirection: 'column', zIndex: 40,
+    }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-cyan-500/15 border border-cyan-500/30">
-            <ClipboardList size={18} className="text-cyan-400" />
-          </div>
-          <div>
-            <h2 className="text-base font-semibold text-white leading-tight">Recipe 库</h2>
-            <p className="text-[11px] text-slate-500 mt-0.5">可复用的多阶段流程配方</p>
-          </div>
+      <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid #1e2530', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 6, background: `${accent}18`, border: `1px solid ${accent}40`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <span style={{ color: accent, display: 'flex' }}><node.Icon size={16} /></span>
         </div>
-        <button onClick={onClose} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition">
-          <X size={16} />
+        <div style={{ flex: 1 }}>
+          <div style={{ color: '#e2e8f4', fontFamily: 'JetBrains Mono, monospace', fontSize: 13, fontWeight: 700 }}>{node.label}</div>
+          <div style={{ color: '#5a6578', fontSize: 11, marginTop: 2 }}>{node.sub}</div>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: '#5a6578', display: 'flex', alignItems: 'center' }}>
+          <X size={15} />
         </button>
       </div>
 
-      {/* Intro */}
-      <div className="px-6 py-4 border-b border-slate-800/40 flex-shrink-0">
-        <p className="text-[11px] text-slate-400 leading-relaxed">
-          每份 recipe 描述一类任务的完整阶段流程（stages、审批点、重试规则）。
-          Workflow Runner 通用，不绑定任何具体流程 ——
-          加新流程只需在 <span className="font-mono text-slate-300">src/workflows/recipes/</span> 新建文件。
-        </p>
-      </div>
-
-      {/* Recipe list */}
-      <div className="flex-1 overflow-auto px-5 py-4">
-        {RECIPES.map(r => (
-          <RecipeCard
-            key={r.name}
-            recipe={r}
-            expanded={expanded === r.name}
-            onToggle={() => setExpanded(expanded === r.name ? null : r.name)}
-          />
-        ))}
-        <div className="mt-2 px-3 py-3 rounded-lg border border-dashed border-slate-700/50 text-center">
-          <p className="text-[11px] text-slate-600">
-            + 新建 <span className="font-mono">src/workflows/recipes/&lt;name&gt;.ts</span><br/>
-            实现 <span className="font-mono">Recipe</span> 接口后自动注册
-          </p>
-        </div>
+      {/* Body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+        {isRecipes ? (
+          <>
+            <p style={{ color: '#8898aa', fontSize: 11, lineHeight: 1.65, marginBottom: 16 }}>
+              每份 recipe 描述一类任务的完整阶段流程。
+              Workflow Runner 通用 —— 加新流程只需在{' '}
+              <code style={{ color: '#a0aec0', fontFamily: 'JetBrains Mono, monospace', fontSize: 10 }}>src/workflows/recipes/</code>{' '}
+              新建文件。
+            </p>
+            {RECIPES.map(r => (
+              <RecipeCard
+                key={r.name}
+                r={r}
+                expanded={expandedRecipe === r.name}
+                onToggle={() => setExpandedRecipe(expandedRecipe === r.name ? null : r.name)}
+              />
+            ))}
+            <div style={{ marginTop: 6, padding: '10px 14px', border: '1px dashed #1e2530', borderRadius: 6, textAlign: 'center' }}>
+              <p style={{ color: '#3a4658', fontSize: 11 }}>
+                + <code style={{ fontFamily: 'JetBrains Mono, monospace' }}>src/workflows/recipes/&lt;name&gt;.ts</code>
+              </p>
+            </div>
+          </>
+        ) : (
+          <pre style={{
+            color: '#a0b0c8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11.5,
+            lineHeight: 1.75, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            background: '#080a10', border: `1px solid #1e2530`, borderLeft: `2px solid ${accent}`,
+            borderRadius: 6, padding: '14px 16px', margin: 0,
+          }}>
+            {node.detail || '暂无说明'}
+          </pre>
+        )}
       </div>
     </div>
   );
 }
 
-// ─── 节点详情面板 ─────────────────────────────────────────────────────────────
+// ─── SVG edge renderer ────────────────────────────────────────────────────────
 
-function DetailPanel({ node, onClose }: { node: GNode; onClose: () => void }) {
+function EdgeLayer({ edges, selectedId }: { edges: GEdge[]; selectedId: string | null }) {
+  const EDGE_COLOR: Record<GEdge['kind'], string> = {
+    main:   '#4f8ef7',
+    route:  '#1e3a5f',
+    return: '#0d2a1a',
+    aux:    '#1e2530',
+  };
+  const EDGE_COLOR_HOT: Record<GEdge['kind'], string> = {
+    main:   '#4f8ef7',
+    route:  '#4f8ef7',
+    return: '#34d399',
+    aux:    '#3a4658',
+  };
+  const STROKE_W: Record<GEdge['kind'], number> = { main: 2, route: 1.5, return: 1.5, aux: 1 };
+  const DASH: Record<GEdge['kind'], string> = { main: 'none', route: '4,4', return: '4,4', aux: '2,4' };
+
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-[#0e1119]/96 backdrop-blur-xl border-l border-slate-800/70 z-30 flex flex-col">
-      <div className="flex items-center justify-between px-6 py-5 border-b border-slate-800/60">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: FILL[node.type] }}>
-            <node.Icon size={18} className="text-white" />
-          </div>
-          <div>
-            <h2 className="text-base font-semibold text-white leading-tight">{node.label}</h2>
-            <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-0.5">{TYPE_LABEL[node.type]}</p>
-          </div>
-        </div>
-        <button onClick={onClose} className="p-1.5 rounded-md text-slate-500 hover:text-white hover:bg-slate-800/60 transition">
-          <X size={16} />
-        </button>
+    <svg
+      style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}
+      width={CANVAS_W} height={CANVAS_H}
+    >
+      <defs>
+        {(['main', 'route', 'return', 'aux'] as GEdge['kind'][]).map(k => (
+          <marker key={k} id={`arr-${k}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill={EDGE_COLOR[k]} opacity={0.7} />
+          </marker>
+        ))}
+        {(['main', 'route', 'return', 'aux'] as GEdge['kind'][]).map(k => (
+          <marker key={`hot-${k}`} id={`arr-hot-${k}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill={EDGE_COLOR_HOT[k]} opacity={0.9} />
+          </marker>
+        ))}
+      </defs>
+      {edges.map((e, i) => {
+        const a = nodePos(e.from);
+        const b = nodePos(e.to);
+        const hot = selectedId === e.from || selectedId === e.to;
+        const c = hot ? EDGE_COLOR_HOT[e.kind] : EDGE_COLOR[e.kind];
+        const w = STROKE_W[e.kind] * (hot ? 1.6 : 1);
+        const dash = DASH[e.kind];
+        const markerId = hot ? `arr-hot-${e.kind}` : `arr-${e.kind}`;
+
+        // Straight line for aux/same-row; elbow for cross-row
+        let d: string;
+        let lx = 0, ly = 0;
+
+        const sameRow = Math.abs(a.cy - b.cy) < 10;
+        if (sameRow) {
+          const x1 = a.cx + NODE_W / 2, x2 = b.cx - NODE_W / 2;
+          d = `M${x1},${a.cy} L${x2},${b.cy}`;
+          lx = (x1 + x2) / 2; ly = a.cy - 10;
+        } else {
+          // route: from supervisor bottom → agent top
+          // return: from agent top → supervisor (slightly offset right)
+          const isReturn = e.kind === 'return';
+          const ax = isReturn ? a.cx + 6 : a.cx;
+          const bx = isReturn ? b.cx + 6 : b.cx;
+          const y1 = a.cy + (a.cy < b.cy ? NODE_H / 2 : -NODE_H / 2);
+          const y2 = b.cy + (a.cy < b.cy ? -NODE_H / 2 : NODE_H / 2);
+          const my = (y1 + y2) / 2;
+          d = `M${ax},${y1} L${ax},${my} L${bx},${my} L${bx},${y2}`;
+          lx = (ax + bx) / 2; ly = my;
+        }
+
+        return (
+          <g key={i}>
+            <path d={d} fill="none" stroke={c} strokeWidth={w}
+              strokeDasharray={dash} markerEnd={`url(#${markerId})`}
+              strokeLinejoin="round" opacity={hot ? 1 : 0.6} />
+            {e.label && hot && (
+              <g>
+                <rect x={lx - e.label.length * 3.4 - 4} y={ly - 8} width={e.label.length * 6.8 + 8} height={15} rx={3} fill="#0a0c10" />
+                <text x={lx} y={ly + 3} textAnchor="middle" fontSize="9.5" fontFamily="JetBrains Mono, monospace" fill={c} fontWeight={600}>{e.label}</text>
+              </g>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ─── Node card ────────────────────────────────────────────────────────────────
+
+function NodeCard({ node, selected, onClick }: { node: GNode; selected: boolean; onClick: () => void }) {
+  const accent = TYPE_ACCENT[node.type];
+  const { x, y } = nodePos(node.id);
+
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        position: 'absolute',
+        left: x, top: y,
+        width: NODE_W, height: NODE_H,
+        background: selected ? `${accent}12` : '#111418',
+        border: `1px solid ${selected ? accent : '#1e2530'}`,
+        borderTop: `2px solid ${selected ? accent : accent + '60'}`,
+        borderRadius: 8,
+        cursor: 'pointer',
+        display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+        padding: '10px 12px',
+        transition: 'all 0.12s ease',
+        textAlign: 'left',
+        outline: 'none',
+        boxShadow: selected ? `0 0 0 1px ${accent}30, 0 4px 16px ${accent}18` : 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
+        <span style={{ color: accent, flexShrink: 0, display: 'flex' }}><node.Icon size={13} /></span>
+        <span style={{
+          fontFamily: 'JetBrains Mono, monospace',
+          fontSize: 11.5, fontWeight: 700,
+          color: selected ? '#e2e8f4' : '#c8d5e8',
+          lineHeight: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>{node.label}</span>
       </div>
-      <div className="px-6 py-5 flex-1 overflow-auto">
-        <pre className="text-xs leading-relaxed text-slate-300 whitespace-pre-wrap font-mono bg-[#080a11] border border-slate-800/80 rounded-xl p-4"
-          style={{ borderLeftColor: FILL[node.type], borderLeftWidth: 2 }}>
-          {node.prompt ?? '该节点暂无说明'}
-        </pre>
-      </div>
+      <span style={{
+        fontFamily: 'Inter, system-ui, sans-serif',
+        fontSize: 10, color: '#5a6578', lineHeight: 1.3,
+        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+      }}>{node.sub}</span>
+      {node.isRecipeLib && (
+        <span style={{ position: 'absolute', bottom: 6, right: 8, fontSize: 9, color: accent + '90', fontFamily: 'JetBrains Mono, monospace' }}>click ›</span>
+      )}
+    </button>
+  );
+}
+
+// ─── Lane labels + grid ───────────────────────────────────────────────────────
+
+function LaneGrid() {
+  return (
+    <div style={{ position: 'absolute', top: 0, left: 0, width: CANVAS_W, height: CANVAS_H, pointerEvents: 'none' }}>
+      {LANES.map((lane, i) => {
+        const y = PAD_Y + i * ROW_H;
+        return (
+          <div key={lane.id} style={{ position: 'absolute', top: y, left: 0, width: CANVAS_W, height: ROW_H }}>
+            {/* Row separator */}
+            {i > 0 && (
+              <div style={{ position: 'absolute', top: 0, left: LANE_LABEL_W, right: 0, height: 1, background: '#1e2530', opacity: 0.5 }} />
+            )}
+            {/* Lane label */}
+            <div style={{
+              position: 'absolute', left: 0, top: 0, width: LANE_LABEL_W, height: ROW_H,
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+              paddingRight: 14,
+            }}>
+              <span style={{
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 9, fontWeight: 700, letterSpacing: '0.12em',
+                color: '#2a3545',
+                writingMode: 'horizontal-tb',
+              }}>{lane.label}</span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ─── 主组件 ───────────────────────────────────────────────────────────────────
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AgentGraph() {
-  const [sel, setSel] = useState<string | null>(null);
-  const [showRecipes, setShowRecipes] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const byId = useMemo(() => Object.fromEntries(ALL_NODES.map(n => [n.id, n])), []);
-  const selected = sel ? byId[sel] : null;
+  const selected = selectedId ? NODES.find(n => n.id === selectedId) ?? null : null;
 
-  function handleNodeClick(n: GNode) {
-    if (n.isRecipeLib) {
-      setShowRecipes(true);
-      setSel(null);
-    } else {
-      setSel(sel === n.id ? null : n.id);
-      setShowRecipes(false);
+  const handleNodeClick = useCallback((id: string) => {
+    setSelectedId(prev => prev === id ? null : id);
+  }, []);
+
+  // Close panel on outside click
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-panel]') || target.closest('[data-node]')) return;
+      setSelectedId(null);
     }
-  }
-
-  const CANVAS_H = LAYER_Y[LAYER_Y.length - 1]! + 130;
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   return (
-    <div className="w-full h-screen bg-[#0b0e16] text-slate-200 font-sans flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-7 py-3 border-b border-slate-800/70 bg-[#0b0e16]/90 backdrop-blur z-20 flex-shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center">
-            <Workflow size={14} className="text-indigo-400" />
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #0a0c10; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: #0a0c10; }
+        ::-webkit-scrollbar-thumb { background: #1e2530; border-radius: 3px; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+      `}</style>
+
+      <div style={{ width: '100vw', height: '100vh', background: '#0a0c10', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: 'Inter, system-ui, sans-serif' }}>
+        {/* Header */}
+        <header style={{
+          flexShrink: 0, height: 46, borderBottom: '1px solid #1e2530',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 20px', background: '#0a0c10',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 26, height: 26, borderRadius: 6, background: '#4f8ef718', border: '1px solid #4f8ef740', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ color: '#4f8ef7', display: 'flex' }}><Workflow size={13} /></span>
+            </div>
+            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, fontWeight: 700, color: '#e2e8f4' }}>Tessel</span>
+            <span style={{ color: '#2a3545', fontSize: 13 }}>·</span>
+            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: '#3a5070' }}>agent graph</span>
           </div>
-          <span className="text-sm font-semibold">
-            <span className="text-white">Tessel</span>
-            <span className="text-slate-600 mx-2">·</span>
-            <span className="text-slate-400">Agent Graph</span>
-          </span>
-        </div>
-        <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap justify-end">
-          {LEGEND_NODES.map(({ c, t }) => (
-            <span key={t} className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full" style={{ background: c }} />{t}
-            </span>
-          ))}
-          <span className="w-px h-3.5 bg-slate-700/60" />
-          {LEGEND_EDGES.map(({ c, dash, t }) => (
-            <span key={t} className="flex items-center gap-1.5">
-              <svg width="18" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke={c} strokeWidth="1.5" strokeDasharray={dash ? '4,3' : 'none'} /></svg>{t}
-            </span>
-          ))}
-          <span className="w-px h-3.5 bg-slate-700/60" />
-          <a href="/logs" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 transition">
-            <ScrollText size={12} /> Logs
-          </a>
-        </div>
-      </header>
 
-      {/* Canvas */}
-      <div className="flex-1 overflow-auto flex justify-center">
-        <svg width={CANVAS_W} height={CANVAS_H} className="overflow-visible">
-          <defs>
-            {Object.entries(EDGE_COLOR).map(([k, c]) => (
-              <marker key={k} id={`mk-${k}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-                <path d="M0,0 L10,5 L0,10 z" fill={c} opacity="0.85" />
-              </marker>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            {/* Legend */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, borderRight: '1px solid #1e2530', paddingRight: 16 }}>
+              {([
+                { c: '#a78bfa', t: 'Router' },
+                { c: '#4f8ef7', t: 'Supervisor' },
+                { c: '#34d399', t: 'Agent' },
+                { c: '#f59e0b', t: 'Workflow' },
+                { c: '#22d3ee', t: 'State' },
+              ] as const).map(({ c, t }) => (
+                <span key={t} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: '#5a6578', fontFamily: 'JetBrains Mono, monospace' }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: c, display: 'inline-block' }} />{t}
+                </span>
+              ))}
+            </div>
+            <a
+              href="/logs"
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', borderRadius: 5, border: '1px solid #34d39940', background: '#34d39910', color: '#34d399', fontSize: 11, fontFamily: 'JetBrains Mono, monospace', textDecoration: 'none' }}
+            >
+              <ScrollText size={11} />logs
+            </a>
+          </div>
+        </header>
+
+        {/* Canvas */}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <div
+            ref={containerRef}
+            style={{ position: 'relative', width: CANVAS_W, height: CANVAS_H, minWidth: CANVAS_W }}
+          >
+            <LaneGrid />
+            <EdgeLayer edges={EDGES} selectedId={selectedId} />
+            {NODES.map(n => (
+              <div key={n.id} data-node>
+                <NodeCard
+                  node={n}
+                  selected={selectedId === n.id}
+                  onClick={() => handleNodeClick(n.id)}
+                />
+              </div>
             ))}
-          </defs>
 
-          {/* Layer labels */}
-          {[
-            { i: 0, t: 'I/O' }, { i: 1, t: 'ROUTER' }, { i: 2, t: '调度' },
-            { i: 3, t: 'AGENTS' }, { i: 4, t: 'TOOLS' },
-          ].map(({ i, t }) => (
-            <text key={t} x={14} y={LAYER_Y[i]! + 4} className="select-none"
-              fill="#3a4658" fontSize="10" fontWeight="700" letterSpacing="1">{t}</text>
-          ))}
-
-          {/* Edges */}
-          {EDGES.map((e, idx) => {
-            const a = byId[e.from], b = byId[e.to];
-            if (!a || !b) return null;
-            const pa = nodeXY(a), pb = nodeXY(b);
-            const { d, mx, my } = orthPath(pa, NODE_R[a.type], pb, NODE_R[b.type], e.kind);
-            const c = EDGE_COLOR[e.kind];
-            return (
-              <g key={idx}>
-                <path d={d} fill="none" stroke={c} strokeWidth={e.kind === 'flow' || e.kind === 'approval' ? 2 : 1.4}
-                  strokeDasharray={EDGE_DASH[e.kind]} markerEnd={`url(#mk-${e.kind})`} opacity="0.8" strokeLinejoin="round" />
-                {e.label && (
-                  <g>
-                    <rect x={mx - e.label.length * 3.6 - 5} y={my - 8} width={e.label.length * 7.2 + 10} height={16} rx={4} fill="#0b0e16" />
-                    <text x={mx} y={my + 3} textAnchor="middle" fontSize="10" fill={c} fontWeight="600">{e.label}</text>
-                  </g>
-                )}
-              </g>
-            );
-          })}
-
-          {/* Nodes */}
-          {ALL_NODES.map(n => {
-            const { x, y } = nodeXY(n);
-            const r = NODE_R[n.type];
-            const isSel = sel === n.id;
-            const isRecipeSel = showRecipes && n.isRecipeLib;
-            const fill = FILL[n.type];
-            return (
-              <g key={n.id} onClick={() => handleNodeClick(n)} style={{ cursor: 'pointer' }}>
-                {(isSel || isRecipeSel) && (
-                  <circle cx={x} cy={y} r={r + 7} fill="none" stroke={fill} strokeWidth="2" opacity="0.5" />
-                )}
-                <circle cx={x} cy={y} r={r} fill={fill} opacity={(isSel || isRecipeSel) ? 1 : 0.92}
-                  stroke={(isSel || isRecipeSel) ? '#fff' : 'rgba(255,255,255,0.12)'}
-                  strokeWidth={(isSel || isRecipeSel) ? 1.5 : 1} />
-                {n.isRecipeLib && (
-                  <circle cx={x} cy={y} r={r - 4} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" strokeDasharray="3,3" />
-                )}
-                <foreignObject x={x - 13} y={y - r * 0.52} width={26} height={26} style={{ pointerEvents: 'none' }}>
-                  <div className="flex justify-center text-white/95">
-                    <n.Icon size={n.type === 'supervisor' || n.type === 'runner' ? 24 : 20} />
-                  </div>
-                </foreignObject>
-                <text x={x} y={y + r * 0.42} textAnchor="middle"
-                  fontSize={n.type === 'supervisor' || n.type === 'runner' ? 13 : 11.5}
-                  fontWeight="700" fill="#fff" style={{ pointerEvents: 'none' }}>{n.label}</text>
-                {n.sub && (
-                  <text x={x} y={y + r + 15} textAnchor="middle" fontSize="10"
-                    fill="rgba(148,163,184,0.85)" style={{ pointerEvents: 'none' }}>{n.sub}</text>
-                )}
-                {n.isRecipeLib && (
-                  <text x={x} y={y + r + 28} textAnchor="middle" fontSize="9"
-                    fill="rgba(6,182,212,0.6)" style={{ pointerEvents: 'none' }}>点击查看详情</text>
-                )}
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-
-      {/* Hint */}
-      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 bg-[#11141f] border border-slate-800/60 px-3.5 py-1.5 rounded-full">
-          <ChevronRight size={12} className="text-indigo-400" />点击节点查看详情 · 点击 Recipe 库查看所有流程配方
+            {/* Click hint */}
+            {!selectedId && (
+              <div style={{
+                position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
+                background: '#111418', border: '1px solid #1e2530', borderRadius: 20,
+                padding: '5px 14px', fontSize: 10.5, color: '#3a4658',
+                fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap', pointerEvents: 'none',
+              }}>
+                › 点击任意节点查看详情
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Panels */}
-      {showRecipes && <RecipesDrawer onClose={() => setShowRecipes(false)} />}
-      {selected && !showRecipes && <DetailPanel node={selected} onClose={() => setSel(null)} />}
-    </div>
+      {/* Side panel */}
+      {selected && (
+        <div data-panel>
+          <SidePanel node={selected} onClose={() => setSelectedId(null)} />
+        </div>
+      )}
+    </>
   );
 }
 
-void Code2;
-void ChevronLeft;
+void ScrollText; void CheckCircle2; void RefreshCw; void Pause;
+void FileCode; void FlaskConical; void ShieldCheck; void GitBranch;
+void ClipboardList; void Database; void ChevronRight;
