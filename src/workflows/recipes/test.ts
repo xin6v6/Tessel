@@ -2,8 +2,9 @@ import type { Recipe } from "./types.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
 // test recipe —— 并发测试多个功能测试点。
-// 绑定频道：WORKFLOW_CHANNELS=C0BCE1G1C8M:test（TEST_CHANNEL=C0BCE1G1C8M）
-// 目标 bot：U0AN70R27DW（TARGET_BOT_ID=U0AN70R27DW）
+// 配置（支持多频道，每个频道对应一个被测 bot）：
+//   TEST_TARGETS=<channelId>:<botUserId>,...
+//   WORKFLOW_CHANNELS=<channelId>:test,...（TEST_TARGETS 里有几个频道就映射几个）
 //
 // 测试维度（由你定义，LLM 自行设计具体用例）：
 //   1. 正常对话   — 普通问答，验证 bot 能正常响应

@@ -5,7 +5,7 @@ import { defaultState, mergeState } from "../state.ts";
 import { createLogger } from "../../observability/logger.ts";
 import { getContext } from "../../observability/context.ts";
 import { recipeByTag, recordStageRun } from "../../workflows/recipe-store.ts";
-import { repoForChannel, recipeTagForChannel } from "../../workflows/repo-map.ts";
+import { repoForChannel, recipeTagForChannel, botIdForChannel } from "../../workflows/repo-map.ts";
 import type { Recipe, StageDef } from "../../workflows/recipes/types.ts";
 import { runStageTask } from "../../workflows/coding/sdk.ts";
 import { runReactAgent, type ReactTool } from "../../llm/react.ts";
@@ -19,8 +19,6 @@ import type { SlotManager } from "../slot-manager.ts";
 
 const logger = createLogger("workflow-runner");
 
-const TEST_CHANNEL = process.env.TEST_CHANNEL ?? "C0AMM0FLV0B";
-const TARGET_BOT_ID = process.env.TARGET_BOT_ID ?? "U0A608U4ECC";
 
 function nowIso(): string {
   try {
@@ -199,6 +197,8 @@ async function sendChildMessage(
   groupLabel: string,
   groupIndex: number,
   parentThreadId: string,
+  testChannel: string,
+  targetBotId: string,
   toolRegistry: ToolRegistry,
   store: GraphStore,
   slotManager: SlotManager,
@@ -215,7 +215,7 @@ async function sendChildMessage(
     pdfUpload = { filePath, filename: filePath.split("/").at(-1) ?? "file.pdf" };
   }
 
-  const text = `<@${TARGET_BOT_ID}> ${userMsg}`;
+  const text = `<@${targetBotId}> ${userMsg}`;
   let ts: string | undefined;
 
   if (pdfUpload) {
@@ -224,7 +224,7 @@ async function sendChildMessage(
     const uploadResult = await toolRegistry.execute([{
       toolCallId: crypto.randomUUID(),
       name: "slack_upload_file",
-      input: { file_path: pdfUpload.filePath, filename: pdfUpload.filename, channel: TEST_CHANNEL, initial_comment: text },
+      input: { file_path: pdfUpload.filePath, filename: pdfUpload.filename, channel: testChannel, initial_comment: text },
     }]);
     try { ts = (JSON.parse(uploadResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
       logger.warn({ output: (uploadResult[0]?.output ?? "").slice(0, 100) }, "fan_out: failed to parse ts from upload");
@@ -233,7 +233,7 @@ async function sendChildMessage(
     const sendResult = await toolRegistry.execute([{
       toolCallId: crypto.randomUUID(),
       name: "slack_send_message",
-      input: { channel: TEST_CHANNEL, text },
+      input: { channel: testChannel, text },
     }]);
     try { ts = (JSON.parse(sendResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
       logger.warn({ output: (sendResult[0]?.output ?? "").slice(0, 100) }, "fan_out: failed to parse ts from slack response");
@@ -245,10 +245,10 @@ async function sendChildMessage(
     return undefined;
   }
 
-  const childThreadId = `slack:thread:${TEST_CHANNEL}:${ts}`;
+  const childThreadId = `slack:thread:${testChannel}:${ts}`;
 
   // 把 slot 的 placeholder 更新为真实 threadId
-  slotManager.updateThreadId(TEST_CHANNEL, `placeholder:${msg}`, childThreadId);
+  slotManager.updateThreadId(testChannel, `placeholder:${msg}`, childThreadId);
 
   const childWf: WorkflowProgress = {
     recipe: "test",
@@ -293,6 +293,8 @@ async function sendChildMessage(
 async function fanOut(
   testCases: string[],
   parentThreadId: string,
+  testChannel: string,
+  targetBotId: string,
   wf: WorkflowProgress,
   toolRegistry: ToolRegistry,
   store: GraphStore,
@@ -317,29 +319,29 @@ async function fanOut(
 
   for (const { msg, groupLabel, groupIndex } of expanded) {
     const placeholder = `placeholder:${msg}`;
-    const acquired = slotManager.acquire(TEST_CHANNEL, placeholder);
+    const acquired = slotManager.acquire(testChannel, placeholder);
 
     if (acquired) {
       // 槽位拿到，立即发消息
       const childThreadId = await sendChildMessage(
-        msg, groupLabel, groupIndex, parentThreadId, toolRegistry, store, slotManager,
+        msg, groupLabel, groupIndex, parentThreadId, testChannel, targetBotId, toolRegistry, store, slotManager,
       );
       if (childThreadId) {
         childThreadIds.push(childThreadId);
       } else {
         // 发消息失败，释放槽位
-        slotManager.release(TEST_CHANNEL, placeholder);
+        slotManager.release(testChannel, placeholder);
       }
     } else {
       // 槽位满，入队等待
-      slotManager.enqueue({ channel: TEST_CHANNEL, testCase: msg, groupLabel, groupIndex, parentThreadId });
-      logger.info({ msg: msg.slice(0, 60), groupIndex, queueLength: slotManager.queueLength(TEST_CHANNEL) }, "fan_out: slot full, enqueued");
+      slotManager.enqueue({ channel: testChannel, testCase: msg, groupLabel, groupIndex, parentThreadId });
+      logger.info({ msg: msg.slice(0, 60), groupIndex, queueLength: slotManager.queueLength(testChannel) }, "fan_out: slot full, enqueued");
     }
   }
 
   logger.info({
     sent: childThreadIds.length,
-    queued: slotManager.queueLength(TEST_CHANNEL),
+    queued: slotManager.queueLength(testChannel),
     parentThreadId,
   }, "fan_out: done");
 
@@ -487,15 +489,21 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
         }
         if (testCases.length === 0) testCases = [wf.requirement];
 
-        logger.info({ count: testCases.length }, "fan_out: starting with slot control");
-        const parentThreadId = ctx?.threadId ?? `slack:channel:${TEST_CHANNEL}`;
+        const testChannel = ctx?.channel;
+        const targetBotId = botIdForChannel(testChannel);
+        if (!testChannel || !targetBotId) {
+          return abortWith(recipe, cwd, `当前频道（${testChannel ?? "未知"}）未在 TEST_TARGETS 中配置被测 bot，无法执行测试。请设置 TEST_TARGETS=<channelId>:<botUserId>,...`);
+        }
+
+        logger.info({ count: testCases.length, testChannel, targetBotId }, "fan_out: starting with slot control");
+        const parentThreadId = ctx?.threadId ?? `slack:channel:${testChannel}`;
         // 新一轮测试开始，清空残留的 slots 和 queue（防止上次遗留数据占满槽位）
-        slotManager.reset(TEST_CHANNEL);
-        const { updatedWf } = await fanOut(testCases, parentThreadId, wf, toolRegistry, getStore(), slotManager);
+        slotManager.reset(testChannel);
+        const { updatedWf } = await fanOut(testCases, parentThreadId, testChannel, targetBotId, wf, toolRegistry, getStore(), slotManager);
 
         logger.info({
           sent: updatedWf.childThreadIds?.length ?? 0,
-          queued: slotManager.queueLength(TEST_CHANNEL),
+          queued: slotManager.queueLength(testChannel),
           parentThreadId,
         }, "fan_out: done — interrupt(children_join)");
 
@@ -504,7 +512,7 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
           __interrupt__: [{
             value: {
               kind: "children_join",
-              prompt: `已发送 ${updatedWf.childThreadIds?.length ?? 0} 条测试消息（队列中还有 ${slotManager.queueLength(TEST_CHANNEL)} 条等待槽位），等待 bot 响应中...`,
+              prompt: `已发送 ${updatedWf.childThreadIds?.length ?? 0} 条测试消息（队列中还有 ${slotManager.queueLength(testChannel)} 条等待槽位），等待 bot 响应中...`,
             },
           }],
         };
