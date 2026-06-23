@@ -56,7 +56,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               // 路由和 trace。
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
               logger.info({ text: textClean, threadId, speakerName, imageCount: imageUrls?.length ?? 0 }, "slack:mention received");
-              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel, threadId }, async () => {
                 try {
                   const humanMsg = humanMessageWithSpeaker(textClean, { speakerId: user, speakerName, source: "slack" });
                   if (imageUrls?.length) {
@@ -146,7 +146,7 @@ if (process.env.SLACK_BOT_TOKEN) {
               const threadId = threadIdForSlackDm({ userId: user });
               const speakerName = await resolveUserName(slackIntegration.getClient(), user);
               logger.info({ text, threadId, speakerName, imageCount: imageUrls?.length ?? 0 }, "slack:dm received");
-              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel }, async () => {
+              return runWithContext({ sessionId, source: "slack", externalId: user, userId, channel, threadId }, async () => {
                 try {
                   const controller = new AbortController();
                   // 普通对话 120s 超时;但开发类 workflow 可能跑很久,这里放宽到 30 分钟。
@@ -241,6 +241,8 @@ if (process.env.SLACK_BOT_TOKEN) {
               logger.info({ threadId, replySnippet: cleanText.slice(0, 80), ts }, "slack:bot_reply received");
               const result = await resumeWithBotReply(graph, threadId, cleanText, channel, ts);
               if (!result) return;
+              // 子 run（isChildRun=true）跑完后不需要往外发回复，结论由 join 节点汇总
+              if ((result as unknown as { workflowProgress?: { isChildRun?: boolean } }).workflowProgress?.isChildRun) return;
               // workflow 跑完后把结果发回原始 thread
               const reply = extractReply(result);
               logger.info({ replySnippet: reply.slice(0, 120), hasInterrupt: !!result.__interrupt__ }, "onBotMessage: reply extracted");

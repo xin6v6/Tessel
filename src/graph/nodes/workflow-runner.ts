@@ -14,31 +14,13 @@ import type { ToolRegistry } from "../../tools/index.ts";
 import type { SkillContext } from "../../skills/context.ts";
 import { renderSkillBodies } from "../../skills/inject.ts";
 import type { GraphStore } from "../store.ts";
-import { buildWorkflowChildNode } from "./workflow-child.ts";
 import { buildGraphStore } from "../store.ts";
+import type { SlotManager } from "../slot-manager.ts";
 
 const logger = createLogger("workflow-runner");
 
-// ────────────────────────────────────────────────────────────────────────────
-// Workflow Runner —— 【通用】多阶段任务调度，由 recipe 驱动。
-//
-// 拆成两个 graph 节点（关键：避免 interrupt 后 resume 重跑昂贵 stage）：
-//
-//   workflow          跑 recipe.stages。跑到「需要审批的 plan stage」就把进度
-//                     落进 state.workflowProgress 并 return，路由到 workflow_approval。
-//                     ——【不在本节点内 interrupt】。这样 plan 产出已持久化。
-//   workflow_approval 只做 interrupt 等人工确认，把结果写回 workflowProgress.phase
-//                     （running_after_approval / aborted），路由回 workflow。
-//   workflow（重入）   从 state.workflowProgress 恢复，plan 已在 outputs 里 → 跳过，
-//                     从审批点之后继续（或按 aborted 收尾）。
-//
-// 为什么拆：若一个节点在中途暂停等待审批，它的 state 变更不落盘，resume 时会
-// 【从头重新执行】。若在同一节点里「跑 plan → interrupt」，resume 会重跑 plan
-// （实测重跑一次 ~$0.5-0.8）。拆开后 plan 由 workflow 节点正常 return 落盘，
-// approval 节点只 interrupt，重入的是 approval / 续跑的 workflow，都不会重跑 plan。
-//
-// coding 专属逻辑（git）全在 recipe 里，Runner 不碰。白名单：仅 CODING_ALLOWLIST。
-// ────────────────────────────────────────────────────────────────────────────
+const TEST_CHANNEL = process.env.TEST_CHANNEL ?? "C0AMM0FLV0B";
+const TARGET_BOT_ID = process.env.TARGET_BOT_ID ?? "U0A608U4ECC";
 
 function nowIso(): string {
   try {
@@ -65,16 +47,11 @@ function lastRequirement(state: GraphStateType): string {
   return "";
 }
 
-/** 从 stage 输出末尾解析 RESULT: PASS / FAIL。默认 PASS（无标记视为通过）。 */
 function parseVerdict(output: string): boolean {
   const m = output.match(/RESULT:\s*(PASS|FAIL)/i);
   return m ? m[1]!.toUpperCase() === "PASS" : true;
 }
 
-/**
- * 按频道选 recipe：先查 WORKFLOW_CHANNELS env var（channelId→tag），
- * 找到则用对应 tag 取 recipe；否则退回 coding（兼容旧 CODING_REPOS 配置）。
- */
 function pickRecipe(channel: string | undefined): Recipe | undefined {
   const tag = recipeTagForChannel(channel);
   if (tag) return recipeByTag(tag);
@@ -107,8 +84,6 @@ async function runStageTaskFor(
     attempt: next.attempt,
   });
 
-  // skill 注入(配方级,无条件):把 stage.skills 声明的成熟指令正文拼到 prompt 末尾。
-  // 与自建 agent 不同 —— 这里不做命中判断,stage 用哪个 skill 是配方设计的一部分。
   if (stage.skills?.length && skills) {
     const resolved = stage.skills
       .map((name) => skills.registry.get(name))
@@ -130,10 +105,6 @@ async function runStageTaskFor(
   return { output, ok: r.ok, nextWf: next };
 }
 
-/**
- * useReact=true 的 stage：用 Tessel 原生 ReAct loop 跑。
- * allowedTools 作为工具名前缀过滤器（空数组 = 允许所有工具）。
- */
 async function runReactStageTaskFor(
   llm: LLMClient,
   toolRegistry: ToolRegistry,
@@ -164,7 +135,6 @@ async function runReactStageTaskFor(
     if (bodies) prompt = `${prompt}\n\n---\n参考以下技能指令执行本阶段:\n\n${bodies}`;
   }
 
-  // allowedTools 为前缀过滤器：空 = 全部工具；否则只保留名字以任一条目开头的工具
   const prefixes = stage.allowedTools;
   const cfg = stage.reactConfig;
   const tools: ReactTool[] = toolRegistry
@@ -177,7 +147,6 @@ async function runReactStageTaskFor(
       handler: async (input: Record<string, unknown>) => {
         let effectiveInput = input;
         if (cfg) {
-          // 强制 channel：send/get_messages/get_thread_replies 统一走配置的频道
           if (cfg.slackChannel && (
             def.name === "slack_send_message" ||
             def.name === "slack_get_messages" ||
@@ -221,185 +190,187 @@ async function runReactStageTaskFor(
   return { output, ok, nextWf: next };
 }
 
-const CONCURRENT_SLOTS = 3; // 同时运行的子 run 数量
-
 /**
- * fan-out：把测试用例列表并发跑，每次最多 CONCURRENT_SLOTS 个。
- * 每个用例独立地在 workflow_child 节点跑完整的多轮对话。
- * 返回所有用例的结论汇总。
+ * 把一条测试消息发到 Slack，写子 run 到 store，返回 childThreadId。
+ * 发送失败（ts 拿不到）返回 undefined。
  */
-async function fanOutTestCases(
-  testCases: string[],
+async function sendChildMessage(
+  msg: string,
+  groupLabel: string,
+  groupIndex: number,
   parentThreadId: string,
-  llm: LLMClient,
   toolRegistry: ToolRegistry,
   store: GraphStore,
-): Promise<string> {
-  logger.info({ total: testCases.length, slots: CONCURRENT_SLOTS }, "fan-out: starting concurrent test cases");
-
-  const childNode = buildWorkflowChildNode(llm, toolRegistry);
-
-  // 并发限制：分批处理，每批最多 CONCURRENT_SLOTS 个
-  const results: string[] = [];
-
-  for (let batchStart = 0; batchStart < testCases.length; batchStart += CONCURRENT_SLOTS) {
-    const batch = testCases.slice(batchStart, batchStart + CONCURRENT_SLOTS);
-    logger.info({ batchStart, batchSize: batch.length }, "fan-out: running batch");
-
-    const channel = process.env.TEST_CHANNEL ?? "C0AMM0FLV0B";
-  const batchPromises = batch.map(async (testCase, idx) => {
-      // 子 run threadId 包含 channel，使 findPendingWaitByChannel 的 LIKE 查询能匹配到
-      const childThreadId = `slack:thread:${channel}:child:${parentThreadId}:${batchStart + idx}`;
-
-      // 初始化子 run 状态
-      const childWf: WorkflowProgress = {
-        recipe: "test",
-        phase: "running_after_approval",
-        requirement: testCase,
-        cwd: "",
-        attempt: 0,
-        outputs: {},
-        isChildRun: true,
-        testCase,
-      };
-
-      const initialState = mergeState(defaultState(), {
-        workflowProgress: childWf,
-      });
-
-      store.save(childThreadId, {
-        state: initialState,
-        pendingNode: null,
-        interrupt: null,
-        parentThreadId,
-        childStatus: "running",
-      });
-
-      logger.info({ childThreadId, testCase: testCase.slice(0, 60) }, "fan-out: child run started");
-
-      let state = initialState;
-      let conclusion = "";
-
-      try {
-        // 第一步：workflow_child 发消息并 interrupt（进入 workflow_wait）
-        const firstOut = await childNode(state, undefined);
-        if (firstOut.__interrupt__) {
-          const { __interrupt__, ...partial } = firstOut;
-          state = mergeState(state, partial);
-          store.save(childThreadId, {
-            state,
-            pendingNode: "workflow_wait",
-            interrupt: __interrupt__,
-            parentThreadId,
-            childStatus: "running",
-          });
-          logger.info({ childThreadId, slackTs: state.workflowProgress?.slackThreadTs }, "fan-out: child run waiting for bot reply");
-
-          // 轮询 store，等待 resumeWithBotReply 将 bot 回复注入并续跑至完成
-          conclusion = await continueChildRun(childThreadId, store, testCase);
-        } else {
-          // 不需要等待，直接完成
-          state = mergeState(state, firstOut);
-          conclusion = state.subAgentResult || state.finalReply || "用例完成";
-          store.updateChildResult(childThreadId, conclusion);
-        }
-      } catch (err) {
-        conclusion = `ERROR: ${String(err)}\n测试用例: ${testCase}`;
-        store.updateChildResult(childThreadId, conclusion);
-        logger.error({ childThreadId, err: String(err) }, "fan-out: child run error");
-      }
-
-      logger.info({ childThreadId, conclusionSnippet: conclusion.slice(0, 80) }, "fan-out: child run done");
-      return conclusion;
-    });
-
-    const batchResults = await Promise.all(batchPromises);
-    results.push(...batchResults);
+  slotManager: SlotManager,
+): Promise<string | undefined> {
+  // __PDF_UPLOAD__:<filePath>|||<message> 格式
+  // 用 initial_comment 把 mention 消息和文件一起发出，Slack 一条消息包含附件
+  let userMsg = msg;
+  let pdfUpload: { filePath: string; filename: string } | undefined;
+  if (msg.startsWith("__PDF_UPLOAD__:")) {
+    const rest = msg.slice("__PDF_UPLOAD__:".length);
+    const sepIdx = rest.indexOf("|||");
+    const filePath = sepIdx >= 0 ? rest.slice(0, sepIdx) : rest;
+    userMsg = sepIdx >= 0 ? rest.slice(sepIdx + 3) : "请分析这份PDF文件";
+    pdfUpload = { filePath, filename: filePath.split("/").at(-1) ?? "file.pdf" };
   }
 
-  // 汇总所有结论
-  const summary = testCases.map((tc, i) => {
-    const result = results[i] ?? "未完成";
-    const verdict = result.startsWith("PASS") ? "✅" : result.startsWith("FAIL") ? "❌" : result.startsWith("TIMEOUT") ? "⏱️" : "❓";
-    return `${verdict} 用例 ${i + 1}: ${tc.slice(0, 60)}\n   结论: ${result.slice(0, 200)}`;
-  }).join("\n\n");
+  const text = `<@${TARGET_BOT_ID}> ${userMsg}`;
+  let ts: string | undefined;
 
-  const passCount = results.filter((r) => r.startsWith("PASS")).length;
-  const failCount = results.filter((r) => r.startsWith("FAIL")).length;
-  return `## 测试报告\n\n通过: ${passCount} / ${testCases.length}，失败: ${failCount}\n\n${summary}`;
+  if (pdfUpload) {
+    // PDF 用例：上传文件并用 initial_comment 把 mention 和文件合成一条消息，同时拿到 ts
+    logger.info({ filePath: pdfUpload.filePath }, "fan_out: uploading PDF with mention as initial_comment");
+    const uploadResult = await toolRegistry.execute([{
+      toolCallId: crypto.randomUUID(),
+      name: "slack_upload_file",
+      input: { file_path: pdfUpload.filePath, filename: pdfUpload.filename, channel: TEST_CHANNEL, initial_comment: text },
+    }]);
+    try { ts = (JSON.parse(uploadResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
+      logger.warn({ output: (uploadResult[0]?.output ?? "").slice(0, 100) }, "fan_out: failed to parse ts from upload");
+    }
+  } else {
+    const sendResult = await toolRegistry.execute([{
+      toolCallId: crypto.randomUUID(),
+      name: "slack_send_message",
+      input: { channel: TEST_CHANNEL, text },
+    }]);
+    try { ts = (JSON.parse(sendResult[0]?.output ?? "{}") as { ts?: string }).ts; } catch {
+      logger.warn({ output: (sendResult[0]?.output ?? "").slice(0, 100) }, "fan_out: failed to parse ts from slack response");
+    }
+  }
+
+  if (!ts) {
+    logger.error({ msg: msg.slice(0, 60) }, "fan_out: no ts, cannot create child run");
+    return undefined;
+  }
+
+  const childThreadId = `slack:thread:${TEST_CHANNEL}:${ts}`;
+
+  // 把 slot 的 placeholder 更新为真实 threadId
+  slotManager.updateThreadId(TEST_CHANNEL, `placeholder:${msg}`, childThreadId);
+
+  const childWf: WorkflowProgress = {
+    recipe: "test",
+    phase: "running_after_approval",
+    requirement: userMsg,
+    cwd: "",
+    attempt: 0,
+    outputs: {},
+    isChildRun: true,
+    testCase: userMsg,
+    slackThreadTs: ts,
+    parentThreadId,
+    childGroupLabel: groupLabel,
+    childGroupIndex: groupIndex,
+    conversationHistory: [{ role: "tester", text }],
+    waitDeadline: new Date(Date.now() + 5 * 60_000).toISOString(),
+    pendingStageId: "child_wait",
+  };
+
+  const initialState = mergeState(defaultState(), { workflowProgress: childWf });
+  store.save(childThreadId, {
+    state: initialState,
+    pendingNode: "workflow_wait",
+    interrupt: [{ value: { kind: "wait_for_reply", stage: "child_wait", prompt: "等待 bot 回复..." } }],
+    parentThreadId,
+    childStatus: "running",
+  });
+
+  logger.info({ childThreadId, msg: msg.slice(0, 60), groupLabel, groupIndex }, "fan_out: child run registered");
+  return childThreadId;
 }
 
-async function continueChildRun(
-  childThreadId: string,
+/**
+ * fan-out：SlotManager 限流，fire-and-forget。
+ *
+ * 遍历所有 testCase（__CONCURRENT__ 展开为多条），对每条：
+ *   - 槽位有空 → 立即 acquire + 发消息 + 写子 run 到 store
+ *   - 槽位满    → enqueue 到 SlotManager 持久化队列，由子 run 完成后的 drainQueue 补发
+ *
+ * 父 run 发完所有能发的之后，立即 interrupt(children_join) 挂起，不轮询等待。
+ */
+async function fanOut(
+  testCases: string[],
+  parentThreadId: string,
+  wf: WorkflowProgress,
+  toolRegistry: ToolRegistry,
   store: GraphStore,
-  testCase: string,
-): Promise<string> {
-  // 子 run 的生命周期全由 resumeWithBotReply（通过主 graph invoke）驱动。
-  // 这里只需轮询 store：
-  //   - pendingNode === "workflow_wait": 等 bot 回复（由 resumeWithBotReply 注入）
-  //   - pendingNode === null: graph 正常终止，从 state 取结论
-  //   - childStatus === "done": 已记录结论
-  const deadline = new Date(Date.now() + 30 * 60_000); // 子 run 最长 30 分钟
+  slotManager: SlotManager,
+): Promise<{ childThreadIds: string[]; updatedWf: WorkflowProgress }> {
+  const childThreadIds: string[] = [];
 
-  while (new Date() < deadline) {
-    await new Promise((res) => setTimeout(res, 3000));
-
-    const saved = store.load(childThreadId);
-    if (!saved) break;
-
-    if (saved.childStatus === "done") {
-      return saved.childResult ?? "已完成";
-    }
-
-    if (saved.pendingNode === null) {
-      // graph 正常结束，取最终结论
-      const conclusion = saved.state.subAgentResult || saved.state.finalReply || "已完成";
-      store.updateChildResult(childThreadId, conclusion);
-      return conclusion;
-    }
-
-    if (saved.pendingNode === "workflow_wait") {
-      // 检查 deadline 是否过期
-      const wfDeadline = saved.state.workflowProgress?.waitDeadline;
-      if (wfDeadline && new Date(wfDeadline) < new Date()) {
-        const conclusion = `TIMEOUT: 等待 bot 回复超时\n测试用例: ${testCase}`;
-        store.updateChildResult(childThreadId, conclusion);
-        return conclusion;
-      }
-      // 继续等待 resumeWithBotReply 注入
+  // 展开所有 testCase（并发组拆分为多条独立 msg，groupIndex 相同）
+  const expanded: Array<{ msg: string; groupLabel: string; groupIndex: number }> = [];
+  for (let i = 0; i < testCases.length; i++) {
+    const tc = testCases[i]!;
+    if (tc.startsWith("__CONCURRENT__:")) {
+      const msgs = tc.slice("__CONCURRENT__:".length).split("|||").map((s) => s.trim()).filter(Boolean);
+      const groupLabel = `并发对话(${msgs.length}条同时发送)`;
+      for (const msg of msgs) expanded.push({ msg, groupLabel, groupIndex: i });
+    } else {
+      expanded.push({ msg: tc, groupLabel: `用例 ${i + 1}`, groupIndex: i });
     }
   }
 
-  return `TIMEOUT: 子 run 超过最大运行时间\n测试用例: ${testCase}`;
+  logger.info({ total: expanded.length }, "fan_out: expanded test cases");
+
+  for (const { msg, groupLabel, groupIndex } of expanded) {
+    const placeholder = `placeholder:${msg}`;
+    const acquired = slotManager.acquire(TEST_CHANNEL, placeholder);
+
+    if (acquired) {
+      // 槽位拿到，立即发消息
+      const childThreadId = await sendChildMessage(
+        msg, groupLabel, groupIndex, parentThreadId, toolRegistry, store, slotManager,
+      );
+      if (childThreadId) {
+        childThreadIds.push(childThreadId);
+      } else {
+        // 发消息失败，释放槽位
+        slotManager.release(TEST_CHANNEL, placeholder);
+      }
+    } else {
+      // 槽位满，入队等待
+      slotManager.enqueue({ channel: TEST_CHANNEL, testCase: msg, groupLabel, groupIndex, parentThreadId });
+      logger.info({ msg: msg.slice(0, 60), groupIndex, queueLength: slotManager.queueLength(TEST_CHANNEL) }, "fan_out: slot full, enqueued");
+    }
+  }
+
+  logger.info({
+    sent: childThreadIds.length,
+    queued: slotManager.queueLength(TEST_CHANNEL),
+    parentThreadId,
+  }, "fan_out: done");
+
+  return {
+    childThreadIds,
+    updatedWf: { ...wf, childThreadIds, parentThreadId },
+  };
 }
 
 async function abortWith(
   recipe: Recipe,
   cwd: string,
   msg: string,
-): Promise<Partial<GraphStateType>> {
+): Promise<NodeOutput> {
   if (recipe.onAbort) {
     try { await recipe.onAbort(cwd); } catch (err) { logger.warn({ err: String(err) }, "onAbort failed"); }
   }
   return { subAgentResult: msg, workflowProgress: null, next: "supervisor" as const };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// workflow 节点：跑 stage，遇审批点落盘并交给 approval 节点
-// ────────────────────────────────────────────────────────────────────────────
-export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, toolRegistry?: ToolRegistry, store?: GraphStore) {
-  // store 传入时用于 fan-out；不传则按需创建（prod 路径通过 index.ts 注入）
+export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, toolRegistry?: ToolRegistry, store?: GraphStore, slotManager?: SlotManager) {
   const getStore = (): GraphStore => store ?? buildGraphStore();
 
   return async function workflowRunnerNode(
     state: GraphStateType,
-  ): Promise<Partial<GraphStateType>> {
+  ): Promise<NodeOutput> {
     const ctx = getContext();
     const userId = ctx?.userId ?? "";
     const resumed = state.workflowProgress;
     logger.info({ resumedRecipe: resumed?.recipe ?? null, resumedOutputs: Object.keys(resumed?.outputs ?? {}) }, "workflow-runner entered");
 
-    // 恢复中的 workflow（approval 节点路由回来）跳过白名单/选 repo —— 首次进入时已校验。
     if (!resumed) {
       if (!allowlist().has(userId)) {
         logger.warn({ userId }, "workflow denied: not in allowlist");
@@ -408,7 +379,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
     }
 
     const channel = ctx?.channel;
-    // resume 时优先用 wf.recipe（已落盘），避免 ctx.channel 丢失导致回退到 coding
     const recipe = resumed?.recipe
       ? (recipeByTag(resumed.recipe) ?? pickRecipe(channel))
       : pickRecipe(channel);
@@ -416,8 +386,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
       return { subAgentResult: "⚠️ 没有匹配的流程配方。", workflowProgress: null, next: "supervisor" };
     }
 
-    // 目标仓库：首次按频道解析并落盘到 wf.cwd；恢复时直接复用，不重算（频道映射可能已变）。
-    // test recipe 不操作文件，cwd 用 "." 兜底。
     let cwd: string;
     if (resumed?.cwd) {
       cwd = resumed.cwd;
@@ -439,12 +407,9 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
       logger.info({ channel, cwd, recipe: recipe.name }, "workflow target repo resolved");
     }
 
-    // 进度：恢复已有，或新建。
     let wf: WorkflowProgress =
       resumed ?? {
         recipe: recipe.name,
-        // 新建 = 尚未审批。phase 取 awaiting_approval 让 plan stage 触发审批；
-        // 审批通过后由 approval 节点改成 running_after_approval，之后才跳过审批。
         phase: "awaiting_approval",
         requirement: lastRequirement(state),
         cwd,
@@ -452,16 +417,12 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
         outputs: {},
       };
 
-    // 审批后被拒 → 收尾放弃。
     if (wf.phase === "aborted") {
       return await abortWith(recipe, cwd, "已按你的意思放弃这次任务，未做任何提交。");
     }
 
     const stages = recipe.stages;
 
-    // botReply 消费：workflow_wait resume 时，botReply 挂在 wf 上但 pendingStageId 对应的
-    // stage 已经在 outputs 里（execute 跑完才触发 waitForReply），循环会跳过它，导致
-    // _reply key 永远写不进去。在进循环前先把它写入，再清掉。
     if (wf.botReply !== undefined && wf.pendingStageId) {
       const reply = wf.botReply;
       const key = `${wf.pendingStageId}_reply`;
@@ -486,25 +447,20 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
       }
     }
 
-    // 从第一个还没产出的 stage 开始（恢复时已完成的 stage 已在 outputs 里，自动跳过）。
     let idx = stages.findIndex((s) => !(s.id in wf.outputs));
     if (idx < 0) idx = stages.length;
 
     while (idx < stages.length) {
       const stage = stages[idx]!;
 
-      // 审批点：plan stage 且 recipe 要求审批，且本轮还没审批过 → 落盘 + 交给 approval 节点。
       const needsApproval =
         stage.isPlan &&
         recipe.approveAfter.includes(stage.id) &&
         wf.phase !== "running_after_approval";
 
-      // waitForReply stage 从 wf.botReply 消费上一轮 bot 回复（已写进 outputs key = stage.id+"_reply"）
-      // 然后清掉 botReply，避免被后续 stage 误读。
       if (stage.waitForReply && wf.botReply !== undefined) {
         const reply = wf.botReply;
         wf = { ...wf, botReply: undefined };
-        // 把 bot 回复存进 outputs，供 buildPrompt 通过 outputs["stageId_reply"] 读取
         wf = { ...wf, outputs: { ...wf.outputs, [`${stage.id}_reply`]: reply } };
         if (reply === "__TIMEOUT__") {
           wf = { ...wf, outputs: { ...wf.outputs, [stage.id]: "RESULT: FAIL (bot reply timed out)" } };
@@ -514,29 +470,49 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
         }
       }
 
-      // fan_out stage：并发跑所有测试用例，等全部完成后汇总结论
-      if (stage.id === "fan_out" && llm && toolRegistry) {
-        // 从 plan stage 的输出里解析测试用例列表
-        const planOutput = wf.outputs["plan"] ?? "";
+      // fan_out：fire-and-forget，立即 interrupt 挂起父 run
+      if (stage.id === "fan_out" && toolRegistry && slotManager) {
+        // 优先使用 recipe.fixedTestCases（避免 LLM 篡改特殊格式如 __PDF_UPLOAD__）
         let testCases: string[] = [];
-        try {
-          const jsonMatch = planOutput.match(/\[[\s\S]*\]/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            if (Array.isArray(parsed)) testCases = parsed.map(String);
+        if (recipe.fixedTestCases && recipe.fixedTestCases.length > 0) {
+          testCases = recipe.fixedTestCases;
+          logger.info({ count: testCases.length }, "fan_out: using recipe.fixedTestCases");
+        } else {
+          const planOutput = wf.outputs["plan"] ?? "";
+          try {
+            const jsonMatch = planOutput.match(/\[[\s\S]*\]/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              if (Array.isArray(parsed)) testCases = parsed.map(String);
+            }
+          } catch {
+            logger.warn({ planOutput: planOutput.slice(0, 200) }, "fan_out: failed to parse test cases from plan");
+            testCases = [wf.requirement];
           }
-        } catch {
-          logger.warn({ planOutput: planOutput.slice(0, 200) }, "fan_out: failed to parse test cases from plan, using requirement as single case");
-          testCases = [wf.requirement];
+          if (testCases.length === 0) testCases = [wf.requirement];
         }
-        if (testCases.length === 0) testCases = [wf.requirement];
 
-        logger.info({ count: testCases.length }, "fan_out: parsed test cases");
-        const parentThreadId = `workflow:${Date.now()}`;
-        const report = await fanOutTestCases(testCases, parentThreadId, llm, toolRegistry, getStore());
-        wf = { ...wf, outputs: { ...wf.outputs, fan_out: report }, lastStageOutput: report };
-        idx++;
-        continue;
+        logger.info({ count: testCases.length }, "fan_out: starting with slot control");
+        const parentThreadId = ctx?.threadId ?? `slack:channel:${TEST_CHANNEL}`;
+        // 新一轮测试开始，清空残留的 slots 和 queue（防止上次遗留数据占满槽位）
+        slotManager.reset(TEST_CHANNEL);
+        const { updatedWf } = await fanOut(testCases, parentThreadId, wf, toolRegistry, getStore(), slotManager);
+
+        logger.info({
+          sent: updatedWf.childThreadIds?.length ?? 0,
+          queued: slotManager.queueLength(TEST_CHANNEL),
+          parentThreadId,
+        }, "fan_out: done — interrupt(children_join)");
+
+        return {
+          workflowProgress: updatedWf,
+          __interrupt__: [{
+            value: {
+              kind: "children_join",
+              prompt: `已发送 ${updatedWf.childThreadIds?.length ?? 0} 条测试消息（队列中还有 ${slotManager.queueLength(TEST_CHANNEL)} 条等待槽位），等待 bot 响应中...`,
+            },
+          }],
+        };
       }
 
       logger.info({ stage: stage.id, attempt: wf.attempt, useReact: stage.useReact ?? false }, "running");
@@ -545,7 +521,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
         : await runStageTaskFor(recipe, cwd, stage, wf, skills);
       wf = nextWf;
 
-      // waitForReply：stage 跑完后挂起等 bot 回复。
       if (stage.waitForReply && ok) {
         wf = { ...wf, pendingStageId: stage.id };
         logger.info({ stage: stage.id }, "stage done — handing off to workflow_wait for bot reply");
@@ -554,7 +529,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
 
       if (needsApproval) {
         if (!ok) return await abortWith(recipe, cwd, `「${stage.label}」失败：${output}`);
-        // 落盘并交给 approval 节点。plan 产出已在 wf.outputs/wf.plan 里 → resume 不重跑。
         wf = { ...wf, phase: "awaiting_approval", pendingStageId: stage.id };
         logger.info({ stage: stage.id }, "awaiting approval — handing off to approval node");
         return { workflowProgress: wf, next: "workflow_approval" };
@@ -582,7 +556,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
       idx++;
     }
 
-    // 全部通过 → finalize 收尾。
     if (!recipe.finalize) {
       return { subAgentResult: wf.lastStageOutput ?? "任务完成。", workflowProgress: null, next: "supervisor" };
     }
@@ -593,9 +566,6 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
   };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// workflow_approval 节点：只做 interrupt，把结果写回 phase，路由回 workflow
-// ────────────────────────────────────────────────────────────────────────────
 export function buildWorkflowApprovalNode() {
   return async function workflowApprovalNode(
     state: GraphStateType,
@@ -603,13 +573,10 @@ export function buildWorkflowApprovalNode() {
   ): Promise<NodeOutput> {
     const wf = state.workflowProgress;
     if (!wf) {
-      // 不该发生：没有进度却进了审批节点。回 supervisor 兜底。
       logger.warn({}, "approval node entered without workflowProgress");
       return { next: "supervisor" };
     }
 
-    // 首次进入（无 resume 值）：请求中断，由 run loop 落盘 + 停机 + 透出审批提示。
-    // 本节点不做任何昂贵操作，重入只是再请求一次中断，无副作用。
     if (resume === undefined) {
       const recipe = recipeByTag(wf.recipe);
       const stage = recipe?.stages.find((s) => s.id === wf.pendingStageId);
@@ -627,7 +594,6 @@ export function buildWorkflowApprovalNode() {
       };
     }
 
-    // 续跑：消费审批决定，写回 phase，路由回 workflow（workflow 凭 outputs 跳过已完成 stage）。
     const decision = resume as { approved?: boolean } | undefined;
     const phase: WorkflowProgress["phase"] = decision?.approved ? "running_after_approval" : "aborted";
     logger.info({ stage: wf.pendingStageId, approved: Boolean(decision?.approved) }, "approval decided");

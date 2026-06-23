@@ -28,7 +28,7 @@ export const END = "__end__" as const;
 /** run loop 可调度的节点名（不含 __end__）。 */
 export type NodeName =
   | "router" | "supervisor" | "slack" | "web" | "mcp" | "vision" | "imagegen" | "file" | "terminal"
-  | "capabilities" | "workflow" | "workflow_approval" | "workflow_wait" | "workflow_child";
+  | "capabilities" | "workflow" | "workflow_approval" | "workflow_wait" | "workflow_child" | "workflow_children_join";
 
 /** 中断信息（透出给 main，形如 __interrupt__[].value）。 */
 export interface InterruptValue {
@@ -73,6 +73,7 @@ function routeFrom(node: NodeName, state: GraphState): NodeName | typeof END {
     case "workflow":
       if ((state.next as string) === "workflow_approval") return "workflow_approval";
       if ((state.next as string) === "workflow_wait") return "workflow_wait";
+      if ((state.next as string) === "workflow_children_join") return "workflow_children_join";
       return "supervisor";
     case "workflow_approval":
       return "workflow";
@@ -83,6 +84,8 @@ function routeFrom(node: NodeName, state: GraphState): NodeName | typeof END {
       if ((state.next as string) === "workflow_wait") return "workflow_wait";
       // 子 run 完成后路由到 __end__（子 graph run 独立结束）
       return END;
+    case "workflow_children_join":
+      return "supervisor";
   }
 }
 
@@ -95,7 +98,7 @@ export interface RunResult extends GraphState {
 }
 export interface PendingSnapshot {
   pending: boolean;
-  pendingNode?: "workflow_approval" | "workflow_wait" | null;
+  pendingNode?: "workflow_approval" | "workflow_wait" | "workflow_children_join" | null;
   waitDeadline?: string;
 }
 
@@ -132,9 +135,13 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
         // 然后落盘 + 停机 + 透出。__interrupt__ 本身不进 state。
         const { __interrupt__, ...partial } = out;
         state = mergeState(state, partial);
-        // kind=wait_for_reply → 落盘 workflow_wait；其余 → workflow_approval
+        // kind=wait_for_reply → workflow_wait；kind=children_join → workflow_children_join；其余 → workflow_approval
         const kind = __interrupt__[0]?.value.kind;
-        const pendingNode = kind === "wait_for_reply" ? "workflow_wait" : "workflow_approval";
+        const pendingNode = kind === "wait_for_reply"
+          ? "workflow_wait"
+          : kind === "children_join"
+            ? "workflow_children_join"
+            : "workflow_approval";
         store.save(cfg.threadId, { state, pendingNode, interrupt: __interrupt__ });
         logger.info({ threadId: cfg.threadId, node: cur, kind }, "interrupt — paused, awaiting resume");
         return { ...state, __interrupt__ };
@@ -148,7 +155,16 @@ export function compileGraph(nodes: NodeMap, store: GraphStore): CompiledGraph {
       logger.warn({ threadId: cfg.threadId }, `run loop hit MAX_STEPS(${MAX_STEPS}) — terminating`);
     }
     // 正常终止：落盘完整 state、清挂起标记。
-    store.save(cfg.threadId, { state, pendingNode: null, interrupt: null });
+    // 保留 parentThreadId / childStatus / childResult，防止覆盖 updateChildResult 写入的完成标记。
+    const prevSaved = store.load(cfg.threadId);
+    store.save(cfg.threadId, {
+      state,
+      pendingNode: null,
+      interrupt: null,
+      ...(prevSaved?.parentThreadId !== undefined ? { parentThreadId: prevSaved.parentThreadId } : {}),
+      ...(prevSaved?.childStatus !== undefined ? { childStatus: prevSaved.childStatus } : {}),
+      ...(prevSaved?.childResult !== undefined ? { childResult: prevSaved.childResult } : {}),
+    });
     return state;
   }
 

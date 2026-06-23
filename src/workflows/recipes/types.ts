@@ -130,4 +130,10 @@ export interface Recipe {
   finalize?: (ctx: FinalizeContext) => Promise<FinalizeResult>;
   /** 任务失败 / 用户放弃时的清理（如丢弃改动）。可选。 */
   onAbort?: (cwd: string) => Promise<void>;
+  /**
+   * 固定测试用例列表（test recipe 专用）。
+   * 当此字段存在时，fan_out 直接使用这里的测试用例，不从 plan stage 的 LLM 输出解析。
+   * 支持 __CONCURRENT__: 和 __PDF_UPLOAD__: 等特殊格式。
+   */
+  fixedTestCases?: string[];
 }

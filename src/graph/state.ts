@@ -79,6 +79,21 @@ export interface WorkflowProgress {
   slackThreadTs?: string;
   /** 本轮对话历史（子 run 内的多轮 send-reply）。 */
   conversationHistory?: Array<{ role: "tester" | "bot"; text: string }>;
+  // ── fan-out / join ──
+  /** 父 run fan_out 时注册的所有子 run threadId 列表（父 run 持有，用于 join 汇总）。 */
+  childThreadIds?: string[];
+  /** 子 run 指向父 run 的 threadId（子 run 持有，完成后用于通知父 run）。 */
+  parentThreadId?: string;
+  /** 并发组标签，用于汇总报告（如"并发对话(3条)"）。 */
+  childGroupLabel?: string;
+  /** 并发组序号，汇总时按组聚合，同组全部 PASS 才算该测试点通过。 */
+  childGroupIndex?: number;
+  /** 因槽位满而排队等待的测试用例（父 run 持有）。槽位释放后依次补发。 */
+  pendingQueue?: Array<{
+    testCase: string;
+    groupLabel: string;
+    groupIndex: number;
+  }>;
 }
 
 // ----------------------------------------------------------------
