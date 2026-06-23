@@ -1,6 +1,7 @@
 import { App, Assistant, type AppOptions } from "@slack/bolt";
 import type { SlackClient } from "./client.ts";
 import { createLogger } from "../../observability/logger.ts";
+import { botIdForChannel } from "../../workflows/repo-map.ts";
 const logger = createLogger("slack-receiver");
 
 export interface SlackEventHandler {
@@ -193,7 +194,8 @@ export class SlackReceiver {
       }
 
       // 被测 bot 在 thread 里 mention 了 Tessel → 路由到 onBotMessage（workflow_wait resume）
-      const targetBotId = process.env.TARGET_BOT_ID;
+      // 按触发频道查对应的被测 bot（支持多频道多 bot，来自 TEST_TARGETS 配置）
+      const targetBotId = botIdForChannel(event.channel);
       if (targetBotId && event.user === targetBotId && event.thread_ts && this.handler.onBotMessage) {
         logger.debug({ user: event.user, threadTs: event.thread_ts }, "target bot reply via mention → onBotMessage");
         await this.handler.onBotMessage({
