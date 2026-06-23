@@ -36,8 +36,15 @@ _labels    = None
 
 def load_model(model_dir: Path):
     global _tokenizer, _session, _labels
+    import os
     _tokenizer = BertTokenizer.from_pretrained(str(model_dir))
-    _session   = ort.InferenceSession(str(model_dir / "classifier.onnx"))
+    # onnxruntime resolves external data files relative to cwd, not the model path
+    prev_cwd = os.getcwd()
+    os.chdir(str(model_dir))
+    try:
+        _session = ort.InferenceSession("classifier.onnx")
+    finally:
+        os.chdir(prev_cwd)
     with open(model_dir / "labels.json") as f:
         _labels = json.load(f)
     print(f"Model loaded from {model_dir}  labels={_labels}")
