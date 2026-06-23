@@ -252,6 +252,35 @@ export class SlackReceiver {
         });
       }
     });
+
+    // ---- 被测 bot 在 thread 里的普通回复（不含 @mention）----
+    // app_mention 只能捕获 @Tessel 的消息。被测 bot 直接回复 thread 时走这里。
+    // 过滤条件：来自 TEST_TARGETS 配置的被测 bot + 在 thread 里（有 thread_ts）
+    this.app.message(async ({ message }) => {
+      if (!this.handler.onBotMessage) return;
+      const msg = message as unknown as Record<string, unknown>;
+      const user = msg["user"] as string | undefined;
+      const channel = msg["channel"] as string | undefined;
+      const threadTs = msg["thread_ts"] as string | undefined;
+      const ts = msg["ts"] as string | undefined;
+      const text = (msg["text"] as string | undefined) ?? "";
+
+      if (!user || !channel || !threadTs || !ts) return;
+      // 只处理在 thread 里的消息（排除顶层消息）
+      if (threadTs === ts) return;
+
+      const targetBotId = botIdForChannel(channel);
+      if (!targetBotId || user !== targetBotId) return;
+
+      logger.debug({ user, channel, threadTs }, "target bot thread reply → onBotMessage");
+      await this.handler.onBotMessage({
+        text,
+        user,
+        channel,
+        ts,
+        threadTs,
+      });
+    });
   }
 
   async start(): Promise<void> {
