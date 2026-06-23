@@ -174,6 +174,20 @@ export class SlackReceiver {
         return;
       }
 
+      // 被测 bot 在 thread 里 mention 了 Tessel → 路由到 onBotMessage（workflow_wait resume）
+      const targetBotId = process.env.TARGET_BOT_ID;
+      if (targetBotId && event.user === targetBotId && event.thread_ts && this.handler.onBotMessage) {
+        logger.debug({ user: event.user, threadTs: event.thread_ts }, "target bot reply via mention → onBotMessage");
+        await this.handler.onBotMessage({
+          text: event.text ?? "",
+          user: event.user,
+          channel: event.channel,
+          ts: event.ts,
+          threadTs: event.thread_ts,
+        });
+        return;
+      }
+
       // 去掉 <@BOTID> 前缀
       const textClean = event.text.replace(/<@[A-Z0-9]+>\s*/g, "").trim();
       const threadTs = event.thread_ts ?? event.ts;

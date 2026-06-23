@@ -155,16 +155,46 @@ export class SlackClient {
     channel: string;
     threadTs?: string;
     initialComment?: string;
-  }): Promise<void> {
+  }): Promise<{ ts?: string }> {
     const file = Bun.file(params.filePath);
     const buf = Buffer.from(await file.arrayBuffer());
+
+    if (params.initialComment) {
+      // 带 initial_comment 上传：文件和消息合成一条，然后查 history 拿 ts
+      const beforeTs = (Date.now() / 1000).toFixed(6);
+      await this.client.filesUploadV2({
+        channel_id: params.channel,
+        ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
+        filename: params.filename,
+        file: buf,
+        initial_comment: params.initialComment,
+      } as Parameters<typeof this.client.filesUploadV2>[0]);
+
+      // 上传后重试查 history（最多 5 次，每次间隔 500ms）
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const hist = await this.client.conversations.history({
+            channel: params.channel,
+            oldest: beforeTs,
+            limit: 5,
+          });
+          if (hist.messages?.[0]?.ts) return { ts: hist.messages[0].ts };
+        } catch {
+          // 继续重试
+        }
+      }
+      return {};
+    }
+
+    // 普通上传（到 thread 里）
     await this.client.filesUploadV2({
       channel_id: params.channel,
       ...(params.threadTs ? { thread_ts: params.threadTs } : {}),
       filename: params.filename,
       file: buf,
-      ...(params.initialComment ? { initial_comment: params.initialComment } : {}),
     } as Parameters<typeof this.client.filesUploadV2>[0]);
+    return {};
   }
 
   async uploadImageFromUrl(params: {

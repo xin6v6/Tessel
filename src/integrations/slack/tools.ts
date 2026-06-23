@@ -347,6 +347,34 @@ export function buildSlackTools(client: SlackClient): ToolEntry[] {
     // ----------------------------------------------------------------
     {
       definition: {
+        name: "slack_upload_file",
+        description: "Upload a local file to a Slack channel or thread.",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: { type: "string", description: "Absolute path to the local file." },
+            filename: { type: "string", description: "Display filename in Slack." },
+            channel: { type: "string", description: "Channel ID." },
+            thread_ts: { type: "string", description: "Optional thread timestamp to upload into." },
+            initial_comment: { type: "string", description: "Optional message accompanying the file." },
+          },
+          required: ["file_path", "filename", "channel"],
+        },
+      },
+      handler: async (input) => {
+        const res = await client.uploadFile({
+          filePath: input.file_path as string,
+          filename: input.filename as string,
+          channel: input.channel as string,
+          threadTs: input.thread_ts as string | undefined,
+          initialComment: input.initial_comment as string | undefined,
+        });
+        return JSON.stringify({ ok: true, ts: res.ts });
+      },
+    },
+
+    {
+      definition: {
         name: "slack_list_contacts",
         description:
           "List all known contact aliases for Slack. Returns alias names and optional notes; raw IDs are intentionally not included.",
