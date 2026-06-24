@@ -1,6 +1,6 @@
 # Tessel
 
-> 多 Agent 个人助手，通过 Slack 交互，支持工具调用和自动代码审查。基于 Bun + 自建图运行时。
+> 多 Agent 个人助手，通过 Slack 交互，支持工具调用、自动代码审查和并发 bot 测试。基于 Bun + 自建图运行时。
 
 ## 架构
 
@@ -13,23 +13,25 @@ Slack (@mention / DM)
         ▼
    Supervisor                ← 消费 intent + 选 agent + 结果整合
         │
-   ┌────┼────┬─────────────┬──────────────────────────┐
-   ▼    ▼    ▼             ▼                          ▼
- Slack  Web  MCP       Capabilities              Workflow ⇄ Workflow Approval
- Agent Agent Agent      (自省)                   (跑 stage)  (审批 interrupt)
-   │    │    │                                       │
-   │    │    │                                   coding recipe
-   └────┴────┘                                   （需求→编程→测试→审核→提交）
-        │                                            │
-        ▼                                            ▼
-  SkillContext                               StageDef.skills
-  （选择性注入）                              （无条件注入，不走 bindings）
-        ▲
-        │ 读取
-   skills/_bindings.json        ← agent ↔ skill 归属
-   skills/*/SKILL.md            ← skill 真相源
-     description → 常驻 menu（每 skill 约一行）
-     body        → 命中时才注入（规则/2-gram 匹配，零 LLM）
+   ┌────┼────┬─────────────┬─────────────────────────────────────────┐
+   ▼    ▼    ▼             ▼                                         ▼
+ Slack  Web  MCP       Capabilities         Workflow ⇄ Workflow Approval
+ Agent Agent Agent      (自省)              (跑 stage)  (审批 interrupt)
+   │    │    │                                  │
+   └────┴────┘                       ┌──────────┴──────────┐
+        │                            ▼                     ▼
+        ▼                       coding recipe         test recipe
+  SkillContext                  需求→编程→测试         plan（ReAct 调 Slack
+  （选择性注入）                 →审核→提交 PR         工具查真实数据）
+        ▲                                                   │ fan_out
+        │ 读取                                         ┌────┴────┐
+   skills/_bindings.json                               ▼ (子 run  ▼)
+   skills/*/SKILL.md                            workflow_child ×N
+     description → 常驻 menu                        ↕ workflow_wait
+     body → 命中时才注入（零 LLM）            workflow_children_join
+        │
+        ▼
+   StageDef.skills（无条件注入，不走 bindings）
 ```
 
 > **自建运行时**：图拓扑、节点执行、interrupt/resume 全在 `src/graph/runtime.ts` 里。每个节点是 `(state, resume?) => Promise<Partial<state> & { __interrupt__? }>`，run loop 顺序执行节点、`mergeState` 合并产出、按 `routeFrom` 决定下一跳，遇 `__interrupt__` 落盘暂停。LLM 调用走 `LLMClient`（`src/llm/client.ts`，直连任意 OpenAI-compatible endpoint），消息是原生 TS discriminated union（`src/llm/messages.ts`：`HumanMsg/AIMsg/SystemMsg/ToolMsg`），ReAct 循环是 `runReactAgent`（`src/llm/react.ts`）。
@@ -41,6 +43,7 @@ Slack (@mention / DM)
 - **MCP Agent**：通过 MCP 协议接入外部服务（占位 stub）
 - **Capabilities**：自省节点，根据运行时已注册的 integrations/tools 生成能力清单
 - **Workflow / Workflow Approval**：多阶段任务调度（按 recipe 跑 stage + 人工审批）。拆成两个节点——`workflow` 跑 stage、遇审批点落盘后交给 `workflow_approval` 做 interrupt，避免审批 resume 时重跑昂贵 stage（见下）。
+- **Workflow Child / Workflow Wait / Workflow Children Join**：并发子 run 系统。`workflow` 遇到 `fan_out` stage 时，根据 plan 产出的用例数组派生多个子 run（每个子 run 有独立 `threadId`、`parentThreadId` 指向父 run）；每个子 run 在 `workflow_child` 节点里执行单轮任务，发消息后挂起在 `workflow_wait` 等待外部 bot 回复；全部子 run 完成（或超时）后，父 run 从 `workflow_children_join` 恢复并汇总结论。
 - **Skill 系统**：每个 agent 可绑定一组 skill（`skills/_bindings.json`）。skill 是 `SKILL.md` 文件，含一行 `description`（做命中判断）和完整指令正文。description 常驻 system prompt（几十 token/skill）；正文仅在命中时注入。命中走规则/2-gram 匹配（零 LLM 开销）。未命中则零额外开销，不污染正常对话。Workflow stage 通过 `StageDef.skills` 无条件注入，不走 bindings。UI 提供 `/skills` CRUD 界面和 agent×skill 矩阵调度。
 
 ### 路由（Router 前置分类 + Supervisor 选 agent）
@@ -80,22 +83,33 @@ Slack (@mention / DM)
 - `finalReply` —— 已成稿、可直接发给用户的回复（含表格、列表等）。Supervisor 看到后**原样转发**，不再 LLM 重写，避免子节点已渲染的结构化内容被改写。
 - `subAgentResult` —— ReAct 原始输出。仅当 `finalReply` 为空时，Supervisor 会用一次 LLM 整合成自然语言回复（兜底路径）。
 
-### Workflow（多阶段任务 + 人工审批）
+### Workflow（多阶段任务 + 人工审批 + 并发子 run）
 
-`workflow` 节点按 **recipe** 跑多阶段开发任务（当前内置 `coding`：需求分析 → 编程 → 测试 → 审核 → 提交 PR），在需求阶段后停下来等人工审批。
+`workflow` 节点按 **recipe** 跑多阶段任务。当前内置两个 recipe：
+
+- **`coding`**：需求分析 → 编程 → 测试 → 审核 → 提交 PR，在需求阶段后停下等人工审批
+- **`test`**：设计测试用例（`plan` stage 用 ReAct 调 Slack 工具查询真实频道和用户数据）→ 并发发送给被测 bot（`fan_out`）
 
 ```
 workflow            跑 recipe.stages；遇审批 plan stage → 进度落盘 state.workflowProgress
                     → 路由到 workflow_approval（此时 plan 产出已持久化）
 workflow_approval   只做 interrupt 等人工确认 → 把 approved 写回 phase → 路由回 workflow
 workflow（重入）     从 workflowProgress 恢复，已完成 stage 已在 outputs 里 → 跳过，续跑 / 放弃
+
+fan_out stage       workflow 从 plan 产出解析出 JSON 数组 → 为每个测试用例派生一个子 run
+                    子 run：独立 threadId，parentThreadId 指向父 run，childStatus=running
+workflow_child      每个子 run 的执行节点：发消息 → 挂起在 workflow_wait 等 bot 回复
+workflow_wait       子 run 暂停，等待被测 bot 回复（或 waitDeadline 超时）
+workflow（父 run）   子 run 全部完成 / 超时后，从 workflow_children_join resume，汇总结论
 ```
 
 设计要点：
-- **按频道选目标仓库**：在哪个 Slack 频道 @bot，就操作哪个仓库。映射由 `CODING_REPOS="<channelId>:<repoPath>,..."` 配置；`RequestContext.channel` 带着频道 id，runner 用 `repoForChannel(channel)` 选仓库。**没映射的频道（含 DM）直接拒绝，不回退默认仓库** —— 避免在错频道误改。
+- **按频道选目标仓库 / 被测 bot**：在哪个 Slack 频道 @bot，就操作哪个仓库（coding）或向哪个 bot 发消息（test）。映射分别由 `CODING_REPOS` 和 `TEST_TARGETS` 配置。**没映射的频道（含 DM）直接拒绝，不回退默认值**。
 - **拆成两个节点避免重跑**：若在同一节点里"跑需求分析 → 暂停等审批"，审批后会**重跑需求分析**（实测 ~$0.5-0.8、2-3 分钟）。拆开后 `workflow` 跑完正常 return、进度落盘，`workflow_approval` 单独发出 `__interrupt__`，resume 不重跑昂贵 stage。
 - **审批跨消息恢复**：节点返回 `{ __interrupt__ }` 时，run loop 把当前 state + `pendingNode: "workflow_approval"` 存进 `SqliteGraphStore`。下一条用户消息进来，`main.ts` 调 `getState(threadId)` 发现 `pending`，用 `invoke({ resume })` 把 resume 值注入 `workflow_approval` 节点恢复（"同意"则继续，否则放弃）。
-- **白名单**：仅 `CODING_ALLOWLIST` 里的 userId 可触发。
+- **重启不续跑**：进程启动时 `store.cancelAllPending()` 清空所有挂起的 pending runs（含所有 `pendingNode` 值：`workflow_approval` / `workflow_wait` / `workflow_children_join`）。Ctrl+C 中断后重启不会意外续跑旧任务。
+- **test recipe 用真实数据**：`plan` stage 设 `useReact: true` + `allowedTools: ["slack_"]`，让 LLM 在设计用例前先调 `slack_list_channels` / `slack_list_contacts` 查真实频道和用户，杜绝凭空捏造数据。
+- **白名单**：仅 `CODING_ALLOWLIST` 里的 userId 可触发 workflow。
 - **失败重试 / 收尾**：stage 失败按 `recipe.retryTo` + `maxRetries` 回退重跑；全通过调 `recipe.finalize`（coding = git commit+push）；放弃 / 失败调 `recipe.onAbort`（coding = `git reset --hard` 清理工作区，**注意别让它指向你正在手改的仓库**）。
 
 ## 快速开始
@@ -125,7 +139,7 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...   # Socket Mode 必须
 ```
 
-> 完整变量（router 快模型、workflow 仓库映射/白名单、Claude Agent SDK 后端、验收 agent 等）见 `.env.example` 内联注释。
+> 完整变量（router 快模型、workflow 仓库映射/白名单、test recipe 的 `TEST_TARGETS` / `WORKFLOW_CHANNELS`、Claude Agent SDK 后端、验收 agent 等）见 `.env.example` 内联注释。
 
 ### 3. 启动
 
@@ -254,7 +268,9 @@ Tessel 持久化整段 graph run（含 `state.messages`），让 bot 跨次 invo
 ### 存储与 schema
 
 - 文件：`data/graph-runs.db`（gitignored）。可通过 `GRAPH_STORE_DB` 环境变量覆盖；测试用 `:memory:`。
-- 表：`runs`（`thread_id` PK，`data` 列存整段 run 的 JSON，`updated_at`）。每个 thread 一行，存 `{ state, pendingNode, interrupt }`。
+- 表：`runs`（`thread_id` PK，`data` 列存整段 run 的 JSON，`updated_at`）。每个 thread 一行，存 `{ state, pendingNode, interrupt, parentThreadId?, childStatus?, childResult? }`。
+- `pendingNode` 取值：`"workflow_approval"`（等人工审批）、`"workflow_wait"`（子 run 等 bot 回复）、`"workflow_children_join"`（父 run 等所有子 run 完成）、`null`（正常结束）。
+- 进程启动时 `store.cancelAllPending()` 会清除所有非 null 的 `pendingNode`，防止重启后意外 resume。
 - 改 schema / 想重置时删除 `data/graph-runs.db` 即可（会丢失所有历史会话）。
 
 ### Speaker 元数据
@@ -320,7 +336,7 @@ cd ~/actions-runner
 - **LLM**：自建 `LLMClient`，直连任意 OpenAI-compatible API（MiniMax、DeepSeek 等）
 - **Intent 分类**：本地 ONNX 判别模型，`ClassifierClient`（`src/router-classifier/client.ts`）通过 HTTP 调推理服务；零 token 消耗
 - **Skill 系统**：`src/skills/`（registry + inject）+ `skills/`（SKILL.md 文件树 + `_bindings.json`）；选择性注入，不污染正常对话
-- **Workflow stage 执行**：[Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)（coding recipe 的各 stage 底层用它跑工具）
+- **Workflow stage 执行**：[Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)（coding recipe 的各 stage 底层用它跑工具）；`useReact: true` 的 stage（如 test recipe 的 plan）则走 Tessel 原生 ReAct loop，可访问所有内部工具
 - **持久化**：`bun:sqlite`（`SqliteGraphStore`）
 - **Slack**：`@slack/bolt` + Socket Mode
 - **校验**：`zod`
