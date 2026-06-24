@@ -260,6 +260,8 @@ async function sendChildMessage(
     isChildRun: true,
     testCase: userMsg,
     slackThreadTs: ts,
+    testChannel,
+    targetBotId,
     parentThreadId,
     childGroupLabel: groupLabel,
     childGroupIndex: groupIndex,
@@ -497,8 +499,9 @@ export function buildWorkflowRunnerNode(skills?: SkillContext, llm?: LLMClient, 
 
         logger.info({ count: testCases.length, testChannel, targetBotId }, "fan_out: starting with slot control");
         const parentThreadId = ctx?.threadId ?? `slack:channel:${testChannel}`;
-        // 新一轮测试开始，清空残留的 slots 和 queue（防止上次遗留数据占满槽位）
+        // 新一轮测试开始：清空残留 slots/queue，同时清空上一轮的 childThreadIds，保证 join 只等本轮子 run
         slotManager.reset(testChannel);
+        wf = { ...wf, childThreadIds: [] };
         const { updatedWf } = await fanOut(testCases, parentThreadId, testChannel, targetBotId, wf, toolRegistry, getStore(), slotManager);
 
         logger.info({
