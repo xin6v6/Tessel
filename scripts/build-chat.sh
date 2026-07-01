@@ -38,7 +38,6 @@ echo "[·] 编译 $SWIFT_SRC ..."
 swiftc \
   -O \
   -framework Cocoa \
-  -framework WebKit \
   -o "$MACOS_DIR/$APP_NAME" \
   "$SWIFT_SRC"
 
@@ -73,6 +72,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'EOF'
 EOF
 
 echo "[✓] 已生成 Info.plist"
+
+# ── 复制宠物图片 ─────────────────────────────────────────────────────────
+
+BOY_PNG="$PROJECT_DIR/desktop/tessel_boy.png"
+if [ -f "$BOY_PNG" ]; then
+  cp "$BOY_PNG" "$RESOURCES_DIR/"
+  echo "[✓] 已复制 tessel_boy.png"
+else
+  echo "[✗] 未找到 desktop/tessel_boy.png" >&2
+  exit 1
+fi
 
 # ── 复制应用图标（如果有） ────────────────────────────────────────────────
 
