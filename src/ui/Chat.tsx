@@ -42,13 +42,15 @@ export default function Chat({ compact }: { compact?: boolean }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [threadId, setThreadId] = useState<string>(() => loadThreadId());
+  // compact 模式：只显示最新一问一答
+  const [compactPair, setCompactPair] = useState<{ q: string; a: string; pending: boolean; error?: boolean } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // 新消息进来时滚到底部
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, compactPair]);
 
   const startNewThread = useCallback(() => {
     const fresh = newThreadId();
@@ -63,6 +65,33 @@ export default function Chat({ compact }: { compact?: boolean }) {
 
     setInput('');
     setSending(true);
+
+    if (compact) {
+      // compact 模式：每次新建 thread，只保留本次问答
+      const freshId = newThreadId();
+      setCompactPair({ q: text, a: '', pending: true });
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ threadId: freshId, message: text }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `HTTP ${res.status}`);
+        }
+        const data = await res.json() as { reply: string; route?: string };
+        setCompactPair({ q: text, a: data.reply || '（无回复）', pending: false });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setCompactPair({ q: text, a: `❌ 出错：${msg}`, pending: false, error: true });
+      } finally {
+        setSending(false);
+        taRef.current?.focus();
+      }
+      return;
+    }
+
     setMessages(prev => [
       ...prev,
       { role: 'user', content: text },
@@ -141,25 +170,52 @@ export default function Chat({ compact }: { compact?: boolean }) {
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-auto">
+        {compact ? (
+          <div ref={scrollRef} className="px-3 py-3 flex flex-col gap-3 overflow-auto">
+            {!compactPair ? (
+              <div className="flex flex-col items-center justify-center text-center mt-12 gap-3 select-none">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
+                  <Workflow size={22} className="text-indigo-400" />
+                </div>
+                <h1 className="text-sm font-semibold text-slate-300">和 Tessel 对话</h1>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex justify-end">
+                  <div className="rounded-2xl px-3 py-2 text-sm bg-indigo-500/90 text-white max-w-[85%] break-words whitespace-pre-wrap">
+                    {compactPair.q}
+                  </div>
+                </div>
+                <div className={`rounded-2xl px-3 py-2 text-sm max-w-[95%] break-words whitespace-pre-wrap ${
+                  compactPair.error
+                    ? 'bg-rose-500/10 border border-rose-500/30 text-rose-200'
+                    : 'bg-[#161a26] border border-slate-800/70 text-slate-200'
+                }`}>
+                  {compactPair.pending
+                    ? <span className="flex items-center gap-2 text-slate-500"><Loader2 size={13} className="animate-spin" /> 思考中…</span>
+                    : compactPair.a}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
         <div className="max-w-3xl mx-auto px-5 py-6 flex flex-col gap-5">
           {messages.length === 0 && (
-            <div className={`flex flex-col items-center justify-center text-center ${compact ? 'mt-12' : 'mt-24'} gap-3 select-none`}>
+            <div className="flex flex-col items-center justify-center text-center mt-24 gap-3 select-none">
               <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
                 <Workflow size={26} className="text-indigo-400" />
               </div>
               <h1 className="text-lg font-semibold text-slate-200">和 Tessel 对话</h1>
-              {!compact && (
-                <p className="text-sm text-slate-500 max-w-sm">
-                  直接提问、让它用工具，或交给 workflow 跑多阶段任务。回车发送，Shift+回车换行。
-                </p>
-              )}
+              <p className="text-sm text-slate-500 max-w-sm">
+                直接提问、让它用工具，或交给 workflow 跑多阶段任务。回车发送，Shift+回车换行。
+              </p>
             </div>
           )}
-
           {messages.map((m, i) => (
             <MessageBubble key={i} msg={m} />
           ))}
         </div>
+        )}
       </div>
 
       {/* Composer */}

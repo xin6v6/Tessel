@@ -94,7 +94,7 @@ echo ""
 echo "  启动: open $APP_BUNDLE"
 echo "  或双击 Finder 中的 TesselChat.app"
 echo ""
-echo "  通过菜单栏 🟢T 图标或 tessel chat start 控制显隐"
+echo "  通过 tessel chat show/hide 控制显隐"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ── 可选：直接启动 ────────────────────────────────────────────────────────

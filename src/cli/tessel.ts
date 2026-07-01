@@ -662,7 +662,7 @@ async function cmdChat(args: string[]) {
           stdout: "ignore",
           stderr: "ignore",
         });
-        ok("悬浮窗已激活（点击菜单栏 message.fill 图标亦可切换）");
+        ok("悬浮窗已激活（tessel chat show/hide 可控制显隐）");
         return;
       }
 
@@ -673,7 +673,7 @@ async function cmdChat(args: string[]) {
         stderr: "ignore",
       });
       await proc.exited;
-      ok("悬浮窗已启动（点击菜单栏 🟢T 图标切换显隐）");
+      ok("悬浮窗已启动（tessel chat show/hide 切换显隐）");
       break;
     }
     case "stop": {
@@ -727,6 +727,24 @@ async function cmdChat(args: string[]) {
         err("构建失败");
       }
       // build-chat.sh already prints success message
+      break;
+    }
+    case "show": {
+      if (!(await isChatRunning())) {
+        err("悬浮窗未运行，请先执行 tessel chat start");
+        break;
+      }
+      await Bun.$`swift -e 'import Foundation; DistributedNotificationCenter.default().post(name: Notification.Name("com.tessel.chat.show"), object: nil)'`.quiet();
+      ok("已显示悬浮窗");
+      break;
+    }
+    case "hide": {
+      if (!(await isChatRunning())) {
+        err("悬浮窗未运行");
+        break;
+      }
+      await Bun.$`swift -e 'import Foundation; DistributedNotificationCenter.default().post(name: Notification.Name("com.tessel.chat.hide"), object: nil)'`.quiet();
+      ok("已隐藏悬浮窗");
       break;
     }
     case "restart":
@@ -1016,9 +1034,10 @@ ${C.bold}操作:${C.reset}
   stop        停止悬浮窗
   status      检查悬浮窗是否在运行
   restart     重新启动
+  show        显示悬浮窗
+  hide        隐藏悬浮窗
   build       构建 TesselChat.app
 
-${C.bold}快捷键:${C.reset} Option+Space 呼出/隐藏悬浮窗
 ${C.bold}窗口行为:${C.reset} 点击外部自动隐藏 (类似 Spotlight)
 ${C.bold}前提:${C.reset} tessel ui start (悬浮窗通过 HTTP API 通信)
 
@@ -1097,7 +1116,7 @@ async function cmdStartAll() {
   }
 
   console.log(`\n${C.green}[✓]${C.reset} 完成: ${C.green}${okCount}${C.reset} 个已启动${skipCount > 0 ? `, ${C.yellow}${skipCount}${C.reset} 个跳过` : ""}`);
-  console.log(`  悬浮窗: 点击菜单栏 ${C.bold}message.fill${C.reset} 图标切换`);
+  console.log(`  悬浮窗: ${C.bold}tessel chat show${C.reset} / ${C.bold}tessel chat hide${C.reset}`);
 }
 
 // ---- Command: stop (全部停止) ----

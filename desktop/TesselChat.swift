@@ -35,6 +35,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.showPanel()
         }
+
+        // CLI 控制：tessel chat show / hide
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(showPanel),
+            name: NSNotification.Name("com.tessel.chat.show"), object: nil)
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(hidePanel),
+            name: NSNotification.Name("com.tessel.chat.hide"), object: nil)
     }
 
     // ── 菜单栏图标 ────────────────────────────────────────────────────────
@@ -73,9 +81,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // ── 悬浮面板 ──────────────────────────────────────────────────────────
 
     func setupPanel() {
-        // 初始大小 420×650（多 44px 给原生标题栏）
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 340),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
@@ -83,8 +90,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.delegate = self
 
         // ── 关键属性 ──
-        panel.level = .floating
-        panel.hidesOnDeactivate = true
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
+        panel.hidesOnDeactivate = false
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -154,7 +161,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
-
         webView = WKWebView(frame: webFrame, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.setValue(false, forKey: "drawsBackground")
@@ -196,13 +202,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // ── 显示面板 ──────────────────────────────────────────────────────────
 
-    func showPanel() {
+    @objc func showPanel() {
         // 如果最小化了，先恢复
         if panel.isMiniaturized {
             panel.deminiaturize(nil)
         }
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
         webView.evaluateJavaScript(
             "document.querySelector('textarea')?.focus()",
             completionHandler: nil)
