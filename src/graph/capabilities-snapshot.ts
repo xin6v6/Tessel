@@ -1,16 +1,20 @@
 import type { ToolDefinition } from "../types/index.ts";
 import type { ToolRegistry } from "../tools/index.ts";
-import type { IntegrationRegistry } from "../integrations/registry.ts";
+import type { IntegrationRegistry, IntegrationHealth } from "../integrations/registry.ts";
+import type { Skill, SkillBindings } from "../skills/types.ts";
 
 /**
  * 运行时能力快照 —— 唯一可信的"当前有什么能力"数据源。
  *
- * 两个消费方：
+ * 消费方：
  *   1. capabilities 节点：给用户渲染 Markdown 报告（用户主动问"你能做什么"）。
  *   2. supervisor 第二轮路由：决定把任务派给哪个子节点（内部决策，不进对话）。
+ *   3. GET /api/capabilities：结构化 JSON，供 UI 仪表盘消费。
+ *   4. GET /api/health：健康检查端点。
  *
  * 关键约束：
- *   - 数据来自 IntegrationRegistry + ToolRegistry，不在代码里写死任何集成名。
+ *   - 数据来自 IntegrationRegistry + ToolRegistry + SkillRegistry + RecipeStore，
+ *     不在代码里写死任何集成名。
  *   - 已知 stub 节点（web/mcp）用 STUB_AGENTS 显式标注，让路由能区分
  *     "节点存在但工具是占位" vs "节点真实可用"，避免误派任务到 stub。
  */
@@ -23,12 +27,12 @@ import type { IntegrationRegistry } from "../integrations/registry.ts";
 const STUB_AGENTS = new Set<string>([]);
 
 // 纯节点（无 integration、无前缀工具）但本身就绪、可作为 tool_routing 候选。
-// workflow/vision/imagegen/file 都没有注册到 ToolRegistry，但节点本身可路由。
-const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen", "file"]);
+// workflow/vision/imagegen/file/terminal 都没有注册到 ToolRegistry，但节点本身可路由。
+const READY_PURE_NODES = new Set<string>(["workflow", "vision", "imagegen", "file", "terminal"]);
 
 // 工具内嵌在节点实现里（ReactTool），不经过 ToolRegistry，因此 ToolRegistry
 // 前缀匹配找不到它们。在 snapshot 里标记 builtIn=true，渲染时如实展示。
-const BUILT_IN_TOOL_NODES = new Set<string>(["vision", "imagegen", "file", "workflow"]);
+const BUILT_IN_TOOL_NODES = new Set<string>(["vision", "imagegen", "file", "workflow", "terminal"]);
 
 /** 描述一个子节点（agent）的能力。 */
 export interface AgentCapability {
@@ -49,16 +53,48 @@ export interface AgentCapability {
   ready: boolean;
 }
 
+/** Skill 在快照中的概览信息（不含 body，仅供 UI 清单展示）。 */
+export interface SkillOverview {
+  name: string;
+  description: string;
+  /** 已绑定此 skill 的 agent 列表 */
+  boundTo: string[];
+}
+
+/** Recipe stage 概览（供 UI 清单展示，不暴露完整 prompt 构造逻辑）。 */
+export interface RecipeStageOverview {
+  id: string;
+  label: string;
+  mutates: boolean;
+  allowedTools: string[];
+}
+
+/** Workflow recipe 在快照中的概览信息。 */
+export interface RecipeOverview {
+  name: string;
+  tag: string;
+  description: string;
+  stageCount: number;
+  stages: RecipeStageOverview[];
+}
+
 export interface CapabilitiesSnapshot {
   agents: AgentCapability[];
   /** 不归属任何已知 agent 的工具。通常为空；用于发现"孤儿"工具便于排查。 */
   otherTools: ToolDefinition[];
+  /** 各 integration 的健康状态（由 IntegrationRegistry.health() 提供）。 */
+  integrations: IntegrationHealth[];
+  /** 已加载的 skill 列表（含 agent 绑定信息）。 */
+  skills: SkillOverview[];
+  /** 已注册的 workflow recipe 概览。 */
+  workflows: RecipeOverview[];
   /** 快照构建时间，UTC 毫秒。供日志 / 缓存有效期判断使用。 */
   generatedAt: number;
 }
 
 /**
- * 扫描 IntegrationRegistry + ToolRegistry，组装结构化能力快照。
+ * 扫描 IntegrationRegistry + ToolRegistry + SkillRegistry + RecipeStore，
+ * 组装结构化能力快照。
  *
  * 注意：agent 列表的来源是 IntegrationRegistry —— 这意味着只有"注册过的
  * integration"会出现在快照里。capabilities / web / mcp 这种纯节点没有
@@ -74,8 +110,14 @@ export function buildCapabilitiesSnapshot(params: {
   knownAgents: readonly string[];
   /** 每个 agent 的人类可读描述（用于 LLM 路由 prompt）。 */
   agentDescriptions: Readonly<Record<string, string>>;
+  /** 可选：已加载的 skill 列表（来自 SkillRegistry）。 */
+  skills?: Skill[];
+  /** 可选：skill ↔ agent 绑定关系（来自 _bindings.json）。 */
+  skillBindings?: SkillBindings;
+  /** 可选：已注册的 workflow recipe 概览（来自 recipe-store）。 */
+  recipes?: Array<{ name: string; tag: string; description: string; stages: Array<{ id: string; label: string; mutates: boolean; allowedTools: string[] }> }>;
 }): CapabilitiesSnapshot {
-  const { toolRegistry, integrations, knownAgents, agentDescriptions } = params;
+  const { toolRegistry, integrations, knownAgents, agentDescriptions, skills, skillBindings, recipes } = params;
   const allTools = toolRegistry.definitions();
   const declaredIntegrations = new Set(integrations.list().map((i) => i.id));
 
@@ -113,9 +155,37 @@ export function buildCapabilitiesSnapshot(params: {
     };
   });
 
+  // ── skills 概览 ──
+  const skillOverviews: SkillOverview[] = (skills ?? []).map((s) => {
+    const boundTo: string[] = [];
+    if (skillBindings) {
+      for (const [agent, skillNames] of Object.entries(skillBindings)) {
+        if (skillNames.includes(s.name)) boundTo.push(agent);
+      }
+    }
+    return { name: s.name, description: s.description, boundTo };
+  });
+
+  // ── recipe 概览 ──
+  const recipeOverviews: RecipeOverview[] = (recipes ?? []).map((r) => ({
+    name: r.name,
+    tag: r.tag,
+    description: r.description,
+    stageCount: r.stages.length,
+    stages: r.stages.map((s) => ({
+      id: s.id,
+      label: s.label,
+      mutates: s.mutates,
+      allowedTools: s.allowedTools,
+    })),
+  }));
+
   return {
     agents,
     otherTools,
+    integrations: integrations.health(),
+    skills: skillOverviews,
+    workflows: recipeOverviews,
     generatedAt: Date.now(),
   };
 }

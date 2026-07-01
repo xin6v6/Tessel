@@ -9,13 +9,13 @@ const logger = createLogger("router");
 // 合法的 RouteIntent 值（对应 data/ 下的节点名 + chat + unknown）。
 // 新加节点 = 在 data/ 加 <node>.jsonl 重训后，这里补一行。
 const VALID_INTENTS = new Set<RouteIntent>([
-  "chat", "slack", "file", "terminal", "vision", "imagegen", "web", "mcp", "workflow", "capabilities",
+  "chat", "file", "terminal", "mcp", "workflow", "capabilities",
 ]);
 
 // RouteIntent 中可直接映射为 supervisor next 的节点名。
 // "chat" 和 "unknown" 不在此集合，supervisor 会直接回复或走 fallback。
 const AGENT_INTENTS = new Set<RouteIntent>([
-  "slack", "file", "terminal", "vision", "imagegen", "web", "mcp", "workflow", "capabilities",
+  "file", "terminal", "mcp", "workflow", "capabilities",
 ]);
 
 // Terminal 命令白名单 —— 输入的第一个词在此集合内，直接路由到 terminal agent，跳过 ONNX。

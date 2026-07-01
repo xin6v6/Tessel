@@ -33,6 +33,7 @@ export interface McpConfig {
 export function loadMcpConfig(): McpConfig {
   const candidates = [
     process.env.MCP_CONFIG_PATH,
+    ".mcp.json",
     "mcp.json",
   ].filter(Boolean) as string[];
 
@@ -44,7 +45,32 @@ export function loadMcpConfig(): McpConfig {
         const name = braced ?? bare;
         return process.env[name] ?? "";
       });
-      return JSON.parse(expanded) as McpConfig;
+      const parsed = JSON.parse(expanded);
+
+      // Normalize: accept both Claude Code format (mcpServers + type)
+      // and standard MCP format (servers + transport)
+      const servers: Record<string, McpServerConfig> = {};
+
+      const rawServers = parsed.mcpServers ?? parsed.servers ?? {};
+      for (const [name, raw] of Object.entries(rawServers)) {
+        const cfg = raw as Record<string, unknown>;
+        if ((cfg.transport || cfg.type) === "stdio") {
+          servers[name] = {
+            transport: "stdio",
+            command: cfg.command as string,
+            args: cfg.args as string[] | undefined,
+            env: cfg.env as Record<string, string> | undefined,
+          };
+        } else if ((cfg.transport || cfg.type) === "sse") {
+          servers[name] = {
+            transport: "sse",
+            url: cfg.url as string,
+            headers: cfg.headers as Record<string, string> | undefined,
+          };
+        }
+      }
+
+      return { servers };
     }
   }
 

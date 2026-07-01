@@ -37,7 +37,7 @@ function loadThreadId(): string {
   return fresh;
 }
 
-export default function Chat() {
+export default function Chat({ compact }: { compact?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -106,49 +106,53 @@ export default function Chat() {
   };
 
   return (
-    <div className="w-full h-screen bg-[#0b0e16] text-slate-200 font-sans flex flex-col overflow-hidden">
+    <div className={`w-full ${compact ? 'h-full' : 'h-screen'} bg-[#0b0e16] text-slate-200 font-sans flex flex-col overflow-hidden`}>
       {/* Header */}
-      <header className="flex items-center justify-between px-7 py-3 border-b border-slate-800/70 bg-[#0b0e16]/90 backdrop-blur z-20 flex-shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center">
-            <Bot size={15} className="text-indigo-400" />
+      {!compact && (
+        <header className="flex items-center justify-between px-7 py-3 border-b border-slate-800/70 bg-[#0b0e16]/90 backdrop-blur z-20 flex-shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center">
+              <Bot size={15} className="text-indigo-400" />
+            </div>
+            <span className="text-sm font-semibold">
+              <span className="text-white">Tessel</span>
+              <span className="text-slate-600 mx-2">·</span>
+              <span className="text-slate-400">Chat</span>
+            </span>
           </div>
-          <span className="text-sm font-semibold">
-            <span className="text-white">Tessel</span>
-            <span className="text-slate-600 mx-2">·</span>
-            <span className="text-slate-400">Chat</span>
-          </span>
-        </div>
-        <div className="flex items-center gap-2.5 text-[11px]">
-          <button
-            onClick={startNewThread}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-slate-300 border border-slate-700/60 bg-slate-800/40 hover:bg-slate-700/40 transition">
-            <Plus size={12} /> 新对话
-          </button>
-          <a href="/graph" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-indigo-400 border border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo-500/20 transition">
-            <GitBranch size={12} /> 架构图
-          </a>
-          <a href="/skills" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-amber-400 border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition">
-            <Workflow size={12} /> Skills
-          </a>
-          <a href="/logs" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 transition">
-            <ScrollText size={12} /> Logs
-          </a>
-        </div>
-      </header>
+          <div className="flex items-center gap-2.5 text-[11px]">
+            <button
+              onClick={startNewThread}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-slate-300 border border-slate-700/60 bg-slate-800/40 hover:bg-slate-700/40 transition">
+              <Plus size={12} /> 新对话
+            </button>
+            <a href="/graph" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-indigo-400 border border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo-500/20 transition">
+              <GitBranch size={12} /> 架构图
+            </a>
+            <a href="/skills" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-amber-400 border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition">
+              <Workflow size={12} /> Skills
+            </a>
+            <a href="/logs" className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 transition">
+              <ScrollText size={12} /> Logs
+            </a>
+          </div>
+        </header>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-auto">
         <div className="max-w-3xl mx-auto px-5 py-6 flex flex-col gap-5">
           {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center text-center mt-24 gap-3 select-none">
+            <div className={`flex flex-col items-center justify-center text-center ${compact ? 'mt-12' : 'mt-24'} gap-3 select-none`}>
               <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
                 <Workflow size={26} className="text-indigo-400" />
               </div>
               <h1 className="text-lg font-semibold text-slate-200">和 Tessel 对话</h1>
-              <p className="text-sm text-slate-500 max-w-sm">
-                直接提问、让它用工具，或交给 workflow 跑多阶段任务。回车发送，Shift+回车换行。
-              </p>
+              {!compact && (
+                <p className="text-sm text-slate-500 max-w-sm">
+                  直接提问、让它用工具，或交给 workflow 跑多阶段任务。回车发送，Shift+回车换行。
+                </p>
+              )}
             </div>
           )}
 
@@ -160,7 +164,7 @@ export default function Chat() {
 
       {/* Composer */}
       <div className="flex-shrink-0 border-t border-slate-800/70 bg-[#0b0e16]/90 backdrop-blur">
-        <div className="max-w-3xl mx-auto px-5 py-4">
+        <div className={`max-w-3xl mx-auto ${compact ? 'px-3 py-3' : 'px-5 py-4'}`}>
           <div className="flex items-end gap-2 rounded-2xl border border-slate-700/60 bg-[#11141f] px-3 py-2 focus-within:border-indigo-500/50 transition">
             <textarea
               ref={taRef}
@@ -179,9 +183,11 @@ export default function Chat() {
               {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
             </button>
           </div>
-          <p className="text-[10px] text-slate-600 mt-2 text-center">
-            会话 {threadId.slice(0, 18)}… · 与 Slack 共用同一套 Router / Supervisor
-          </p>
+          {!compact && (
+            <p className="text-[10px] text-slate-600 mt-2 text-center">
+              会话 {threadId.slice(0, 18)}… · 与 Slack 共用同一套 Router / Supervisor
+            </p>
+          )}
         </div>
       </div>
     </div>

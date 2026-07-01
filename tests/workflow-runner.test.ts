@@ -56,6 +56,7 @@ function freshState(text: string): GraphStateType {
     pendingPlan: [],
     planContext: "",
     capabilitiesReason: "" as const,
+    routeConfirmation: null,
   };
 }
 

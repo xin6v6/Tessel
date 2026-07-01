@@ -17,26 +17,11 @@ import { getSpeaker } from "../speaker.ts";
 import { workflowAgentDescription } from "../../workflows/recipe-store.ts";
 import { repoForChannel, recipeTagForChannel } from "../../workflows/repo-map.ts";
 import { snapshotForRoutingPrompt } from "../capabilities-snapshot.ts";
-import { logRoutingSuccess, logRoutingUnknown } from "../routing-log.ts";
+import { logRoutingSuccess, logRoutingUnknown, appendTrainingSample } from "../routing-log.ts";
 const logger = createLogger("supervisor");
 
-// ----------------------------------------------------------------
-// 平台出口锁定 (Hard-coded source → platform agent)
-// ----------------------------------------------------------------
-//
-// 来自 Slack 的请求只能路由到 slack agent，来自 Telegram 只能到 telegram agent。
-// 防止 LLM 看到用户消息里偶然出现的平台名 (例如 Slack 用户说
-// "我在 Telegram 上看到…") 就把工具调用送错出口。
-//
-// 实现方式：在路由 prompt 里，LLM 看到的"平台 agent"选项只剩当前 source
-// 对应的那一个，其他平台 agent **完全不出现在候选里**。LLM 只决定
-// "要不要用工具 / 要不要查能力 / 直接回复"，而不是"用哪个平台"。
-//
-// 加新平台 = 在这张表加一行；不会涉及 supervisor 其它逻辑。
-const SOURCE_TO_PLATFORM_AGENT: Partial<Record<Source, Exclude<SubAgentName, "__end__">>> = {
-  slack: "slack",
-  // telegram: "telegram",  // 接入 Telegram integration + agent 时取消注释
-};
+// 平台出口锁定已移除 —— Tessel 现在作为纯工具开发平台运行，
+// 不绑定任何生产消息平台（Slack/Telegram）。所有入口（CLI/Web Chat）直通 supervisor。
 
 // ----------------------------------------------------------------
 // workflow 白名单（纵深防御）
@@ -86,16 +71,11 @@ export const SUB_AGENTS: Record<
   Exclude<SubAgentName, "__end__" | "workflow_approval" | "workflow_wait" | "workflow_child" | "supervisor">,
   string
 > = {
-  slack:        "处理所有 Slack 操作：发消息、查频道历史、搜索消息、获取用户信息等",
-  web:          "搜索互联网获取实时信息、新闻、最新版本、文档等",
   mcp:          "通过 MCP 协议操作外部服务，如文件系统、GitHub、Notion、数据库等",
   capabilities: "当用户询问「你有什么能力 / 你能做什么 / 你支持哪些操作 / 列一下你的工具」等自我能力相关问题时使用",
-  vision:       "识别图片内容：当用户上传图片或分享图片 URL 并希望描述/分析图片时使用",
-  imagegen:     "根据文字描述生成图片：当用户说「帮我画…」「生成一张…」「画一个…」等文生图需求时使用",
   file:         "读取、写入、编辑本地文件：当用户需要查看文件内容、修改文件、新建文件、列目录等本地文件系统操作时使用",
-  terminal:     "执行只读终端命令（ls、ps、df、git status 等查看类命令）：当用户直接输入终端命令或说「执行/运行这条命令」时使用。危险命令（rm、sudo、curl 等）会被自动拒绝。",
-  // workflow 是【通用】多阶段调度器，不绑定开发。描述由已注册 recipe 动态生成：
-  // 现在只有 coding recipe 就只提开发；以后加 research/docs 等 recipe 自动扩展。
+  terminal:     "执行终端命令（ls、ps、df、git status、npm test 等）：当用户需要执行命令、跑测试、操作文件系统时使用",
+  // workflow 是【通用】多阶段调度器，不绑定开发。描述由已注册 recipe 动态生成。
   workflow:     workflowAgentDescription(),
 };
 
@@ -105,7 +85,7 @@ export const KNOWN_AGENTS = Object.keys(SUB_AGENTS) as Array<Exclude<SubAgentNam
 const VALID_ROUTES = [...Object.keys(SUB_AGENTS), "__end__"] as const;
 
 // router 输出的节点级 intent 可直接路由的集合（chat/unknown 不在此）。
-const ROUTABLE_INTENTS = new Set(["slack", "file", "terminal", "vision", "imagegen", "web", "mcp", "workflow", "capabilities"]);
+const ROUTABLE_INTENTS = new Set(["file", "terminal", "mcp", "workflow", "capabilities"]);
 
 
 // ----------------------------------------------------------------
@@ -246,44 +226,78 @@ export function buildSupervisorNode(
       ? lastHuman.content.slice(0, 120)
       : "";
 
-    // ── 视觉注入：消息携带图片时，将 vision 合并进候选集 ──
+    // ── Route Confirmation 处理 ──
     //
-    // 只在初始路由时（无 subAgentResult/finalReply/pendingPlan）检测图片，
-    // 避免 vision 返回后重复注入，也避免覆盖已有的多步计划。
-    // 注入后不 return，直接 fall-through 到 B0 处理 candidateAgents。
-    let effectiveCandidates: RouteIntent[] = state.candidateAgents ?? [];
-    if (!subAgentResult && !finalReply && !state.pendingPlan?.length && lastHuman) {
-      const attachedUrls = lastHuman.additional_kwargs?.["imageUrls"] as string[] | undefined;
-      const hasAttachedImages = Array.isArray(attachedUrls) && attachedUrls.length > 0;
-      const hasInlineImageUrl = typeof lastHuman.content === "string" &&
-        /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)/i.test(lastHuman.content);
-      let hasImage = hasAttachedImages || hasInlineImageUrl;
+    // 上一次 unknown_lookup 选出了 agent，发了一个确认提示给用户。
+    // 这一轮用户回复了 → 处理确认结果并路由。
+    const routeConfirmation = state.routeConfirmation;
+    if (routeConfirmation) {
+      const responseText = (typeof lastHuman?.content === "string"
+        ? lastHuman.content.trim().toLowerCase()
+        : "");
 
-      if (!hasImage) {
-        // 当前消息无图，但意图是 vision 或 unknown 时，往历史找最近一条带图消息
-        const routerSaysVisionOrUnknown = state.intent === "vision" || state.intent === "unknown";
-        if (routerSaysVisionOrUnknown) {
-          const reversed = [...messages].reverse();
-          for (let i = 1; i < reversed.length; i++) {
-            const m = reversed[i]!;
-            if (!isHuman(m)) continue;
-            const histUrls = m.additional_kwargs?.["imageUrls"] as string[] | undefined;
-            hasImage = (Array.isArray(histUrls) && histUrls.length > 0) ||
-              (typeof m.content === "string" && /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)/i.test(m.content));
-            break; // 只看前一条，避免跨话题误触发
-          }
+      const yesWords = ["yes", "y", "是", "对", "是的", "对的", "确认", "ok", "okay", "好", "可以", "行"];
+      let finalAgent: string;
+
+      if (yesWords.includes(responseText)) {
+        // 用户确认了 LLM 提议的 agent
+        finalAgent = routeConfirmation.proposedAgent;
+      } else {
+        // 用户可能提供了正确的 agent 名
+        // 尝试从回复中提取 agent 名（取第一个词，清洗非字母字符）
+        const cleaned = responseText.replace(/[^a-zA-Z_]/g, "").trim();
+        if (cleaned && (KNOWN_AGENTS as string[]).includes(cleaned)) {
+          finalAgent = cleaned;
+        } else {
+          // 无法识别 → 重新提示
+          logger.info({ responseText, proposedAgent: routeConfirmation.proposedAgent }, "route confirmation — unrecognized response, re-prompting");
+          const rePromptMsg = aiMsg(
+            `我不太确定你的意思。可用的 agent 有：${KNOWN_AGENTS.join("、")}。\n\n` +
+            `你之前说："${routeConfirmation.originalQuery}"\n` +
+            `我建议用 **${routeConfirmation.proposedAgent}** agent。回复 "yes" 确认，或者告诉我正确的 agent 名称。`,
+          );
+          return {
+            messages: [rePromptMsg],
+            next: "__end__",
+            routeConfirmation, // 保持待确认状态
+            subAgentResult: "",
+          };
         }
       }
 
-      if (hasImage && !effectiveCandidates.includes("vision")) {
-        effectiveCandidates = [...new Set(["vision" as RouteIntent, ...effectiveCandidates])];
-        logger.info({ effectiveCandidates, hasAttachedImages, hasInlineImageUrl }, "vision injected into candidates");
-      }
+      // 写入训练数据（异步，不阻塞路由）
+      void (async () => {
+        try {
+          appendTrainingSample(routeConfirmation.originalQuery, finalAgent);
+          await logRoutingSuccess(routeConfirmation.originalQuery, finalAgent);
+        } catch {
+          // 静默失败，不阻塞
+        }
+      })();
+
+      logger.info(
+        { proposed: routeConfirmation.proposedAgent, final: finalAgent, snippet: routeConfirmation.originalQuery.slice(0, 80) },
+        "route confirmation resolved — sample saved for training",
+      );
+
+      return {
+        subAgentResult: "",
+        finalReply: "",
+        capabilitiesReason: "",
+        intent: "unknown",
+        routeConfirmation: null, // 清除确认状态
+        candidateAgents: [],
+        pendingPlan: [finalAgent as RouteIntent],
+        next: finalAgent as SubAgentName,
+      };
     }
+
+    // ── candidateAgents 直接使用 router 输出 ──
+    let effectiveCandidates: RouteIntent[] = state.candidateAgents ?? [];
 
     // ── 多步计划调度 ──
     //
-    // pendingPlan 由 router 写入（如 ["vision","file","slack"]）。
+    // pendingPlan 由 router 写入（如 ["file","mcp"]）。
     // 每次 supervisor 被唤起时：
     //   · 有 subAgentResult/finalReply → 上一步 agent 刚完成 → 把输出存入 planContext，
     //     弹出已完成的第一步，若还有剩余步骤继续路由下一个 agent。
@@ -453,16 +467,23 @@ export function buildSupervisorNode(
 
         const chosenAgent = selectResult.agent.trim();
         if (chosenAgent && (KNOWN_AGENTS as string[]).includes(chosenAgent)) {
-          logger.info({ chosenAgent, reason: selectResult.reason }, "unknown_lookup → agent selected by LLM");
-          // 异步记录成功样本，不阻塞路由
-          void logRoutingSuccess(inputSnippet, chosenAgent);
+          logger.info({ chosenAgent, reason: selectResult.reason }, "unknown_lookup → agent selected by LLM — requesting confirmation");
+
+          const confirmationMsg = aiMsg(
+            `我认为这个请求应该由 **${chosenAgent}** agent 来处理。\n\n` +
+            `回复 "yes" 确认，或者告诉我正确的 agent 名称（可选：${KNOWN_AGENTS.join("、")}）。`,
+          );
+
           return {
+            messages: [confirmationMsg],
+            next: "__end__",
             subAgentResult: "",
             capabilitiesReason: "",
-            next: chosenAgent as SubAgentName,
-            pendingPlan: [chosenAgent as RouteIntent],
             intent: "unknown",
-            candidateAgents: [],
+            routeConfirmation: {
+              proposedAgent: chosenAgent,
+              originalQuery: inputSnippet,
+            },
           };
         }
 

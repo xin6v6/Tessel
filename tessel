@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ================================================================
+# Tessel CLI — shell wrapper
+#
+# Usage: tessel <command> [action] [options]
+#        tessel --help for full command list
+# ================================================================
+set -euo pipefail
+
+# Resolve symlinks to find the real script location (needed for global installs).
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+cd "$SCRIPT_DIR"
+
+exec bun run "$SCRIPT_DIR/src/cli/tessel.ts" "$@"

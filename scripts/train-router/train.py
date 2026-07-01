@@ -93,7 +93,8 @@ def load_data(data_path: Path):
 
 # ── Training ──────────────────────────────────────────────────────────────────────
 
-def train(data_path: Path, model_dir: Path, epochs: int, batch_size: int, num_workers: int = 0):
+def train(data_path: Path, model_dir: Path, epochs: int, batch_size: int,
+          num_workers: int = 0, base_model: str | None = None):
     texts, label_strs, counts = load_data(data_path)
 
     all_labels = sorted(counts.keys())
@@ -119,9 +120,10 @@ def train(data_path: Path, model_dir: Path, epochs: int, batch_size: int, num_wo
         dtype=torch.float,
     )
 
-    print(f"\nLoading encoder from: {LOCAL_MODEL}")
-    tokenizer = BertTokenizer.from_pretrained(LOCAL_MODEL)
-    encoder   = BertModel.from_pretrained(LOCAL_MODEL)
+    model_path = base_model if base_model else LOCAL_MODEL
+    print(f"\nLoading encoder from: {model_path}")
+    tokenizer = BertTokenizer.from_pretrained(model_path)
+    encoder   = BertModel.from_pretrained(model_path)
 
     train_ds = PlanDataset(X_train, y_train, tokenizer)
     val_ds   = PlanDataset(X_val,   y_val,   tokenizer)
@@ -257,8 +259,11 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir",  default=str(SCRIPT_DIR / "model"))
     parser.add_argument("--epochs",     type=int, default=20)
     parser.add_argument("--batch-size",  type=int, default=16)
+    parser.add_argument("--base-model", default=str(SCRIPT_DIR / "base-model"),
+                        help="Path to pre-downloaded Chinese BERT model directory")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes; 4-8 recommended on Apple Silicon")
     args = parser.parse_args()
 
-    train(Path(args.data), Path(args.model_dir), args.epochs, args.batch_size, args.num_workers)
+    train(Path(args.data), Path(args.model_dir), args.epochs, args.batch_size,
+          args.num_workers, args.base_model)

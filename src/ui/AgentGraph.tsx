@@ -4,7 +4,19 @@ import {
   Workflow, ClipboardList, FileCode, FlaskConical, ShieldCheck,
   GitBranch, Database, ScrollText, ChevronRight, Split, Puzzle, Cpu,
   CheckCircle2, RefreshCw, Pause, Eye, Image, FolderOpen, Terminal,
+  Circle, AlertCircle, HelpCircle,
 } from 'lucide-react';
+
+// ─── Runtime agent status (fetched from /api/capabilities) ────────────────────
+
+interface AgentStatus {
+  ready: boolean;
+  isStub: boolean;
+  builtIn: boolean;
+  toolCount: number;
+}
+
+type StatusMap = Record<string, AgentStatus>;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -463,7 +475,21 @@ function EdgeLayer({ edges, selectedId }: { edges: GEdge[]; selectedId: string |
 
 // ─── Node card ────────────────────────────────────────────────────────────────
 
-function NodeCard({ node, selected, onClick }: { node: GNode; selected: boolean; onClick: () => void }) {
+function StatusDot({ nodeId, statusMap, agentNodeIds }: { nodeId: string; statusMap: StatusMap; agentNodeIds: Set<string> }) {
+  if (!agentNodeIds.has(nodeId)) return null;
+  const st = statusMap[nodeId];
+  if (!st) return <HelpCircle size={9} style={{ color: '#3a4658', flexShrink: 0 }} title="状态未知" />;
+  if (st.isStub) return <AlertCircle size={9} style={{ color: '#5a6578', flexShrink: 0 }} title="STUB · 占位" />;
+  if (st.ready) {
+    const tt = st.builtIn ? `${st.toolCount} tools · 内置` : `${st.toolCount} tools · 就绪`;
+    return <Circle size={9} style={{ color: '#34d399', flexShrink: 0 }} fill="#34d39930" title={tt} />;
+  }
+  return <Circle size={9} style={{ color: '#ef4444', flexShrink: 0 }} fill="#ef444430" title="未就绪" />;
+}
+
+function NodeCard({ node, selected, onClick, statusMap, agentNodeIds }: {
+  node: GNode; selected: boolean; onClick: () => void; statusMap: StatusMap; agentNodeIds: Set<string>;
+}) {
   const accent = TYPE_ACCENT[node.type];
   const { x, y } = nodePos(node.id);
 
@@ -495,6 +521,7 @@ function NodeCard({ node, selected, onClick }: { node: GNode; selected: boolean;
           color: selected ? '#e2e8f4' : '#c8d5e8',
           lineHeight: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}>{node.label}</span>
+        <StatusDot nodeId={node.id} statusMap={statusMap} agentNodeIds={agentNodeIds} />
       </div>
       <span style={{
         fontFamily: 'Inter, system-ui, sans-serif',
@@ -545,7 +572,42 @@ function LaneGrid() {
 
 export default function AgentGraph() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [statusMap, setStatusMap] = useState<StatusMap>({});
+  const [statusError, setStatusError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Fetch live agent status from /api/capabilities + SSE
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch('/api/capabilities');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const map: StatusMap = {};
+        for (const a of data.agents ?? []) {
+          map[a.agentName] = { ready: a.ready, isStub: a.isStub, builtIn: a.builtIn, toolCount: a.tools?.length ?? 0 };
+        }
+        if (!cancelled) { setStatusMap(map); setStatusError(false); }
+      } catch { if (!cancelled) setStatusError(true); }
+    }
+    load();
+
+    // SSE for live updates
+    const es = new EventSource('/api/capabilities/stream');
+    es.addEventListener('capabilities', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const map: StatusMap = {};
+        for (const a of data.agents ?? []) {
+          map[a.agentName] = { ready: a.ready, isStub: a.isStub, builtIn: a.builtIn, toolCount: a.tools?.length ?? 0 };
+        }
+        if (!cancelled) { setStatusMap(map); setStatusError(false); }
+      } catch {}
+    });
+    es.addEventListener('error', () => { if (!cancelled) setStatusError(true); });
+    return () => { cancelled = true; es.close(); };
+  }, []);
 
   const selected = selectedId ? NODES.find(n => n.id === selectedId) ?? null : null;
 
@@ -590,6 +652,12 @@ export default function AgentGraph() {
             <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, fontWeight: 700, color: '#e2e8f4' }}>Tessel</span>
             <span style={{ color: '#2a3545', fontSize: 13 }}>·</span>
             <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: '#3a5070' }}>agent graph</span>
+            {Object.keys(statusMap).length > 0 && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontFamily: 'JetBrains Mono, monospace', color: statusError ? '#5a6578' : '#34d399' }}>
+                {statusError ? <HelpCircle size={10} /> : <Circle size={10} fill="#34d39930" />}
+                {statusError ? 'offline' : 'live'}
+              </span>
+            )}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
@@ -624,15 +692,20 @@ export default function AgentGraph() {
           >
             <LaneGrid />
             <EdgeLayer edges={EDGES} selectedId={selectedId} />
-            {NODES.map(n => (
-              <div key={n.id} data-node>
-                <NodeCard
-                  node={n}
-                  selected={selectedId === n.id}
-                  onClick={() => handleNodeClick(n.id)}
-                />
-              </div>
-            ))}
+            {(() => {
+              const agentIds = new Set(['slack','web','mcp','vision','imagegen','file','terminal','capabilities','workflow']);
+              return NODES.map(n => (
+                <div key={n.id} data-node>
+                  <NodeCard
+                    node={n}
+                    selected={selectedId === n.id}
+                    onClick={() => handleNodeClick(n.id)}
+                    statusMap={statusMap}
+                    agentNodeIds={agentIds}
+                  />
+                </div>
+              ));
+            })()}
 
             {/* Click hint */}
             {!selectedId && (
@@ -662,3 +735,4 @@ export default function AgentGraph() {
 void ScrollText; void CheckCircle2; void RefreshCw; void Pause;
 void FileCode; void FlaskConical; void ShieldCheck; void GitBranch;
 void ClipboardList; void Database; void ChevronRight;
+void Circle; void AlertCircle; void HelpCircle;

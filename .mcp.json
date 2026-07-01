@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "task-tracker": {
+      "type": "stdio",
+      "command": "/Users/xin/.bun/bin/bun",
+      "args": [
+        "mcp/task-tracker/index.ts"
+      ],
+      "env": {}
+    },
+    "classifier-training": {
+      "type": "stdio",
+      "command": "/Users/xin/.bun/bin/bun",
+      "args": [
+        "mcp/classifier-training/index.ts"
+      ],
+      "env": {}
+    }
+  }
+}

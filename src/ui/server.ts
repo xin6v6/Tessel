@@ -5,15 +5,21 @@ import * as os from "node:os";
 import index from "./index.html";
 import graphPage from "./graph.html";
 import skillsPage from "./skills.html";
+import overviewPage from "./overview.html";
+import chatPage from "./chat.html";
 
 import { buildGraph, type CompiledGraph } from "../graph/index.ts";
 import { invokeOrResume, extractReply, extractRoute } from "../graph/dispatch.ts";
 import { humanMessageWithSpeaker } from "../graph/speaker.ts";
-import { IntegrationRegistry, SlackIntegration } from "../integrations/index.ts";
+import { IntegrationRegistry } from "../integrations/index.ts";
 import { runWithContext, newSessionId, makeUserId } from "../observability/context.ts";
 import { buildSkillContext } from "../skills/context.ts";
 import { readBindings, writeBindings } from "../skills/bindings.ts";
 import { isValidSkillName, type SkillBindings } from "../skills/types.ts";
+import { buildCapabilitiesSnapshot } from "../graph/capabilities-snapshot.ts";
+import { KNOWN_AGENTS, SUB_AGENTS } from "../graph/nodes/supervisor.ts";
+import { recipeOverviews } from "../workflows/recipe-store.ts";
+import type { ToolRegistry } from "../tools/index.ts";
 
 // Serve log-viewer.html as a raw file to avoid Bun bundling it alongside
 // index.html — they would share the same HMR/JSX runtime bundle and conflict.
@@ -237,6 +243,38 @@ export function broadcastLog(entry: LogEntry): void {
   }
 }
 
+// ── Capabilities SSE ──────────────────────────────────────────────────────
+
+const capabilitiesSseClients = new Set<ReadableStreamDefaultController<string>>();
+
+/** Build a current snapshot for SSE broadcast / API. Returns null if not ready. */
+function buildCurrentSnapshot() {
+  if (!chatToolRegistry) return null;
+  return buildCapabilitiesSnapshot({
+    toolRegistry: chatToolRegistry,
+    integrations: chatIntegrations,
+    knownAgents: KNOWN_AGENTS as readonly string[],
+    agentDescriptions: SUB_AGENTS,
+    skills: skillCtx.registry.list(),
+    skillBindings: readBindings(skillCtx.registry.skillsDir()),
+    recipes: recipeOverviews(),
+  });
+}
+
+/** Broadcast capabilities snapshot to all connected SSE clients. */
+export function broadcastCapabilitiesChanged(): void {
+  const snapshot = buildCurrentSnapshot();
+  if (!snapshot) return;
+  const data = `event: capabilities\ndata: ${JSON.stringify(snapshot)}\n\n`;
+  for (const ctrl of capabilitiesSseClients) {
+    try {
+      ctrl.enqueue(data);
+    } catch {
+      capabilitiesSseClients.delete(ctrl);
+    }
+  }
+}
+
 // ── File watcher: tail new lines as they arrive ────────────────────────────
 //
 // Tracks both the main log and the error log for today. Each file has its own
@@ -314,29 +352,22 @@ function getLocalIP(): string {
 
 // ── Chat graph bootstrap ─────────────────────────────────────────────────────
 //
-// UI 进程自建一个 graph 实例(独立于 Slack 主进程)，给 Web 聊天界面用。
-// 复用 buildGraph + dispatch，与 Slack 走同一套 Router/Supervisor/审批逻辑，
-// 只是 store / 内存是这个进程自己的实例。
-//
-// 集成层照常初始化：有 SLACK_BOT_TOKEN 就装 Slack(让 Slack 工具可用)，
-// 没有也不影响 —— Web 聊天的 chat/capabilities 路径不依赖任何集成。
+// UI 进程自建一个 graph 实例，给 Web 聊天界面用。
+// 纯工具开发平台，通过 CLI REPL 或 Web Chat 操作。
+// MCP 工具通过 mcp.json 配置；无需 Slack。
 
 const chatIntegrations = new IntegrationRegistry();
-if (process.env.SLACK_BOT_TOKEN) {
-  // socketMode=false：UI 进程只借用 Slack 的工具(发消息/查频道等)，
-  // 不监听事件(事件由 Slack 主进程处理)，避免两个进程抢同一个 socket。
-  chatIntegrations.add(new SlackIntegration({ socketMode: false }));
-}
-
-let chatGraph: CompiledGraph | null = null;
-
 // skill 上下文 —— 与 chatGraph 共享同一实例。/api/skills* 的 CRUD 操作这个
-// registry,改完调 reload() 让运行时(chat/slack/... 注入)即时生效。
+// registry,改完调 reload() 让运行时即时生效。
 const skillCtx = buildSkillContext();
+
+let chatGraph: ReturnType<typeof buildGraph> | undefined;
+let chatToolRegistry: ToolRegistry | undefined;
 
 async function initChatGraph(): Promise<void> {
   try {
     const toolRegistry = await chatIntegrations.initialize();
+    chatToolRegistry = toolRegistry;
     chatGraph = buildGraph({
       baseURL: process.env.LLM_BASE_URL,
       apiKey:  process.env.LLM_API_KEY,
@@ -346,6 +377,8 @@ async function initChatGraph(): Promise<void> {
       skills: skillCtx,
     });
     console.log("[ui] chat graph ready");
+    // 通知所有 capabilities SSE 客户端：服务已就绪
+    broadcastCapabilitiesChanged();
   } catch (err) {
     console.error("[ui] failed to init chat graph:", err);
   }
@@ -358,7 +391,7 @@ const WEB_THREAD_RE = /^[A-Za-z0-9_-]{1,128}$/;
 //
 // 可绑定的 agent 名 = 主 agent(supervisor) + 工具 agent(KNOWN_AGENTS)。
 // 去掉 capabilities/workflow 这类不走自建 ReAct 注入的节点(它们不消费 skill)。
-const SKILL_BINDABLE_AGENTS = ["supervisor", "slack", "web", "mcp"] as const;
+const SKILL_BINDABLE_AGENTS = ["supervisor", "mcp"] as const;
 
 /** 校验并清洗 bindings:agent 必须在白名单、skill 必须真实存在。返回清洗后的映射。 */
 function sanitizeBindings(input: unknown): { ok: true; value: SkillBindings } | { ok: false; error: string } {
@@ -396,6 +429,9 @@ const server = Bun.serve({
     "/": index,            // Web 聊天主界面
     "/graph": graphPage,   // 架构图(从主界面挪到独立路由)
     "/skills": skillsPage, // skill 管理 + agent 调度矩阵
+    "/chat": chatPage,     // macOS 浮动聊天窗口专用页面（紧凑模式）
+
+        "/overview": overviewPage, // 实时项目功能全景仪表盘
     "/logs": {
       GET(_req: Request): Response {
         return new Response(logViewerHtml, {
@@ -529,6 +565,63 @@ const server = Bun.serve({
       },
     },
 
+    // ── REST: 实时能力快照 ──────────────────────────────
+    //
+    // 返回结构化 JSON：agents（含 tool 列表 + 就绪状态）、integrations（含健
+    // 康状态）、skills（含 agent 绑定）、workflows（含 recipe 概览）。
+    //
+    // 对应 capability-snapshot 的 CapabilitiesSnapshot 完整结构。
+    "/api/capabilities": {
+      GET(_req: Request): Response {
+        const snapshot = buildCurrentSnapshot();
+        if (!snapshot) {
+          return Response.json({ error: "服务尚未就绪，请稍候重试" }, { status: 503 });
+        }
+        return Response.json(snapshot);
+      },
+    },
+
+    // ── REST: 健康检查 ────────────────────────────────────
+    //
+    // 返回整体系统健康状态，供监控/运维使用。
+    //   overall: "healthy" | "degraded" | "unhealthy"
+    //   graph: 图引擎是否就绪
+    //   integrations: 各集成健康状态（来自 IntegrationRegistry.health()）
+    //   config: LLM/Classifier 配置快照（不包含密钥）
+    "/api/health": {
+      GET(_req: Request): Response {
+        const integrationHealth = chatIntegrations.health();
+        const healthyCount = integrationHealth.filter((i) => i.status === "healthy").length;
+        const totalCount = integrationHealth.length;
+
+        let overall: "healthy" | "degraded" | "unhealthy";
+        if (!chatGraph) {
+          overall = "unhealthy";
+        } else if (totalCount > 0 && healthyCount === 0) {
+          overall = "degraded";
+        } else if (totalCount > 0 && healthyCount < totalCount) {
+          overall = "degraded";
+        } else {
+          overall = "healthy";
+        }
+
+        return Response.json({
+          overall,
+          uptime: process.uptime(),
+          graph: {
+            ready: chatGraph !== null,
+          },
+          integrations: integrationHealth,
+          config: {
+            llmBaseURL: process.env.LLM_BASE_URL ?? "(not set)",
+            llmModel: process.env.LLM_MODEL ?? "(not set)",
+            classifierURL: process.env.CLASSIFIER_URL ?? "http://127.0.0.1:9876",
+          },
+          generatedAt: Date.now(),
+        });
+      },
+    },
+
     // ── REST: Skill 管理 ──────────────────────────────────
     //
     // skill 真相源 = skills/ 目录下的 SKILL.md;归属 = skills/_bindings.json。
@@ -556,6 +649,7 @@ const server = Bun.serve({
         if (!description.trim()) return Response.json({ error: "description 不能为空" }, { status: 400 });
         try {
           const skill = skillCtx.registry.create(name, description, content);
+          broadcastCapabilitiesChanged();
           return Response.json({ skill }, { status: 201 });
         } catch (err) {
           return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 409 });
@@ -576,6 +670,7 @@ const server = Bun.serve({
         if (typeof body.body === "string") patch.body = body.body;
         try {
           const skill = skillCtx.registry.update(req.params.name, patch);
+          broadcastCapabilitiesChanged();
           return Response.json({ skill });
         } catch (err) {
           return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 404 });
@@ -592,6 +687,7 @@ const server = Bun.serve({
             if (next.length !== b[agent]!.length) { b[agent] = next; changed = true; }
           }
           if (changed) writeBindings(skillCtx.registry.skillsDir(), b);
+          broadcastCapabilitiesChanged();
           return Response.json({ ok: true });
         } catch (err) {
           return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 404 });
@@ -611,11 +707,12 @@ const server = Bun.serve({
         const sane = sanitizeBindings((body as { bindings?: unknown })?.bindings ?? body);
         if (!sane.ok) return Response.json({ error: sane.error }, { status: 400 });
         writeBindings(skillCtx.registry.skillsDir(), sane.value);
+        broadcastCapabilitiesChanged();
         return Response.json({ ok: true, bindings: sane.value });
       },
     },
 
-    // ── SSE: real-time stream ──────────────────────────────
+    // ── SSE: real-time log stream ──────────────────────────
     "/api/logs/stream": {
       GET(req: Request): Response {
         const today = new Date().toISOString().slice(0, 10);
@@ -640,6 +737,44 @@ const server = Bun.serve({
         // Remove controller when the client disconnects
         req.signal.addEventListener("abort", () => {
           sseClients.delete(ctrl);
+          try { ctrl.close(); } catch {}
+        });
+
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      },
+    },
+
+    // ── SSE: capabilities 实时推送 ───────────────────────
+    //
+    // 与 /api/capabilities 返回相同结构，但通过 SSE 实时推送。
+    // 连接时先发当前快照，之后每当 skills/integrations 变更时自动广播。
+    "/api/capabilities/stream": {
+      GET(req: Request): Response {
+        let ctrl: ReadableStreamDefaultController<string>;
+
+        const stream = new ReadableStream<string>({
+          start(controller) {
+            ctrl = controller;
+            capabilitiesSseClients.add(ctrl);
+            // 发送当前快照作为初始状态
+            const snapshot = buildCurrentSnapshot();
+            if (snapshot) {
+              try {
+                ctrl.enqueue(`event: capabilities\ndata: ${JSON.stringify(snapshot)}\n\n`);
+              } catch {}
+            }
+          },
+        });
+
+        req.signal.addEventListener("abort", () => {
+          capabilitiesSseClients.delete(ctrl);
           try { ctrl.close(); } catch {}
         });
 

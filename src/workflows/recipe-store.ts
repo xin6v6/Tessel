@@ -31,6 +31,29 @@ export function recipeChoices(): { tag: string; description: string }[] {
 }
 
 /**
+ * 导出 recipe 概览（供 capabilities snapshot + /api/capabilities 消费）。
+ * 不暴露完整 prompt 构造逻辑，只给 UI 展示用的元数据。
+ */
+export function recipeOverviews(): Array<{
+  name: string;
+  tag: string;
+  description: string;
+  stages: Array<{ id: string; label: string; mutates: boolean; allowedTools: string[] }>;
+}> {
+  return RECIPES.map((r) => ({
+    name: r.name,
+    tag: r.tag,
+    description: r.description,
+    stages: r.stages.map((s) => ({
+      id: s.id,
+      label: s.label,
+      mutates: s.mutates,
+      allowedTools: s.allowedTools,
+    })),
+  }));
+}
+
+/**
  * 动态生成 Workflow Runner 的路由描述 —— 由已注册 recipe 拼接，
  * 不绑死"开发"。加新 recipe 自动出现在描述里，LLM 路由随之扩展。
  * 没有任何 recipe 时返回一句通用兜底。

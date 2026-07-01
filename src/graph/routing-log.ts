@@ -13,6 +13,8 @@
  */
 
 import { createLogger } from "../observability/logger.ts";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 const logger = createLogger("routing-log");
 
@@ -80,5 +82,39 @@ export async function logRoutingUnknown(text: string, source?: string): Promise<
     });
   } catch (err) {
     logger.warn({ err: String(err) }, "routing-log: write routing_unknown failed");
+  }
+}
+
+// ── Local training data append (for classifier self-training) ──
+
+/**
+ * Resolve the project root by walking up from this module's directory
+ * until we find package.json.
+ */
+function projectRoot(): string {
+  let dir = import.meta.dir;
+  while (!existsSync(join(dir, "package.json")) && dir !== "/") {
+    dir = join(dir, "..");
+  }
+  return dir === "/" ? process.cwd() : dir;
+}
+
+const TRAINING_DATA_FILE = join(projectRoot(), "scripts", "train-router", "data", "data.jsonl");
+
+/**
+ * Append a training sample (text + label) to the local JSONL dataset.
+ * Used by the supervisor confirmation flow to capture corrected classifications.
+ * Writes are infrequent and small; appendFileSync is safe in Bun's single-threaded model.
+ */
+export function appendTrainingSample(text: string, label: string): void {
+  if (!text.trim() || !label.trim()) return;
+  try {
+    const dir = dirname(TRAINING_DATA_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify({ text: text.slice(0, 500), label }) + "\n";
+    appendFileSync(TRAINING_DATA_FILE, line, "utf-8");
+    logger.info({ snippet: text.slice(0, 80), label }, "training sample appended");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "routing-log: appendTrainingSample failed");
   }
 }

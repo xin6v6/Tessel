@@ -58,7 +58,7 @@ cmd_status() {
   if is_running; then
     local pid; pid=$(get_pid)
     ok "$APP_NAME 正在运行 (PID: $pid)"
-    echo -e "  daemon 日志: $DAEMON_LOG"
+    echo -e "  daemon 日志: ${DAEMON_LOG}"
     echo -e "  应用日志:   $LOG_DIR/$(date +%Y-%m-%d).log"
     if command -v ps &>/dev/null; then
       echo -e "  $(ps -p "$pid" -o pid=,etime=,rss= 2>/dev/null | awk '{printf "运行时长: %s  内存: %sMB", $2, int($3/1024)}')"
@@ -201,8 +201,8 @@ cmd_daemon() {
   check_deps
 
   log "以后台模式启动 $APP_NAME..."
-  log "daemon 日志：$DAEMON_LOG（启动/重试消息）"
-  log "应用日志：$LOG_DIR/YYYY-MM-DD.log（结构化 JSON）"
+  log "daemon 日志：${DAEMON_LOG}（启动/重试消息）"
+  log "应用日志：${LOG_DIR}/YYYY-MM-DD.log（结构化 JSON）"
 
   # 用 nohup + subshell 运行重试循环
   # daemon 自身的 stdout（启动/重试消息）写到独立的 daemon.log，
@@ -270,23 +270,26 @@ if [[ -f "$PROJECT_DIR/.env" ]]; then
   set +a
 fi
 
-case "${1:-}" in
-  --daemon|-d) cmd_daemon ;;
-  --stop|-s)   cmd_stop ;;
-  --status)    cmd_status ;;
-  --logs|-l)   cmd_logs ;;
-  --help|-h)
-    echo "用法："
-    echo "  $0             前台运行（带自动重试）"
-    echo "  $0 --daemon    后台运行"
-    echo "  $0 --stop      停止后台进程"
-    echo "  $0 --status    查看运行状态"
-    echo "  $0 --logs      实时查看日志"
-    ;;
-  "")          cmd_start ;;
-  *)
-    err "未知选项：$1"
-    echo "运行 $0 --help 查看帮助"
-    exit 1
-    ;;
-esac
+# 仅在直接执行时调度子命令（sourcing 时跳过，避免 nohup 内部重复执行）
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    --daemon|-d) cmd_daemon ;;
+    --stop|-s)   cmd_stop ;;
+    --status)    cmd_status ;;
+    --logs|-l)   cmd_logs ;;
+    --help|-h)
+      echo "用法："
+      echo "  $0             前台运行（带自动重试）"
+      echo "  $0 --daemon    后台运行"
+      echo "  $0 --stop      停止后台进程"
+      echo "  $0 --status    查看运行状态"
+      echo "  $0 --logs      实时查看日志"
+      ;;
+    "")          cmd_start ;;
+    *)
+      err "未知选项：$1"
+      echo "运行 $0 --help 查看帮助"
+      exit 1
+      ;;
+  esac
+fi

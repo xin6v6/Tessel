@@ -9,13 +9,9 @@ import type { Message } from "../llm/messages.ts";
  * 新增 Agent 时在这里添加对应名称，并在 graph/index.ts 注册节点。
  */
 export type SubAgentName =
-  | "slack"            // Slack ReAct Agent
-  | "web"              // Web Search ReAct Agent（Brave Search）
-  | "mcp"              // MCP Tools ReAct Agent（待接入）
-  | "vision"           // Vision Agent：识别图片内容（Slack 附件 / 公开 URL）
-  | "imagegen"         // Image Generation Agent：根据文字描述生成图片
+  | "mcp"              // MCP Tools ReAct Agent：连接外部工具服务器
   | "file"             // File Agent：读取、编辑、写入本地文件
-  | "terminal"         // Terminal Agent：执行只读终端命令（查看类）
+  | "terminal"         // Terminal Agent：执行终端命令
   | "capabilities"     // 自省节点：列出当前真实可用的能力（tools + integrations）
   | "workflow"         // 通用多阶段工作流调度器（按 recipe 跑 stage）
   | "workflow_approval"// 审批节点：只做 interrupt 等人工确认（与 workflow 拆开，
@@ -33,19 +29,11 @@ export type SubAgentName =
  *   workflow     多阶段任务（含审批）→ supervisor 直奔 workflow runner
  *   capabilities 用户问"你能做什么 / 有什么能力" → supervisor 直奔 capabilities 节点
  *   unknown      router 未给出结论（被绕过 / 出错）→ supervisor 回退自带的意图分类
- *
- * 把"分类"从 supervisor 拆到前置 router：router 可用更快的小模型 +
- * 零成本规则快路径，supervisor 只负责"读结论 + 整合子 agent 输出"。
- * 加 `unknown` 兜底 = router 即便失效，supervisor 仍能独立工作。
  */
 export type RouteIntent =
   | "chat"         // 直接对话，无需工具
-  | "slack"        // Slack 操作
   | "file"         // 文件读写编辑
-  | "terminal"     // 终端命令执行（只读查看类）
-  | "vision"       // 图片识别
-  | "imagegen"     // 图片生成
-  | "web"          // 互联网搜索
+  | "terminal"     // 终端命令执行
   | "mcp"          // MCP 工具调用
   | "workflow"     // 多阶段工作流
   | "capabilities" // 自省：列出能力
@@ -148,6 +136,16 @@ export interface GraphState {
    *   "unknown_lookup" — unknown fallback 触发，compose 阶段用快照选 agent 而非渲染给用户
    */
   capabilitiesReason: "user_query" | "unknown_lookup" | "";
+  /**
+   * Pending route confirmation. When set, the next user message will be processed
+   * as a response to the confirmation prompt (not normal routing). Contains the
+   * agent name the LLM proposed and the original user query for training data.
+   * Cleared (set to null) once the confirmation is resolved.
+   */
+  routeConfirmation: {
+    proposedAgent: string;
+    originalQuery: string;
+  } | null;
 }
 
 /** 兼容别名：下游大量 import GraphStateType。 */
@@ -168,6 +166,7 @@ export function defaultState(): GraphState {
     pendingPlan: [],
     planContext: "",
     capabilitiesReason: "",
+    routeConfirmation: null,
   };
 }
 
@@ -197,5 +196,8 @@ export function mergeState(prev: GraphState, partial: Partial<GraphState>): Grap
     pendingPlan: partial.pendingPlan ?? prev.pendingPlan,
     planContext:  partial.planContext  ?? prev.planContext,
     capabilitiesReason: partial.capabilitiesReason ?? prev.capabilitiesReason,
+    routeConfirmation: "routeConfirmation" in partial
+      ? (partial.routeConfirmation ?? null)
+      : prev.routeConfirmation,
   };
 }

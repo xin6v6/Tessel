@@ -78,4 +78,37 @@ describe("IntegrationRegistry", () => {
     expect(a.destroy).toHaveBeenCalledTimes(1);
     expect(b.destroy).toHaveBeenCalledTimes(1);
   });
+
+  it("health() reports healthy for successful integrations", async () => {
+    const registry = new IntegrationRegistry();
+    registry.add(makeStub("good"));
+    await registry.initialize();
+
+    const health = registry.health();
+    expect(health.length).toBe(1);
+    expect(health[0]!.status).toBe("healthy");
+    expect(health[0]!.toolCount).toBe(1);
+    expect(health[0]!.error).toBeUndefined();
+  });
+
+  it("health() reports unhealthy for failed integrations with error message", async () => {
+    const registry = new IntegrationRegistry();
+    registry.add(makeStub("good"));
+    registry.add(makeStub("bad", true));
+    await registry.initialize();
+
+    const health = registry.health();
+    const bad = health.find((h) => h.id === "bad")!;
+    expect(bad.status).toBe("unhealthy");
+    expect(bad.toolCount).toBe(0);
+    expect(bad.error).toContain("init failed");
+  });
+
+  it("health() reports pending for integrations not yet initialized", () => {
+    const registry = new IntegrationRegistry();
+    registry.add(makeStub("lazy"));
+
+    const health = registry.health();
+    expect(health[0]!.status).toBe("pending");
+  });
 });

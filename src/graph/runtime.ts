@@ -27,7 +27,7 @@ export const END = "__end__" as const;
 
 /** run loop 可调度的节点名（不含 __end__）。 */
 export type NodeName =
-  | "router" | "supervisor" | "slack" | "web" | "mcp" | "vision" | "imagegen" | "file" | "terminal"
+  | "router" | "supervisor" | "mcp" | "file" | "terminal"
   | "capabilities" | "workflow" | "workflow_approval" | "workflow_wait" | "workflow_child" | "workflow_children_join";
 
 /** 中断信息（透出给 main，形如 __interrupt__[].value）。 */
@@ -59,11 +59,7 @@ function routeFrom(node: NodeName, state: GraphState): NodeName | typeof END {
   switch (node) {
     case "router":
       return "supervisor";
-    case "slack":
-    case "web":
     case "mcp":
-    case "vision":
-    case "imagegen":
     case "file":
     case "terminal":
     case "capabilities":

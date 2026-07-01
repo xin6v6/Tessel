@@ -5,11 +5,7 @@ import { buildSlotManager } from "./slot-manager.ts";
 import { buildSupervisorNode, KNOWN_AGENTS, SUB_AGENTS } from "./nodes/supervisor.ts";
 import { buildRouterNode } from "./nodes/router.ts";
 import { ClassifierClient } from "../router-classifier/client.ts";
-import { buildSlackAgentNode } from "./nodes/slack.ts";
-import { buildWebAgentNode } from "./nodes/web.ts";
 import { buildMcpAgentNode } from "./nodes/mcp.ts";
-import { buildVisionAgentNode, buildVisionClient } from "./nodes/vision.ts";
-import { buildImageGenNode, buildImageGenClient } from "./nodes/imagegen.ts";
 import { buildFileAgentNode } from "./nodes/file.ts";
 import { buildTerminalAgentNode } from "./nodes/terminal.ts";
 import { buildCapabilitiesNode } from "./nodes/capabilities.ts";
@@ -47,8 +43,6 @@ export function buildGraph(params: {
     maxRetries: 1,
   });
 
-  const visionClient = buildVisionClient({ apiKey, baseURL, model: mainModel });
-  const imageGenClient = buildImageGenClient({ apiKey, baseURL });
   const classifier = new ClassifierClient();
   const skills = params.skills ?? buildSkillContext();
   const store = params.store ?? buildGraphStore();
@@ -63,11 +57,7 @@ export function buildGraph(params: {
 
   const routerNode        = buildRouterNode({ classifier });
   const supervisorNode    = buildSupervisorNode(mainClient, params.toolRegistry, params.integrations, skills);
-  const slackAgentNode    = buildSlackAgentNode(mainClient, params.toolRegistry, skills);
-  const webAgentNode      = buildWebAgentNode(mainClient, params.toolRegistry, skills);
   const mcpAgentNode      = buildMcpAgentNode(mainClient, params.toolRegistry, skills);
-  const visionAgentNode   = buildVisionAgentNode(visionClient);
-  const imageGenNode      = buildImageGenNode(imageGenClient);
   const fileAgentNode     = buildFileAgentNode(mainClient, skills);
   const terminalAgentNode = buildTerminalAgentNode();
   const capabilitiesNode  = buildCapabilitiesNode(
@@ -95,11 +85,7 @@ export function buildGraph(params: {
   const nodes: NodeMap = {
     router:                 routerNode,
     supervisor:             supervisorNode,
-    slack:                  slackAgentNode,
-    web:                    webAgentNode,
     mcp:                    mcpAgentNode,
-    vision:                 visionAgentNode,
-    imagegen:               imageGenNode,
     file:                   fileAgentNode,
     terminal:               terminalAgentNode,
     capabilities:           capabilitiesNode,

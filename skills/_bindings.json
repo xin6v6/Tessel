@@ -2,7 +2,7 @@
   "supervisor": [
     "code-review"
   ],
-  "slack": [
+  "mcp": [
     "code-review"
   ]
 }

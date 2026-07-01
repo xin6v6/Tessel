@@ -26,6 +26,7 @@ function stateOf(text: string) {
     pendingPlan: [],
     planContext: "",
     capabilitiesReason: "" as const,
+    routeConfirmation: null,
   };
 }
 
@@ -42,10 +43,10 @@ beforeEach(() => {
 });
 
 describe("router — single-step classifier result", () => {
-  it("classifier returns slack plan → intent is slack", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["slack"], confidence: 0.95 }) });
-    const out  = await runWithContext(allowedCtx, () => node(stateOf("给 #general 发条消息")));
-    expect(out.intent).toBe("slack");
+  it("classifier returns file plan → intent is file", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["file"], confidence: 0.95 }) });
+    const out  = await runWithContext(allowedCtx, () => node(stateOf("读取这个文件")));
+    expect(out.intent).toBe("file");
     expect(out.pendingPlan).toEqual([]);
   });
 
@@ -69,18 +70,18 @@ describe("router — single-step classifier result", () => {
 });
 
 describe("router — multi-step plan", () => {
-  it("vision→file→slack plan → candidateAgents set (unordered), pendingPlan empty, intent unknown", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file", "slack"], confidence: 0.92 }) });
-    const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片做成excel发给我")));
+  it("file→terminal→mcp plan → candidateAgents set (unordered), pendingPlan empty, intent unknown", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["file", "terminal", "mcp"], confidence: 0.92 }) });
+    const out  = await runWithContext(allowedCtx, () => node(stateOf("读文件内容然后跑命令再用MCP推送")));
     expect(out.intent).toBe("unknown");
-    expect(out.candidateAgents).toEqual(["vision", "file", "slack"]);
+    expect(out.candidateAgents).toEqual(["file", "terminal", "mcp"]);
     expect(out.pendingPlan).toEqual([]);
   });
 
-  it("vision→file plan → candidateAgents set, pendingPlan empty", async () => {
-    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["vision", "file"], confidence: 0.89 }) });
-    const out  = await runWithContext(allowedCtx, () => node(stateOf("识别图片然后存成文件")));
-    expect(out.candidateAgents).toEqual(["vision", "file"]);
+  it("file→terminal plan → candidateAgents set, pendingPlan empty", async () => {
+    const node = buildRouterNode({ classifier: fakeClassifier({ plan: ["file", "terminal"], confidence: 0.89 }) });
+    const out  = await runWithContext(allowedCtx, () => node(stateOf("读取配置然后执行命令")));
+    expect(out.candidateAgents).toEqual(["file", "terminal"]);
     expect(out.pendingPlan).toEqual([]);
   });
 });

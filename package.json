@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "tessel": "tessel"
+  },
   "scripts": {
     "start": "bun run src/main.ts",
     "dev": "bun --watch src/main.ts",
@@ -20,6 +23,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "ui": "bun --hot src/ui/server.ts",
+    "tessel": "bun run src/cli/tessel.ts",
+    "task-tracker": "bun run mcp/task-tracker/web-standalone.ts",
     "contacts": "bun run scripts/contacts.ts",
     "train": "cd scripts/train-router && python3 train.py && pkill -f serve.py; nohup python3 serve.py > /tmp/classifier.log 2>&1 &",
     "mcp:check": "bun run scripts/mcp-check.ts",

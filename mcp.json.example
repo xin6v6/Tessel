@@ -1,12 +1,12 @@
 {
-  "servers": {
+  "mcpServers": {
     "filesystem": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/your-name/Documents"]
     },
     "github": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
@@ -14,12 +14,12 @@
       }
     },
     "postgres": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@localhost/dbname"]
     },
     "notion": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-notion"],
       "env": {
@@ -27,7 +27,7 @@
       }
     },
     "jira": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "uvx",
       "args": ["mcp-atlassian"],
       "env": {
@@ -37,7 +37,7 @@
       }
     },
     "my-remote-server": {
-      "transport": "sse",
+      "type": "sse",
       "url": "https://my-mcp-server.example.com/sse"
     }
   }

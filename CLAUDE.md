@@ -10,15 +10,36 @@ The agent runtime is **fully self-built**: the graph engine, message types, LLM 
 
 ## Commands
 
+### Unified CLI (`./tessel`)
+
+The `tessel` command (shell wrapper → `src/cli/tessel.ts`) is the **single entry point** for all service management:
+
 ```bash
-bun run dev          # start REPL with hot reload (--watch)
-bun run start        # start REPL
-bun test             # run all tests (Bun's built-in runner)
-bun test tests/tools.test.ts   # run a single test file
+# Service management
+./tessel ui start|stop|status|restart   # UI server (port 3456)
+./tessel classifier start|stop|status   # ONNX inference (port 9876)
+./tessel task start|stop|status         # Task Tracker web UI (port 3457)
+./tessel daemon start|stop|status|logs  # Production daemon
+./tessel agent start|dev                # Agent REPL (foreground)
+
+# Development
+./tessel train run|status               # Train classifier model
+./tessel mcp list|check                 # MCP server management
+./tessel test [args...]                 # Run tests
+./tessel lint                           # Typecheck
+./tessel status                         # Show all service statuses
+```
+
+### Legacy npm scripts (still available)
+
+```bash
+bun run dev          # start REPL with hot reload (--watch) — equivalent to ./tessel agent dev
+bun run start        # start REPL — equivalent to ./tessel agent start
+bun test             # run all tests — equivalent to ./tessel test
 bun run test:watch   # tests in watch mode
 bun run typecheck    # tsc --noEmit (bun run lint is an alias)
 bun run acceptance   # end-to-end acceptance (DMs the bot as you)
-bun run ui           # architecture dashboard (localhost:3456)
+bun run ui           # UI dashboard — equivalent to ./tessel ui start
 ```
 
 Copy `.env.example` → `.env` and fill in keys before running (`OPENAI_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL`, plus `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` for Slack). Bun loads `.env` automatically — no dotenv. The `.env.example` has detailed inline notes for router/workflow/acceptance vars; read it before adding config.
@@ -68,6 +89,8 @@ src/
   types/index.ts        — shared types (ToolDefinition, ToolCall, ToolResult, …)
   observability/        — logger, trace writer, request context
   memory/index.ts       — MemoryStore (in-memory KV)
+  cli/
+    tessel.ts           — unified service manager CLI (./tessel <cmd> <action>)
   ui/server.ts          — React dashboard (includes /skills CRUD + agent×skill binding matrix)
 skills/                 — skill definitions (true source); each subdirectory has a SKILL.md
   _bindings.json        — agent ↔ skill bindings (supervisor / slack / web / mcp → [skill names])
@@ -110,6 +133,30 @@ One row per `thread_id` in a `runs` table holding `{ state, pendingNode, interru
 
 Each agent (supervisor / slack / web / mcp) can be bound to a set of skills via `skills/_bindings.json`. A skill is a `SKILL.md` file (frontmatter `name` + `description` + body). Injection is selective: the one-line `description` of every bound skill is always prepended to the agent's system prompt as a menu (cheap); the full body is injected only when the user input matches (strategy A: keyword/2-gram rules; costs zero). Unmatched skills add zero tokens to normal conversation. The `skills/` directory is the single source of truth — `SkillRegistry` in `src/skills/registry.ts` hot-reloads it; the UI at `/skills` provides CRUD and the agent×skill binding matrix. Workflow stages use skills unconditionally via `StageDef.skills` (not via bindings).
 
+**Capabilities snapshot & real-time overview** (`src/graph/capabilities-snapshot.ts`, `src/ui/server.ts`)
+
+`CapabilitiesSnapshot` 是运行时唯一可信的能力数据源，统一来自四个注册中心：
+- `ToolRegistry` — 所有已注册工具（按 agent 前缀分组）
+- `IntegrationRegistry` — 所有 integration 的健康状态（含错误信息、工具数）
+- `SkillRegistry` + `_bindings.json` — 已加载 skill 及其 agent 绑定
+- Recipe store (`RECIPES`) — 已注册 workflow recipe 概览
+
+HTTP API 端点（均在 `src/ui/server.ts`）：
+- `GET /api/capabilities` — 结构化 JSON 快照（agents、integrations、skills、workflows）
+- `GET /api/health` — 健康检查：overall 状态、integrations 健康、LLM/Classifier 配置
+- `GET /api/capabilities/stream` — SSE 实时推送：skills/integrations 变更时自动广播
+
+前端页面：
+- `/overview` — 实时项目功能全景仪表盘（`src/ui/Overview.tsx`），展示 agent 就绪矩阵、
+  integration 健康表、skills 绑定视图、workflow recipe 概览；通过 SSE 实时更新
+- `/graph` — AgentGraph 已动态化：每个 agent 节点通过 `/api/capabilities` + SSE 获取
+  实时状态，显示绿/红/灰色圆点（就绪/未启用/STUB）
+
+扩展快照时的改动点：
+1. 新增字段 → `capabilities-snapshot.ts` 的接口 + `buildCapabilitiesSnapshot()` 参数
+2. 新增 API → `server.ts` 路由 + `broadcastCapabilitiesChanged()` 调用
+3. 新数据源 → 对应的 registry/ store 导出概览函数（参考 `recipeOverviews()`）
+
 ## Conventions for changing this codebase
 
 **Adding a specialist agent**
@@ -138,3 +185,29 @@ Each agent (supervisor / slack / web / mcp) can be bound to a set of skills via 
 - All imports use `.ts` extensions (not `.js`) — correct for Bun's resolver.
 - Use `bun:sqlite` for SQLite, `Bun.file` for file I/O, `Bun.serve()` for HTTP/WS, `Bun.$\`cmd\`` for shell.
 - `bun test` (Bun's built-in runner) is used for tests; imports come from `"bun:test"`. (`vitest` is a dev dependency but the `test` script runs `bun test`.)
+
+## Self-dev：让 Tessel 自己开发自己
+
+Tessel 可以通过 coding workflow 修改自身代码。关键机制：
+
+**会话持久化**：SqliteGraphStore 按 thread_id 保存 state + pendingNode + interrupt。进程重启后，`main.ts` 启动时扫描 store 中 `findPendingSessions()` 的结果，若有挂起的 thread，打印提示"检测到因重启中断的会话：threadId=xxx，输入任意内容恢复"。
+
+**重启流程**：
+1. 用 `bun run start`（不用 `--watch`）进行 self-dev——避免编码中途 file agent 写文件触发 watch 重启
+2. coding recipe 的 finalize 检测 `cwd` 是否指向 Tessel 自身仓库（检查 `src/graph/index.ts` + `src/main.ts` 是否存在），若是则在返回消息中追加重启提示
+3. 用户手动 `Ctrl+C` → `bun run dev` 重新启动
+4. 启动时看到挂起会话提示，回车恢复
+
+**Agent 自知**：Agent 通过 `/api/capabilities` 实时获取项目能力全景（哪些 agent 存在、有哪些工具、integration 状态等），无需静态 skill。结构知识和开发规范参考 CLAUDE.md。
+
+**Self-dev 场景示例**：
+```
+CLI > 给 Tessel 加一个爬虫 agent，输出 src/graph/nodes/crawler.ts
+  → router → workflow (coding recipe)
+  → 需求分析 → 编码（产出 crawler.ts + 注册到 index.ts）
+  → 测试（bun test）→ 审核（自审 diff）→ commit + push
+  → finalize: "🔄 检测到 self-dev。请重启以加载新代码：Ctrl+C → bun run dev"
+重启后
+  > [检测到挂起会话 threadId=cli:12345:xxx]
+  > 输入任意键恢复
+```

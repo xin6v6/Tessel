@@ -12,7 +12,7 @@ function memStore() {
 function nodeMap(overrides: Partial<NodeMap>): NodeMap {
   const noop = async (): Promise<NodeOutput> => ({});
   return {
-    router: noop, supervisor: noop, slack: noop, web: noop, mcp: noop, vision: noop, imagegen: noop, file: noop, terminal: noop,
+    router: noop, supervisor: noop, mcp: noop, file: noop, terminal: noop,
     capabilities: noop, workflow: noop, workflow_approval: noop, workflow_wait: noop, workflow_child: noop, workflow_children_join: noop,
     ...overrides,
   };
@@ -21,13 +21,13 @@ function nodeMap(overrides: Partial<NodeMap>): NodeMap {
 describe("mergeState（reducer 语义）", () => {
   it("messages = append；next/intent = replace", () => {
     const s0 = defaultState();
-    const s1 = mergeState(s0, { messages: [humanMsg("a")], next: "slack", intent: "slack" });
+    const s1 = mergeState(s0, { messages: [humanMsg("a")], next: "mcp", intent: "mcp" });
     expect(s1.messages.map((m) => m.content)).toEqual(["a"]);
-    expect(s1.next).toBe("slack");
-    expect(s1.intent).toBe("slack");
+    expect(s1.next).toBe("mcp");
+    expect(s1.intent).toBe("mcp");
     const s2 = mergeState(s1, { messages: [aiMsg("b")] });
     expect(s2.messages.map((m) => m.content)).toEqual(["a", "b"]); // append
-    expect(s2.next).toBe("slack"); // partial 没传 next → 保持
+    expect(s2.next).toBe("mcp"); // partial 没传 next → 保持
   });
 
   it("subAgentResult 可被空串清空；workflowProgress 可被 null 清空（区分未传）", () => {
@@ -47,13 +47,13 @@ describe("run loop 路由", () => {
     const visited: string[] = [];
     const nodes = nodeMap({
       router:     async () => { visited.push("router"); return {}; },
-      supervisor: async (s) => { visited.push("supervisor"); return s.subAgentResult ? { next: "__end__" } : { next: "slack" }; },
-      slack:      async () => { visited.push("slack"); return { subAgentResult: "done" }; },
+      supervisor: async (s) => { visited.push("supervisor"); return s.subAgentResult ? { next: "__end__" } : { next: "file" }; },
+      file:       async () => { visited.push("file"); return { subAgentResult: "done" }; },
     });
     const g = compileGraph(nodes, memStore());
     const r = await g.invoke({ messages: [humanMsg("hi")] }, { threadId: "t1" });
-    // router → supervisor(→slack) → slack → supervisor(→end)
-    expect(visited).toEqual(["router", "supervisor", "slack", "supervisor"]);
+    // router → supervisor(→file) → file → supervisor(→end)
+    expect(visited).toEqual(["router", "supervisor", "file", "supervisor"]);
     expect(r.subAgentResult).toBe("done");
   });
 

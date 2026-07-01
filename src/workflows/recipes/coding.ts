@@ -97,12 +97,32 @@ export const codingRecipe: Recipe = {
     if (!push.ok) {
       return { ok: false, message: `代码已通过审核，但提交推送失败：${push.error}` };
     }
+
+    // 检测是否在开发 Tessel 自身（self-dev）。
+    // Tessel 项目根的特征：存在 src/graph/index.ts + src/main.ts。
+    const isTesselSelf = (() => {
+      try {
+        const fs = require("node:fs");
+        const path = require("node:path");
+        return fs.existsSync(path.join(cwd, "src/graph/index.ts")) &&
+               fs.existsSync(path.join(cwd, "src/main.ts"));
+      } catch { return false; }
+    })();
+
+    const restartHint = isTesselSelf
+      ? `\n\n🔄 检测到本次开发修改了 Tessel 自身。\n` +
+        `新代码已提交推送。请重启进程以加载新代码：\n` +
+        `  Ctrl+C → bun run dev\n` +
+        `重启后会话历史会自动恢复（SQLite 持久化）。`
+      : "";
+
     return {
       ok: true,
       message:
         `✅ 开发任务完成并已推送。\n分支：\`${push.branch}\`` +
         (push.remoteUrl ? `\n${push.remoteUrl}` : "") +
-        (snapshot ? `\n\n${snapshot.slice(0, 800)}` : ""),
+        (snapshot ? `\n\n${snapshot.slice(0, 800)}` : "") +
+        restartHint,
     };
   },
 
