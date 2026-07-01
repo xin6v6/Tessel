@@ -198,7 +198,8 @@ def train(data_path: Path, model_dir: Path, epochs: int, batch_size: int,
             best_preds.extend(preds)
             best_true.extend(batch_labels.tolist())
 
-    print(classification_report(best_true, best_preds, target_names=le.classes_, zero_division=0))
+    all_labels = list(range(len(le.classes_)))
+    print(classification_report(best_true, best_preds, target_names=le.classes_, labels=all_labels, zero_division=0))
 
     # ── Export ───────────────────────────────────────────────────────────────────
     model_dir.mkdir(parents=True, exist_ok=True)
