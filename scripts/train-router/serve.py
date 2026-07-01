@@ -103,10 +103,12 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port",      type=int, default=9876)
+    parser.add_argument("--host",      default="127.0.0.1",
+                        help="Bind address. Use 0.0.0.0 to allow LAN access.")
     parser.add_argument("--model-dir", default=str(SCRIPT_DIR / "model"))
     args = parser.parse_args()
 
     load_model(Path(args.model_dir))
-    server = HTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"Classifier listening on http://127.0.0.1:{args.port}")
+    server = HTTPServer((args.host, args.port), Handler)
+    print(f"Classifier listening on http://{args.host}:{args.port}")
     server.serve_forever()

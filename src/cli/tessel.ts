@@ -61,7 +61,11 @@ const SERVICES: Record<string, ServiceDef> = {
     port: 9876,
     pidFile: path.join(RUN_DIR, "classifier.pid"),
     logFile: path.join(LOG_DIR, "classifier.log"),
-    cmd: ["python3", "scripts/train-router/serve.py", "--port", "9876"],
+    cmd: [
+      "python3", "scripts/train-router/serve.py",
+      "--port", "9876",
+      "--host", process.env.CLASSIFIER_HOST ?? "127.0.0.1",
+    ],
     desc: "ONNX intent classifier inference (port 9876)",
   },
   task: {
