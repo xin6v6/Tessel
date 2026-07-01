@@ -441,7 +441,8 @@ export function buildSupervisorNode(
 1. 只能从清单中选择，不能选 [STUB · 不要选] 标记的 agent。
 2. 如果清单中没有任何 agent 能处理该请求，将 agent 字段返回空字符串 ""。
 3. agent 字段只填 agent 名称（如 "slack"、"file"），不要加其他内容。
-4. file agent 用于本地文件/仓库的读写操作；mcp agent 用于通过 API 操作远程服务（Bitbucket、Jira 等）。${repoContext}`
+4. file agent 用于本地文件/仓库的读写操作；mcp agent 用于通过 API 操作远程服务（Bitbucket、Jira 等）。
+5. 用户询问「你有什么能力 / 你有哪些功能 / 你能做什么 / 列一下你的工具」等自我能力相关问题时，选 capabilities agent——即使清单本身已包含能力信息，也必须选 capabilities，不能返回空。${repoContext}`
             ),
             humanMsg(`用户请求：${inputSnippet || "（无文字内容）"}\n\n可用 agent 清单：\n${snapshot}`),
           ],
