@@ -50,3 +50,6 @@ data/
 scripts/train-router/
 !scripts/train-router/serve.py
 !scripts/train-router/requirements.serve.txt
+
+# desktop app — 本地构建产物和资源，不上传
+desktop/
